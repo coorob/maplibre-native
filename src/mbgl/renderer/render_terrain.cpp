@@ -451,15 +451,18 @@ std::unique_ptr<gfx::Drawable> RenderTerrain::createDrawableForTile(gfx::Context
         return nullptr;
     }
 
-    // Configure builder - terrain is 3D and writes depth
-    // NOTE: Using Translucent pass because Opaque pass renders in REVERSE order (high index = back)
-    // TEMP: Disable depth testing to render on top of everything
+    // Configure builder — terrain is an opaque 3D mesh that occludes itself.
+    // The Phase-4 matrix Z-scale fix puts elevation into clip-space depth at
+    // the same scale as X/Y world-pixels, so the depth buffer can resolve
+    // mountains-in-front vs mountains-behind correctly. setIs3D bypasses the
+    // 2D sublayer depth-offset hack that LayerTweaker applies for stacked 2D
+    // layers — we want the actual perspective depth.
     builder->setShader(terrainShader);
-    builder->setRenderPass(RenderPass::Translucent);  // Translucent pass renders in forward order (high index = front)
-    builder->setDepthType(gfx::DepthMaskType::ReadOnly);  // Don't write depth
+    builder->setRenderPass(RenderPass::Opaque);
+    builder->setDepthType(gfx::DepthMaskType::ReadWrite);
     builder->setColorMode(gfx::ColorMode::unblended());
-    builder->setEnableDepth(false);  // Disable depth testing
-    builder->setIs3D(false);  // Treat as 2D for now
+    builder->setEnableDepth(true);
+    builder->setIs3D(true);
 
     // Set vertex data - copy vertices to raw buffer
     std::vector<uint8_t> vertexData(terrainMesh.vertices.size() * sizeof(int16_t));
