@@ -112,6 +112,23 @@ public:
     const Immutable<style::Terrain::Impl>& getImpl() const { return impl; }
 
     /**
+     * @brief Look up the per-tile drape RenderTarget for `tileID`.
+     *
+     * Returns nullptr if terrain isn't ensuring this tile has a target
+     * yet (e.g., the tile isn't in the current DEM source's visible set).
+     * Phase 2 calls this from each drapeable layer's `update()` to know
+     * where to add its drawables — the returned target's layer-group is
+     * the destination for that tile's portion of that layer's drawables.
+     *
+     * Phase 1/3 only uses this internally to bind the target's texture
+     * into the terrain drawable. Once Phase 2 exposes this to the
+     * orchestrator + per-layer code, this signature is the public API.
+     */
+    TerrainDrapeTargetPtr getDrapeTarget(const OverscaledTileID& tileID) const {
+        return drapeCache.get(tileID);
+    }
+
+    /**
      * @brief Get the terrain mesh for a specific tile
      *
      * Returns a cached mesh or generates a new one. The mesh is a regular grid
