@@ -550,3 +550,27 @@ errors on the type mismatch. Dropped the dead clause.
   topo style's actual background colour (#F4EAD0 beige) instead of
   the debug forest-green clear. **First confirmed working drape
   pass on MapLibre Native iOS.**
+- Diffuse lighting added to terrain fragment shader (commit
+  `a341c6a`). The fragment now reconstructs a screen-space surface
+  normal from `dfdx`/`dfdy` of the elevation varying and applies
+  Lambertian shading (ambient 0.55, directional 0.45). Intent: with
+  the drape currently filled by a flat-colour background layer, the
+  3D extrusion would still be visible via shading variation. Build
+  passes; mesh draws (10 drawables, pass=2 translucent, "drew 10"
+  confirmed in logs); but on-screen result is uniform beige with no
+  visible mountain shape at Kebnekaise (pitch 55°, 15km distance).
+  **Diagnosis for next session:** the elevation gradient in screen
+  space is effectively zero because `parameters.matrixForTile(tileID)`
+  in `TerrainLayerTweaker` returns a 2D tile-projection matrix whose
+  Z column has near-zero scale. The vertex shader's
+  `drawable.matrix * float4(pos.x, pos.y, elevation, 1.0)` therefore
+  doesn't displace Z meaningfully — the mesh stays flat, dfdx/dfdy
+  of `in.elevation` are uniform, lighting is uniform. **Phase 4
+  prerequisite:** swap to a 3D-projection matrix (e.g. derived like
+  fill-extrusion does, with proper meters-per-tile-unit scale on
+  the Z column). Without that, no drape content variation and no
+  lighting trick can reveal the 3D — the geometry simply isn't 3D
+  in clip space. Until then the architectural pipeline is end-to-end
+  correct (DEM upload → mesh drawables → drape route → texture
+  binding → fragment sampling → lighting) but the visible 3D effect
+  awaits a proper projection matrix.
