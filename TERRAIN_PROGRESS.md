@@ -551,26 +551,26 @@ errors on the type mismatch. Dropped the dead clause.
   the debug forest-green clear. **First confirmed working drape
   pass on MapLibre Native iOS.**
 - Diffuse lighting added to terrain fragment shader (commit
-  `a341c6a`). The fragment now reconstructs a screen-space surface
-  normal from `dfdx`/`dfdy` of the elevation varying and applies
-  Lambertian shading (ambient 0.55, directional 0.45). Intent: with
-  the drape currently filled by a flat-colour background layer, the
-  3D extrusion would still be visible via shading variation. Build
-  passes; mesh draws (10 drawables, pass=2 translucent, "drew 10"
-  confirmed in logs); but on-screen result is uniform beige with no
-  visible mountain shape at Kebnekaise (pitch 55°, 15km distance).
-  **Diagnosis for next session:** the elevation gradient in screen
-  space is effectively zero because `parameters.matrixForTile(tileID)`
-  in `TerrainLayerTweaker` returns a 2D tile-projection matrix whose
-  Z column has near-zero scale. The vertex shader's
-  `drawable.matrix * float4(pos.x, pos.y, elevation, 1.0)` therefore
-  doesn't displace Z meaningfully — the mesh stays flat, dfdx/dfdy
-  of `in.elevation` are uniform, lighting is uniform. **Phase 4
-  prerequisite:** swap to a 3D-projection matrix (e.g. derived like
-  fill-extrusion does, with proper meters-per-tile-unit scale on
-  the Z column). Without that, no drape content variation and no
-  lighting trick can reveal the 3D — the geometry simply isn't 3D
-  in clip space. Until then the architectural pipeline is end-to-end
-  correct (DEM upload → mesh drawables → drape route → texture
-  binding → fragment sampling → lighting) but the visible 3D effect
-  awaits a proper projection matrix.
+  `a341c6a`). The fragment reconstructs a screen-space surface normal
+  from `dfdx`/`dfdy` of the elevation varying and applies Lambertian
+  shading (ambient 0.55, directional 0.45). With this alone the screen
+  was still uniform beige — diagnosis was correct: mesh flat in clip
+  space.
+- **Phase 4: terrain matrix Z-scale fix (commit `1853d53`)** — 5-line
+  change in `TerrainLayerTweaker`. The vertex shader passes elevation
+  in metres on the Z axis, but `matrixForTile()`'s base tile matrix
+  scales X/Y from tile units to mercator world-pixels and leaves Z
+  scale at 1. So metres were going into clip space at the wrong scale
+  and the mesh stayed essentially flat. Mirrored the trick the camera
+  uses in `Camera::getWorldToCamera`: multiply the matrix's Z column
+  (indices 8..11) by `pixelsPerMeter` at the current latitude/zoom.
+  Result: **first 3D terrain rendering on MapLibre Native iOS.** Real
+  Kebnekaise extrusion, with the diffuse lighting from the previous
+  commit producing visible hillshade across the whole mesh. The drape
+  pipeline (per-tile RenderTarget cache → background layer routed
+  into drape → texture bound to mesh fragment) and the 3D extrusion
+  pipeline (DEM-sampled elevation → exaggerated → matrix-projected
+  in metres) are both verified end-to-end. Phase 2 still needs to
+  expand from background to fill/line/raster/symbol; Phase 4 still
+  needs proper depth-write + opaque-pass + `setIs3D(true)` before
+  this is fit for upstream review. But the visual proof is in.
