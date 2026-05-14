@@ -604,3 +604,72 @@ content was always on top. The drape pipeline is structurally correct
 but the per-target render needs depth clearing (or depth-disabled
 drape drawables) before "skip main pass when terrain is active" can
 be safely turned on.
+
+## Overnight debug session findings (2026-05-15)
+
+Dug deeper into the fill-drape-not-visible bug. Added per-frame
+instrumentation in `mtl::TileLayerGroup::render` to log every drape
+group's `drew=N` count. Output for one frame at Kebnekaise (with main
+fill enabled):
+
+```
+[drape-trace] background-drape drew=1            (pass=1 opaque)
+[drape-trace] background-drape drew=1            (pass=2 translucent)
+[drape-trace] land-open-drape drew=1             (pass=2)
+[drape-trace] land-kalfjall-drape drew=1         (pass=2)
+[drape-trace] land-glaciar-drape drew=2          (pass=2)
+[drape-trace] skog-barr-drape drew=1             (pass=2)
+[drape-trace] vatten-drape drew=2                (pass=2)
+[drape-trace] ralstrafik-drape drew=1            (pass=2)
+[drape-trace] vag-huvud-casing-drape drew=1      (pass=2)
+```
+
+So fill drape `drawable.draw(parameters)` IS being called — twice for
+land-glaciar (glacier) and twice for vatten (water). The drawables
+exist, the render path reaches them, the Metal command encoder gets
+their draw calls. Yet they don't visibly contribute to the drape
+texture (verified by setting terrain shader to return raw mapColor —
+texture only has BG cream + line content, no fill colours).
+
+Things ruled out by repeated A/B testing:
+
+- **Depth-buffer stale**: Switched `RenderTarget::render` to clear
+  depth to 1.0 each frame. No change. (Kept the fix — it's correct.)
+- **Depth state**: Tried `DepthMaskType::ReadOnly`,
+  `setEnableDepth(false)`. No change.
+- **Stencil**: `setEnableStencil(false)` explicit. No change.
+- **Shared vertex-attrs ownership**: Switched drape FillBuilder to own
+  its own `VertexAttributeArray` (don't share with main fillBuilder
+  which std::moves them later). No change. (Kept the fix — it's
+  correct.)
+- **Missing position vertex attribute**: Explicitly bound
+  `idFillPosVertexAttribute` from `bucket.sharedVertices` on the drape
+  vertexAttrs. No change. (Kept the fix — it's correct.)
+- **Skip main pass**: Disabling `fillTileLayerGroup` via setEnabled —
+  removes main fill overlay, confirms drape doesn't contribute.
+- **Per-tweaker propagation**: Drape FillLayerTweaker still iterates
+  its drawables and computes drape matrix correctly.
+
+What still differs between line drape (works) and fill drape (doesn't):
+
+- Different bucket type and vertex layout (FillBucket vs LineBucket).
+- Different paint property binders (different `idLineColorVertexAttribute`
+  vs `idFillColorVertexAttribute` setups).
+- Different fragment shader (line.hpp vs fill.hpp).
+
+Likely next steps for whoever picks this up:
+
+1. **GPU frame capture** via Xcode Metal debugger — inspect the drape
+   target's texture content between BG draw and fill draw to confirm
+   whether fill fragments are reaching the framebuffer.
+2. **Compare bucket vertex layouts** — does FillBucket need extra
+   attributes (e.g. `attributes::pos` only vs Line's pos + normal +
+   data)?
+3. **Inspect the actual UBO/uniform values** passed to the fill
+   fragment shader on the drape path. Maybe `props.opacity` ends up
+   0 or `props.color` ends up transparent for the per-drape-target
+   FillLayerTweaker.
+4. **Try copying the exact shape of RenderHillshadeLayer's prepare-
+   builder setup**, which uses a RenderTarget with a single full-tile
+   quad and visibly works upstream. The structural similarity might
+   reveal a missing call.
