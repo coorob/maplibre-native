@@ -7,6 +7,8 @@
 #include <mbgl/renderer/pattern_atlas.hpp>
 #include <mbgl/renderer/render_pass.hpp>
 #include <mbgl/renderer/render_static_data.hpp>
+#include <mbgl/renderer/render_target.hpp>
+#include <mbgl/renderer/render_terrain.hpp>
 #include <mbgl/renderer/upload_parameters.hpp>
 #include <mbgl/style/layers/background_layer_impl.hpp>
 #include <mbgl/style/layer_properties.hpp>
@@ -224,6 +226,68 @@ void RenderBackgroundLayer::update(gfx::ShaderRegistry& shaders,
             drawable->setLayerTweaker(layerTweaker);
             tileLayerGroup->addDrawable(drawPasses, tileID, std::move(drawable));
             ++stats.drawablesAdded;
+        }
+    }
+
+    // Phase 2 drape routing: when terrain is active, ALSO emit a background
+    // drawable into each visible-tile's drape RenderTarget so the terrain
+    // mesh can sample the basemap-coloured surface as it displaces. We keep
+    // the main-tileLayerGroup drawables above too — the terrain mesh
+    // overlays them at the same screen position, hiding the doubled cost.
+    // Phase 4 cleanup will skip the main path when terrain is on (matches
+    // gl-js's IRenderToTexture.renderLayer() returning true).
+    //
+    // The pattern below mirrors RenderHillshadeLayer's per-tile RenderTarget
+    // setup almost line-for-line, swapping the source of the RenderTarget
+    // (Phase 1 drape cache instead of a fresh allocation per layer).
+    if (activeTerrain) {
+        std::unique_ptr<gfx::DrawableBuilder> drapeBuilder;
+        for (const auto& tileID : tileCover) {
+            auto drape = activeTerrain->getDrapeTarget(tileID);
+            if (!drape) {
+                continue; // No drape target for this tile (basemap zoom ≠ DEM zoom)
+            }
+
+            // Get or create a single-tile TileLayerGroup inside the target
+            // at layer index 0 (relative within the drape target).
+            auto* drapeGroup = static_cast<TileLayerGroup*>(drape->getLayerGroup(0).get());
+            if (!drapeGroup) {
+                auto newGroup = context.createTileLayerGroup(
+                    /*layerIndex=*/0, /*initialCapacity=*/1, getID() + "-drape");
+                if (!newGroup) continue;
+                newGroup->addLayerTweaker(layerTweaker); // reuse main tweaker for v1
+                drape->addLayerGroup(newGroup, /*replace=*/false);
+                drapeGroup = newGroup.get();
+            }
+
+            // Skip if drape already has a drawable for this tile.
+            if (drapeGroup->getDrawableCount(drawPasses, tileID) > 0) {
+                continue;
+            }
+
+            if (!drapeBuilder) {
+                drapeBuilder = context.createDrawableBuilder("background-drape");
+                drapeBuilder->setRenderPass(drawPasses);
+                drapeBuilder->setShader(curShader);
+                drapeBuilder->setDepthType(gfx::DepthMaskType::ReadWrite);
+                drapeBuilder->setColorMode(drawPasses == RenderPass::Translucent
+                                               ? gfx::ColorMode::alphaBlended()
+                                               : gfx::ColorMode::unblended());
+            }
+
+            auto verticesCopyDrape = rawVertices;
+            drapeBuilder->setVertexAttrId(idBackgroundPosVertexAttribute);
+            drapeBuilder->setRawVertices(
+                std::move(verticesCopyDrape), vertexCount, gfx::AttributeDataType::Short2);
+            drapeBuilder->setSegments(gfx::Triangles(), indexes.vector(), segs.data(), segs.size());
+            drapeBuilder->flush(context);
+
+            for (auto& drawable : drapeBuilder->clearDrawables()) {
+                drawable->setTileID(tileID);
+                drawable->setLayerTweaker(layerTweaker);
+                drapeGroup->addDrawable(drawPasses, tileID, std::move(drawable));
+                ++stats.drawablesAdded;
+            }
         }
     }
 }
