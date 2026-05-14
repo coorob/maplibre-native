@@ -62,6 +62,11 @@ void RenderRasterLayer::evaluate(const PropertyEvaluationParameters& parameters)
     if (layerTweaker) {
         layerTweaker->updateProperties(evaluatedProperties);
     }
+    // Mirror to the per-drape-target tweakers — see same pattern in
+    // RenderFillLayer / RenderLineLayer.
+    for (auto& [_, tw] : drapeLayerTweakers) {
+        if (tw) tw->updateProperties(evaluatedProperties);
+    }
 }
 
 bool RenderRasterLayer::hasTransition() const {

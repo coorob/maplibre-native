@@ -92,6 +92,12 @@ void RenderFillLayer::evaluate(const PropertyEvaluationParameters& parameters) {
     if (layerTweaker) {
         layerTweaker->updateProperties(evaluatedProperties);
     }
+    // Mirror to the per-drape-target tweakers, otherwise style property
+    // changes only land in the main pass and the draped surface stays
+    // stale until the source tile reloads.
+    for (auto& [_, tw] : drapeLayerTweakers) {
+        if (tw) tw->updateProperties(evaluatedProperties);
+    }
 }
 
 bool RenderFillLayer::hasTransition() const {

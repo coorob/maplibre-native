@@ -90,6 +90,17 @@ void RenderLineLayer::evaluate(const PropertyEvaluationParameters& parameters) {
         tweaker->updateGPUExpressions(unevaluated, parameters.now);
 #endif // MLN_RENDER_BACKEND_METAL
     }
+    // Mirror property updates to the per-drape-target tweakers — otherwise
+    // style changes only land in the main pass and the draped surface
+    // stays stale.
+    for (auto& [_, tw] : drapeLayerTweakers) {
+        if (tw) {
+            tw->updateProperties(evaluatedProperties);
+#if MLN_RENDER_BACKEND_METAL
+            tw->updateGPUExpressions(unevaluated, parameters.now);
+#endif
+        }
+    }
 }
 
 bool RenderLineLayer::hasTransition() const {
