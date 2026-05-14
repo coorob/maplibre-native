@@ -301,6 +301,59 @@ should NOT be draped (they should float above the terrain at their
 unprojected positions). Per gl-js, symbol layers skip the drape pass
 and render to the main framebuffer last, on top of the terrain.
 
+### Working precedent in the codebase
+
+`src/mbgl/renderer/layers/render_hillshade_layer.cpp` lines 244-296 already
+implement exactly the pattern Phase 2 needs:
+
+```cpp
+// 1. Allocate a RenderTarget for the tile
+auto renderTarget = context.createRenderTarget({tilesize, tilesize},
+                                               gfx::TextureChannelDataType::UnsignedByte);
+addRenderTarget(renderTarget, changes);   // AddRenderTargetRequest
+
+// 2. Create a single-tile LayerGroup inside the target
+auto singleTileLayerGroup = context.createTileLayerGroup(
+    /*layerIndex=*/0, /*initialCapacity=*/1, getID());
+renderTarget->addLayerGroup(singleTileLayerGroup, /*replace=*/true);
+
+// 3. Set up a tweaker specifically for the offscreen pass (different
+//    matrix arithmetic than the main framebuffer)
+auto prepareLayerTweaker = std::make_shared<HillshadePrepareLayerTweaker>(...);
+singleTileLayerGroup->addLayerTweaker(prepareLayerTweaker);
+
+// 4. Build a drawable with the prepare-pass shader + texture bindings
+auto builder = context.createDrawableBuilder("hillshadePrepare");
+builder->setShader(hillshadePrepareShader);
+builder->setTexture(demTexture, idHillshadeImageTexture);
+// ...
+builder->flush(context);
+
+// 5. Add the drawable into the target's layer group
+for (auto& drawable : builder->clearDrawables()) {
+    drawable->setTileID(tileID);
+    drawable->setLayerTweaker(prepareLayerTweaker);
+    singleTileLayerGroup->addDrawable(renderPass, tileID, std::move(drawable));
+}
+```
+
+For Phase 2 background routing, swap:
+- `createRenderTarget(...)` → `activeTerrain->getDrapeTarget(tileID)`
+  (we already have it from Phase 1)
+- `HillshadePrepareLayerTweaker` → `BackgroundLayerTweaker` (existing)
+  or a new `BackgroundDrapeLayerTweaker` if matrix math differs
+- `hillshadePrepareShader` → background's `plainShader` / `patternShader`
+- Texture bindings → none for plain background, pattern texture for
+  patterned background
+- Vertex attributes → background's existing fullscreen-tile quad
+
+The matrix-arithmetic difference is what makes the drape tweaker
+separate: a drape target renders the tile content at tile-local coords
+(0..EXTENT) into a tile-sized texture (with NDC -1..1), no camera
+transform. The main-framebuffer tweaker applies camera + projection.
+Hillshade's `HillshadePrepareLayerTweaker` is the reference for how
+the drape-pass matrix is computed; copy that pattern for background.
+
 ### Open question for Phase 2 — "both or neither?"
 
 When a layer routes to a drape target, should it ALSO add to the
