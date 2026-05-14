@@ -40,7 +40,8 @@ no draping of other layer types. This work picks up there.
 | 2 — Scaffolding: `RenderLayer::activeTerrain` hook | ✅ Done | Layers can access `RenderTerrain` during `update()` |
 | 2 — `RenderTerrain::getDrapeTarget(tileID)` accessor | ✅ Done | Public lookup for drape RenderTarget per tile |
 | End-to-end pipeline verified | ✅ Done | Terrain mesh visibly samples drape target's clear colour — every step from cache allocation → GPU render pass → texture binding → fragment sampling confirmed |
-| 2 — Actual layer routing (background, fill, line, raster) | ⏳ Pending | Replace the debug clear colour with real basemap content |
+| 2 — `RenderBackgroundLayer` drape routing | ✅ Done | 7 drape drawables emitted across 6 visible tiles; terrain mesh visibly samples the basemap's background colour |
+| 2 — Other drapeable layers (fill, line, raster) | ⏳ Pending | Same pattern as background, repeated per layer type |
 | 4 — Proper depth + opaque pass + `setIs3D(true)` | ⏳ Pending | Mostly debugging once it "kinda works" |
 | 5 — `getElevation()` for layer draping | ⏳ Pending | Optional for first ship |
 
@@ -518,3 +519,34 @@ errors on the type mismatch. Dropped the dead clause.
   happening alongside the new colour. This is the architectural
   proof point — Phase 2 routing now just has to overwrite the green
   with real basemap pixels.
+- Phase 2 structural framework (commit `2af2def`). Background layer
+  emits drape drawables alongside the main path. Compiles and runs,
+  but visual unchanged at this point because of tile-ID mismatch
+  + matrix-arithmetic issues, both documented.
+- Phase 2 drape tweaker (commits `584d433`, `8a6d4a0`). Added a
+  `drapeMode` flag on `BackgroundLayerTweaker` that swaps the
+  per-drawable matrix from `getTileMatrix(...)` (camera-aware) to
+  `matrix::ortho(0, EXTENT, -EXTENT, 0, -1, 1)` + translate — exact
+  template from `HillshadePrepareLayerTweaker`. Background layer
+  instantiates a dedicated drape tweaker and attaches it to the
+  per-target layer group.
+- Phase 2 lands visually (commit `93d3970`). Two fixes turned the
+  routing from "code path runs but does nothing" into "drawables
+  actually emit into drape targets":
+    1. `RenderOrchestrator::update()` now bypasses the
+       `backgroundLayerAsColor` optimisation when terrain is active.
+       That optimisation normally skips `RenderBackgroundLayer::update()`
+       entirely (sets framebuffer clear colour instead), which
+       starved the drape pass — no update() → no drape drawables.
+    2. `RenderBackgroundLayer` iterates the drape cache directly
+       via the new `RenderTerrain::visitDrapeTargets(...)` rather
+       than its own `tileCover`. The two were at different zooms
+       (basemap at z=10, DEM source at z=8 in our test), so
+       `getDrapeTarget(tileID)` by tileCover IDs always returned
+       nullptr.
+  After these two fixes, log evidence shows 7 drape drawables
+  emitted across the 6 visible DEM tiles in the first ~150 ms after
+  the cache populated. Visual: the terrain mesh now renders in the
+  topo style's actual background colour (#F4EAD0 beige) instead of
+  the debug forest-green clear. **First confirmed working drape
+  pass on MapLibre Native iOS.**
