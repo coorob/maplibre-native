@@ -36,8 +36,10 @@ no draping of other layer types. This work picks up there.
 | 0 — Xcode 26 / clang strictness | ✅ Done | Build passes again on Xcode 26.4 |
 | 0 — Klättra rebrand of sample app | ✅ Done | Iteration target with our own DEM data |
 | 1 — Per-tile drape RenderTarget cache | ✅ Done | Targets allocated, registered, pruned |
-| 3 — Bind drape texture into terrain shader | ✅ Done (wiring) | Terrain mesh samples drape target instead of checkerboard; still dark until Phase 2 routes content into the targets |
-| 2 — Route 2D layer drawables into per-tile targets | ⏳ Pending | The remaining blocker |
+| 3 — Bind drape texture into terrain shader | ✅ Done | Terrain mesh samples drape target instead of checkerboard |
+| 2 — Scaffolding: `RenderLayer::activeTerrain` hook | ✅ Done | Layers can access `RenderTerrain` during `update()` |
+| 2 — `RenderTerrain::getDrapeTarget(tileID)` accessor | ✅ Done | Public lookup for drape RenderTarget per tile |
+| 2 — Actual layer routing (background, fill, line, raster) | ⏳ Pending | The remaining real work |
 | 4 — Proper depth + opaque pass + `setIs3D(true)` | ⏳ Pending | Mostly debugging once it "kinda works" |
 | 5 — `getElevation()` for layer draping | ⏳ Pending | Optional for first ship |
 
@@ -254,24 +256,64 @@ which the layer can populate differently.
 
 ### Concrete first step (when picking this up)
 
-Start with **background layer only** — it's the simplest:
+Scaffolding has landed in commits `bfa03ef` and `2ce7ce7`:
 
-1. Add an optional `RenderTarget*` parameter (or a per-tile `RenderTarget*`
-   lookup) to `RenderLayer::update()`.
-2. In `RenderBackgroundLayer::update()`, when the optional is set,
-   emit a drawable for each visible DEM tile (looked up via the new
-   `RenderTerrain::getDrapeTarget(tileID)` accessor — needs adding)
-   whose `addLayerGroup` is the drape target's layer group, instead
-   of the main layer group.
+- `RenderTerrain::getDrapeTarget(const OverscaledTileID&)` returns
+  the per-tile drape RenderTarget (or nullptr).
+- `RenderLayer` has an `activeTerrain` field that the orchestrator
+  sets to the current `RenderTerrain*` right before each layer's
+  `update()` runs (and clears immediately after). The orchestrator
+  also reordered so `renderTerrain->update()` runs FIRST, ensuring
+  the cache is populated by the time layers look it up.
+
+Now the actual routing. Start with **background layer only** —
+simplest case (flat colour, no per-tile geometry):
+
+1. In `src/mbgl/renderer/layers/render_background_layer.cpp`,
+   inside `RenderBackgroundLayer::update()`, after the existing
+   `tileLayerGroup` setup:
+   ```cpp
+   if (activeTerrain) {
+       // For each visible tile in tileCover, look up its drape target
+       // and add a background drawable to its layer group at this
+       // layer's index, in addition to (or instead of) the main
+       // tileLayerGroup.
+       for (const auto& tileID : tileCover) {
+           if (auto drape = activeTerrain->getDrapeTarget(
+                   tileID.toOverscaledTileID())) {
+               // ... build drawable, add to drape->layerGroup ...
+           }
+       }
+   }
+   ```
+2. The drape RenderTarget's layer-group slot for this layer index
+   may not exist on first use — create a `TileLayerGroup` for it
+   and call `drape->addLayerGroup(...)`. Subsequent calls reuse.
 3. Verify visually: terrain mesh now renders the background colour
-   (a flat colour for most styles) draped over the displaced surface.
-4. Repeat the pattern for `RenderFillLayer`, `RenderLineLayer`,
-   `RenderRasterLayer` in order of complexity.
+   (typically white or a subtle base color) draped over the
+   displaced surface instead of black.
+4. Once that works, repeat the pattern for `RenderFillLayer`,
+   `RenderLineLayer`, `RenderRasterLayer` in order of complexity.
 
 `RenderSymbolLayer` is special — symbols (text + icons) typically
 should NOT be draped (they should float above the terrain at their
 unprojected positions). Per gl-js, symbol layers skip the drape pass
 and render to the main framebuffer last, on top of the terrain.
+
+### Open question for Phase 2 — "both or neither?"
+
+When a layer routes to a drape target, should it ALSO add to the
+main `tileLayerGroup`?
+
+- gl-js: **neither** — `renderToTexture.renderLayer()` returns true
+  meaning "I handled this; skip the main framebuffer pass entirely."
+- Initial port for safety: **both** — simpler, but causes flat
+  basemap to render to main framebuffer underneath the terrain mesh.
+  Visible only if the terrain mesh doesn't fully cover the viewport
+  (e.g., low-zoom views with sky around the edges).
+- Long term: match gl-js. Either swap which group a drawable goes to
+  based on `activeTerrain`, or render both but suppress main-pass
+  drawing of drapeable-layers when terrain is on.
 
 ### Files that will need touching (Phase 2)
 
@@ -405,3 +447,10 @@ errors on the type mismatch. Dropped the dead clause.
   populates the drape targets with real layer content, the same
   drawable configuration will display the basemap draped over the
   displaced mesh — no further changes in terrain drawable code.
+- TERRAIN_PROGRESS Phase 2 design notes (commit `60b6279`)
+- `RenderTerrain::getDrapeTarget(tileID)` public accessor
+  (commit `bfa03ef`)
+- Phase 2 scaffolding: `RenderLayer::activeTerrain` hook + orchestrator
+  reordering (commit `2ce7ce7`). No runtime change yet — runtime path
+  identical because no layer subclass uses `activeTerrain`. Next step
+  is implementing the routing in `RenderBackgroundLayer::update()`.
