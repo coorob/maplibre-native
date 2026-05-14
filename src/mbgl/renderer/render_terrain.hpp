@@ -129,6 +129,21 @@ public:
     }
 
     /**
+     * @brief Visit every (tileID, RenderTarget) currently in the drape cache.
+     *
+     * Phase 2 layers call this to enumerate the tiles they need to emit
+     * drape drawables for. Iterating the drape cache directly — rather
+     * than the layer's own tileCover — sidesteps the zoom-mismatch
+     * between the DEM source (which the drape cache mirrors) and other
+     * sources at different zooms. Each callback gets the OverscaledTileID
+     * the drape target is keyed under and the target pointer itself.
+     */
+    template <typename Func /* void(const OverscaledTileID&, TerrainDrapeTargetPtr&) */>
+    void visitDrapeTargets(Func f) {
+        drapeCache.visitAll(f);
+    }
+
+    /**
      * @brief Get the terrain mesh for a specific tile
      *
      * Returns a cached mesh or generates a new one. The mesh is a regular grid

@@ -118,6 +118,9 @@ void RenderBackgroundLayer::update(gfx::ShaderRegistry& shaders,
                                    const std::shared_ptr<UpdateParameters>& updateParameters,
                                    [[maybe_unused]] const RenderTree& renderTree,
                                    [[maybe_unused]] UniqueChangeRequestVec& changes) {
+    Log::Info(Event::Render,
+              std::string("BG.update() ENTRY id=") + getID() +
+                  " activeTerrain=" + (activeTerrain ? "set" : "null"));
     assert(updateParameters);
     const auto zoom = state.getIntegerZoom();
     const auto tileCover = util::tileCover({state,
@@ -240,6 +243,9 @@ void RenderBackgroundLayer::update(gfx::ShaderRegistry& shaders,
     // The pattern below mirrors RenderHillshadeLayer's per-tile RenderTarget
     // setup almost line-for-line, swapping the source of the RenderTarget
     // (Phase 1 drape cache instead of a fresh allocation per layer).
+    Log::Info(Event::Render,
+              std::string("background.update() reached drape check, activeTerrain=") +
+                  (activeTerrain ? "set" : "null"));
     if (activeTerrain) {
         // Lazily construct the drape-pass tweaker (ortho matrix instead of
         // the camera's getTileMatrix). Same evaluated properties as the
@@ -249,12 +255,24 @@ void RenderBackgroundLayer::update(gfx::ShaderRegistry& shaders,
                 getID() + "-drape", evaluatedProperties, /*drapeMode=*/true);
         }
 
+        // Iterate the DEM source's visible drape targets directly rather
+        // than the basemap's tileCover — they live at different zooms (e.g.
+        // raster-dem at z=8 while view zoom is z=10), so getDrapeTarget()
+        // lookup by tileCover IDs returns nullptr in practice.
+        std::vector<std::pair<OverscaledTileID, TerrainDrapeTargetPtr>> drapeEntries;
+        activeTerrain->visitDrapeTargets(
+            [&](const OverscaledTileID& id, TerrainDrapeTargetPtr& tgt) {
+                if (tgt) drapeEntries.emplace_back(id, tgt);
+            });
+
+        Log::Info(Event::Render,
+                  "background drape: terrain active, drape tiles=" +
+                      std::to_string(drapeEntries.size()) +
+                      " (basemap tileCover=" + std::to_string(tileCover.size()) + ")");
+
         std::unique_ptr<gfx::DrawableBuilder> drapeBuilder;
-        for (const auto& tileID : tileCover) {
-            auto drape = activeTerrain->getDrapeTarget(tileID);
-            if (!drape) {
-                continue; // No drape target for this tile (basemap zoom ≠ DEM zoom)
-            }
+        size_t emittedCount = 0;
+        for (auto& [tileID, drape] : drapeEntries) {
 
             // Get or create a single-tile TileLayerGroup inside the target
             // at layer index 0 (relative within the drape target).
@@ -295,8 +313,13 @@ void RenderBackgroundLayer::update(gfx::ShaderRegistry& shaders,
                 drawable->setLayerTweaker(drapeLayerTweaker);
                 drapeGroup->addDrawable(drawPasses, tileID, std::move(drawable));
                 ++stats.drawablesAdded;
+                ++emittedCount;
             }
         }
+
+        Log::Info(Event::Render,
+                  "background drape summary: drape tiles=" + std::to_string(drapeEntries.size()) +
+                      " drawables emitted this frame=" + std::to_string(emittedCount));
     }
 }
 

@@ -408,7 +408,15 @@ std::unique_ptr<RenderTree> RenderOrchestrator::createRenderTree(
 
             // Handle layers without source.
             if (layerIsVisible && zoomFitsLayer && sourceImpl.get() == sourceImpls->at(0).get()) {
-                if (backgroundLayerAsColor && layer.baseImpl == layerImpls->front()) {
+                // The "background-as-color" optimisation skips RenderBackgroundLayer's
+                // update() and just sets the framebuffer clear colour to the background
+                // colour. That's fine for the main pass, but the Phase 2 drape pass
+                // needs an actual drawable to route into the drape RenderTargets — there's
+                // no path for "make this offscreen target's clear colour the layer's
+                // colour". When terrain is active, force the slow path so update() runs
+                // and emits drape drawables.
+                const bool terrainActive = renderTerrain && renderTerrain->isEnabled();
+                if (backgroundLayerAsColor && layer.baseImpl == layerImpls->front() && !terrainActive) {
                     const auto& solidBackground = layer.getSolidBackground();
                     if (solidBackground) {
                         renderTreeParameters->backgroundColor = *solidBackground;
