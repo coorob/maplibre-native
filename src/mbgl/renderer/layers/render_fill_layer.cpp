@@ -387,10 +387,10 @@ void RenderFillLayer::update(gfx::ShaderRegistry& shaders,
         // and again for FillVariant::FillOutline (lines) so polygon edges
         // also drape onto the terrain mesh.
         const auto emitDrapeVariant = [&](FillVariant variant,
-                                           const std::shared_ptr<gfx::ShaderProgramBase>& shader,
+                                           const gfx::ShaderGroupPtr& shaderGroup,
                                            const std::string& nameSuffix,
                                            const std::function<void(gfx::DrawableBuilder&)>& setSegments) {
-            if (!activeTerrain || !shader) return;
+            if (!activeTerrain || !shaderGroup) return;
             activeTerrain->visitDrapeTargets(
                 [&](const OverscaledTileID& drapeID, TerrainDrapeTargetPtr& drapeTarget) {
                     if (!drapeTarget || !LayerTweaker::tilesOverlap(tileID, drapeID)) return;
@@ -420,9 +420,13 @@ void RenderFillLayer::update(gfx::ShaderRegistry& shaders,
                     });
                     if (alreadyHasVariant) return;
 
+                    auto drapeShader = std::static_pointer_cast<gfx::ShaderProgramBase>(
+                        shaderGroup->getOrCreateShader(context, propertiesAsUniforms));
+                    if (!drapeShader) return;
+
                     auto drapeBuilder = context.createDrawableBuilder(layerPrefix + nameSuffix + "-drape");
                     if (!drapeBuilder) return;
-                    drapeBuilder->setShader(shader);
+                    drapeBuilder->setShader(drapeShader);
                     drapeBuilder->setCullFaceMode(gfx::CullFaceMode::disabled());
                     drapeBuilder->setDepthType(gfx::DepthMaskType::ReadOnly);
                     drapeBuilder->setColorMode(gfx::ColorMode::alphaBlended());
@@ -537,7 +541,7 @@ void RenderFillLayer::update(gfx::ShaderRegistry& shaders,
 #endif
 
                 emitDrapeVariant(
-                    FillVariant::Fill, fillShader, "fill", [&](gfx::DrawableBuilder& b) {
+                    FillVariant::Fill, fillShaderGroup, "fill", [&](gfx::DrawableBuilder& b) {
                         b.setSegments(gfx::Triangles(),
                                       bucket.sharedTriangles,
                                       bucket.triangleSegments.data(),
@@ -546,7 +550,7 @@ void RenderFillLayer::update(gfx::ShaderRegistry& shaders,
                 if (doOutline && outlineShader && bucket.sharedBasicLineIndexes->elements()) {
                     emitDrapeVariant(
                         FillVariant::FillOutline,
-                        outlineShader,
+                        outlineShaderGroup,
                         "fill-outline",
                         [&](gfx::DrawableBuilder& b) {
                             b.setSegments(gfx::Lines(lineWidth),
