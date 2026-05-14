@@ -121,10 +121,19 @@ half4 fragment fragmentMain(FragmentStage in [[stage_in]],
     // Note: Y-coordinate is flipped (1.0 - y) to match OpenGL convention
     float4 mapColor = mapTexture.sample(mapSampler, float2(in.uv.x, 1.0 - in.uv.y));
 
+    // Reconstruct a surface normal from screen-space elevation gradients so the
+    // 3D extrusion is visible even when the draped surface is a flat color.
+    float dE_dx = dfdx(in.elevation);
+    float dE_dy = dfdy(in.elevation);
+    float3 normal = normalize(float3(-dE_dx, -dE_dy, 1.0));
+    const float3 lightDir = normalize(float3(0.4, 0.6, 0.7));
+    const float ambient = 0.55;
+    float diffuse = ambient + (1.0 - ambient) * max(dot(normal, lightDir), 0.0);
+
     // If map texture has valid data, use it; otherwise fall back to elevation-based coloring
     // Check if alpha is > 0 to detect valid map data
     if (mapColor.a > 0.01) {
-        return half4(mapColor);
+        return half4(half3(mapColor.rgb * diffuse), half(mapColor.a));
     }
 
     // Fallback: elevation-based color gradient for debugging
@@ -146,7 +155,7 @@ half4 fragment fragmentMain(FragmentStage in [[stage_in]],
     float gridLine = step(0.98, fract(in.uv.x * 4.0)) + step(0.98, fract(in.uv.y * 4.0));
     color = mix(color, float3(1.0, 1.0, 1.0), gridLine * 0.5);
 
-    return half4(half3(color), 1.0);
+    return half4(half3(color * diffuse), 1.0);
 }
 )";
 };
