@@ -55,14 +55,15 @@ public:
     TerrainDrapeTargetPtr get(const OverscaledTileID& tileID) const;
 
     /// Evict targets for tile IDs that the predicate marks for removal.
-    /// Returns the IDs removed in case the caller wants to deregister them
-    /// from the orchestrator.
+    /// Returns the (id, target) pairs removed so the caller can emit a
+    /// RemoveRenderTargetRequest for each before the targets' lifetimes
+    /// end here.
     template <typename Predicate /* bool(const OverscaledTileID&) */>
-    std::vector<OverscaledTileID> pruneIf(Predicate shouldEvict) {
-        std::vector<OverscaledTileID> removed;
+    std::vector<std::pair<OverscaledTileID, TerrainDrapeTargetPtr>> pruneIf(Predicate shouldEvict) {
+        std::vector<std::pair<OverscaledTileID, TerrainDrapeTargetPtr>> removed;
         for (auto it = targetsByTileID.begin(); it != targetsByTileID.end();) {
             if (shouldEvict(it->first)) {
-                removed.push_back(it->first);
+                removed.emplace_back(it->first, it->second);
                 it = targetsByTileID.erase(it);
             } else {
                 ++it;

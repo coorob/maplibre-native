@@ -118,8 +118,14 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
                 changes.emplace_back(std::make_unique<AddRenderTargetRequest>(target));
             }
         }
-        drapeCache.pruneIf(
+        auto evicted = drapeCache.pruneIf(
             [&](const OverscaledTileID& id) { return currentTileIDs.find(id) == currentTileIDs.end(); });
+        for (auto& [evictedID, evictedTarget] : evicted) {
+            // The orchestrator still holds the AddRenderTargetRequest's
+            // shared_ptr to this target — emit a matching remove request
+            // so it lets go and the GPU resources can release.
+            changes.emplace_back(std::make_unique<RemoveRenderTargetRequest>(std::move(evictedTarget)));
+        }
     }
 
     // Create terrain drawables for each DEM tile
