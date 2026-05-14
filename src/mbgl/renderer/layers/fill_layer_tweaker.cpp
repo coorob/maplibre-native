@@ -85,8 +85,19 @@ void FillLayerTweaker::execute(LayerGroupBase& layerGroup, const PaintParameters
 
         constexpr bool inViewportPixelUnits = false; // from RenderTile::translatedMatrix
         constexpr bool nearClipped = false;
-        const auto matrix = getTileMatrix(
-            tileID, parameters, translation, anchor, nearClipped, inViewportPixelUnits, drawable);
+        // Drape mode: project source-tile coords into the per-DEM-tile drape
+        // RenderTarget (ortho + tile-relative translate/scale) instead of the
+        // camera. Selection is per-drawable so the same tweaker can serve a
+        // group of drape drawables tied to a single drape target.
+        const auto matrix = drapeTargetID
+                                ? getDrapeMatrix(*drawable.getTileID(), *drapeTargetID)
+                                : getTileMatrix(tileID,
+                                                parameters,
+                                                translation,
+                                                anchor,
+                                                nearClipped,
+                                                inViewportPixelUnits,
+                                                drawable);
 
         // from FillPatternProgram::layoutUniformValues
         const auto tileRatio = 1.0f / tileID.pixelsToTileUnits(1.0f, intZoom);

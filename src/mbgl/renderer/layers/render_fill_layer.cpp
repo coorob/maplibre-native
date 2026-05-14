@@ -25,6 +25,7 @@
 #include <mbgl/gfx/drawable_builder.hpp>
 #include <mbgl/renderer/layers/fill_layer_tweaker.hpp>
 #include <mbgl/renderer/layer_group.hpp>
+#include <mbgl/renderer/render_terrain.hpp>
 #include <mbgl/renderer/update_parameters.hpp>
 #include <mbgl/shaders/fill_layer_ubo.hpp>
 #include <mbgl/shaders/shader_program_base.hpp>
@@ -416,6 +417,81 @@ void RenderFillLayer::update(gfx::ShaderRegistry& shaders,
                     outlineBuilder->setVertexAttributes(vertexAttrs);
                 }
 #endif
+
+                // Phase 2 drape routing: when terrain is active, also emit a
+                // copy of this fill drawable into each overlapping DEM tile's
+                // drape RenderTarget so the terrain mesh can sample landcover,
+                // water, etc. as its surface texture. We piggy-back on the
+                // existing bucket/binders/shader/vertexAttrs — the drape
+                // drawable differs only in its matrix (computed by the
+                // per-target FillLayerTweaker via getDrapeMatrix).
+                if (activeTerrain) {
+                    activeTerrain->visitDrapeTargets(
+                        [&](const OverscaledTileID& drapeID, TerrainDrapeTargetPtr& drapeTarget) {
+                            if (!drapeTarget) return;
+
+                            // Source / drape tile overlap test — same / parent / child relationships.
+                            const auto& s = tileID.canonical;
+                            const auto& d = drapeID.canonical;
+                            if (s.z == d.z) {
+                                if (s.x != d.x || s.y != d.y) return;
+                            } else if (s.z > d.z) {
+                                const auto shift = s.z - d.z;
+                                if ((s.x >> shift) != d.x || (s.y >> shift) != d.y) return;
+                            } else {
+                                const auto shift = d.z - s.z;
+                                if ((d.x >> shift) != s.x || (d.y >> shift) != s.y) return;
+                            }
+
+                            auto& tw = drapeLayerTweakers[drapeID];
+                            if (!tw) {
+                                tw = std::make_shared<FillLayerTweaker>(
+                                    getID() + "-drape", evaluatedProperties, drapeID);
+                            }
+
+                            auto* drapeGroup = static_cast<TileLayerGroup*>(
+                                drapeTarget->getLayerGroup(layerIndex).get());
+                            if (!drapeGroup) {
+                                auto newGroup = context.createTileLayerGroup(
+                                    layerIndex, /*initialCapacity=*/4, getID() + "-drape");
+                                if (!newGroup) return;
+                                newGroup->addLayerTweaker(tw);
+                                drapeTarget->addLayerGroup(newGroup, /*replace=*/false);
+                                drapeGroup = newGroup.get();
+                            }
+
+                            // Skip if drape already has a drawable for this source tile.
+                            if (drapeGroup->getDrawableCount(renderPass, tileID) > 0) return;
+
+                            auto drapeBuilder = context.createDrawableBuilder(layerPrefix + "fill-drape");
+                            if (!drapeBuilder) return;
+                            drapeBuilder->setShader(fillShader);
+                            drapeBuilder->setCullFaceMode(gfx::CullFaceMode::disabled());
+                            drapeBuilder->setDepthType(gfx::DepthMaskType::ReadWrite);
+                            drapeBuilder->setColorMode(gfx::ColorMode::alphaBlended());
+                            drapeBuilder->setRenderPass(renderPass);
+                            drapeBuilder->setVertexAttributes(vertexAttrs); // copy
+                            drapeBuilder->setRawVertices(
+                                {}, fillVertexCount, gfx::AttributeDataType::Short2);
+                            drapeBuilder->setSegments(gfx::Triangles(),
+                                                       bucket.sharedTriangles,
+                                                       bucket.triangleSegments.data(),
+                                                       bucket.triangleSegments.size());
+                            drapeBuilder->flush(context);
+
+                            for (auto& drapeDrawable : drapeBuilder->clearDrawables()) {
+                                drapeDrawable->setTileID(tileID);
+                                drapeDrawable->setType(static_cast<size_t>(FillVariant::Fill));
+                                drapeDrawable->setLayerTweaker(tw);
+                                drapeDrawable->setBinders(renderData->bucket, &binders);
+                                drapeDrawable->setRenderTile(renderTilesOwner, &tile);
+                                drapeGroup->addDrawable(
+                                    renderPass, tileID, std::move(drapeDrawable));
+                                ++stats.drawablesAdded;
+                            }
+                        });
+                }
+
                 fillBuilder->setVertexAttributes(std::move(vertexAttrs));
 
                 fillBuilder->setRawVertices({}, fillVertexCount, gfx::AttributeDataType::Short2);

@@ -5,8 +5,10 @@
 #include <mbgl/style/layers/fill_layer_properties.hpp>
 #include <mbgl/layout/pattern_layout.hpp>
 #include <mbgl/renderer/buckets/fill_bucket.hpp>
+#include <mbgl/tile/tile_id.hpp>
 
 #include <memory>
+#include <unordered_map>
 
 namespace mbgl {
 
@@ -61,6 +63,12 @@ private:
 #if MLN_TRIANGULATE_FILL_OUTLINES
     gfx::ShaderGroupPtr outlineTriangulatedShaderGroup;
 #endif // MLN_TRIANGULATE_FILL_OUTLINES
+
+    // Phase 2 drape routing: per-drape-target FillLayerTweakers, keyed by
+    // the drape target's tile ID. Each tweaker carries that target's tileID
+    // so getDrapeMatrix() can project source-tile drawables into the right
+    // drape RenderTarget. Lazily populated on first update() under terrain.
+    std::unordered_map<OverscaledTileID, FillLayerTweakerPtr> drapeLayerTweakers;
 };
 
 } // namespace mbgl
