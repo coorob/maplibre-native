@@ -128,6 +128,28 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
         }
     }
 
+    // Refresh the CPU-side DEM image cache so getElevation() returns valid
+    // values for every tile in cover. Holds a shared_ptr to the image so
+    // sampling stays valid even if the source bucket gets torn down between
+    // frames. Drops entries that left cover.
+    {
+        std::unordered_map<OverscaledTileID, std::shared_ptr<const PremultipliedImage>> next;
+        next.reserve(renderTiles->size());
+        for (const auto& renderTile : *renderTiles) {
+            const auto& tileID = renderTile.getOverscaledTileID();
+            const auto& tile = renderTile.getTile();
+            if (tile.kind != Tile::Kind::RasterDEM) continue;
+            const auto* demTile = static_cast<const RasterDEMTile*>(&tile);
+            const auto* hillshadeBucket = const_cast<RasterDEMTile*>(demTile)->getBucket();
+            if (!hillshadeBucket) continue;
+            const auto& imagePtr = hillshadeBucket->getDEMData().getImagePtr();
+            if (imagePtr && !imagePtr->size.isEmpty()) {
+                next.emplace(tileID, imagePtr);
+            }
+        }
+        demImagesByTile = std::move(next);
+    }
+
     // Create terrain drawables for each DEM tile
     for (const auto& renderTile : *renderTiles) {
         const auto& tileID = renderTile.getOverscaledTileID();
@@ -170,13 +192,51 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
     }
 }
 
-float RenderTerrain::getElevation(const UnwrappedTileID& /*tileID*/, float /*x*/, float /*y*/) const {
-    // TODO: Implement DEM tile lookup and bilinear interpolation
-    // This would:
-    // 1. Find the DEM tile covering this coordinate
-    // 2. Get the DEMData from the tile
-    // 3. Perform bilinear interpolation to get elevation
-    return 0.0f;
+float RenderTerrain::getElevation(const UnwrappedTileID& tileID, float x, float y) const {
+    // x, y are normalised within the tile in [0, 1] — bilinearly samples the
+    // cached DEM image's Mapbox-RGB encoded pixels. Returns 0 if the tile
+    // isn't in the current cover set or the encoding can't be decoded yet.
+    std::shared_ptr<const PremultipliedImage> image;
+    for (const auto& [cachedID, cachedImage] : demImagesByTile) {
+        if (cachedID.toUnwrapped() == tileID) {
+            image = cachedImage;
+            break;
+        }
+    }
+    if (!image || image->size.isEmpty()) {
+        return 0.0f;
+    }
+
+    const auto w = static_cast<int32_t>(image->size.width);
+    const auto h = static_cast<int32_t>(image->size.height);
+    const auto* px = image->data.get();
+    if (!px) return 0.0f;
+
+    const float pX = std::max(0.0f, std::min(1.0f, x)) * static_cast<float>(w - 1);
+    const float pY = std::max(0.0f, std::min(1.0f, y)) * static_cast<float>(h - 1);
+    const int32_t x0 = static_cast<int32_t>(std::floor(pX));
+    const int32_t y0 = static_cast<int32_t>(std::floor(pY));
+    const int32_t x1 = std::min(x0 + 1, w - 1);
+    const int32_t y1 = std::min(y0 + 1, h - 1);
+    const float fx = pX - static_cast<float>(x0);
+    const float fy = pY - static_cast<float>(y0);
+
+    const auto sample = [&](int32_t xi, int32_t yi) -> float {
+        const size_t offset = (static_cast<size_t>(yi) * w + xi) * 4;
+        const float r = px[offset + 0];
+        const float g = px[offset + 1];
+        const float b = px[offset + 2];
+        // Mapbox Terrain RGB: height = -10000 + ((R*256*256 + G*256 + B) * 0.1)
+        return -10000.0f + (r * 256.0f * 256.0f + g * 256.0f + b) * 0.1f;
+    };
+
+    const float e00 = sample(x0, y0);
+    const float e10 = sample(x1, y0);
+    const float e01 = sample(x0, y1);
+    const float e11 = sample(x1, y1);
+    const float e0 = e00 + (e10 - e00) * fx;
+    const float e1 = e01 + (e11 - e01) * fx;
+    return e0 + (e1 - e0) * fy;
 }
 
 float RenderTerrain::getElevationWithExaggeration(const UnwrappedTileID& tileID, float x, float y) const {

@@ -2,6 +2,7 @@
 
 #include <mbgl/style/terrain_impl.hpp>
 #include <mbgl/util/immutable.hpp>
+#include <mbgl/util/image.hpp>
 #include <mbgl/tile/tile_id.hpp>
 #include <mbgl/gfx/vertex_buffer.hpp>
 #include <mbgl/gfx/index_buffer.hpp>
@@ -206,6 +207,12 @@ private:
 
     // Track which tiles have terrain drawables
     std::unordered_map<OverscaledTileID, bool> tilesWithDrawables;
+
+    // Cached DEM image data, keyed by the overscaled tile ID. Holds a
+    // shared_ptr to the underlying image so CPU-side elevation lookups
+    // (getElevation) stay valid even if the source bucket gets torn down
+    // mid-frame. Refreshed each update() to match the current cover set.
+    std::unordered_map<OverscaledTileID, std::shared_ptr<const PremultipliedImage>> demImagesByTile;
 
     // Per-tile drape RenderTargets. When terrain is active, the 2D layers
     // for each visible tile render into one of these offscreen textures
