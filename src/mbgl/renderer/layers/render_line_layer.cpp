@@ -416,10 +416,14 @@ void RenderLineLayer::update(gfx::ShaderRegistry& shaders,
         // Phase 2 drape routing helper, shared across line variants. Emits a
         // copy of this source-tile's line geometry into each overlapping DEM
         // tile's drape RenderTarget. Variant-specific bits (shader group +
-        // type tag) are parameters.
+        // type tag + optional texture binding) are parameters; the optional
+        // configureExtras callback binds variant-specific textures
+        // (Gradient → color ramp, Pattern → atlas, SDF → line atlas) on the
+        // drape builder before flushing.
         const auto emitDrapeLineVariant = [&](LineLayerTweaker::LineType variant,
                                                 const gfx::ShaderGroupPtr& shaderGroup,
-                                                const std::string& nameSuffix) {
+                                                const std::string& nameSuffix,
+                                                const std::function<void(gfx::DrawableBuilder&)>& configureExtras = {}) {
             if (!activeTerrain || !shaderGroup) return;
             activeTerrain->visitDrapeTargets(
                 [&](const OverscaledTileID& drapeID, TerrainDrapeTargetPtr& drapeTarget) {
@@ -476,6 +480,9 @@ void RenderLineLayer::update(gfx::ShaderRegistry& shaders,
                         idLineColorVertexAttribute);
 
                     addAttributes(*drapeBuilder, bucket, std::move(drapeVertexAttrs));
+                    if (configureExtras) {
+                        configureExtras(*drapeBuilder);
+                    }
                     setSegments(drapeBuilder, bucket);
                     drapeBuilder->flush(context);
 
@@ -592,6 +599,16 @@ void RenderLineLayer::update(gfx::ShaderRegistry& shaders,
 
             if (colorRampTexture2D) {
                 builder->setTexture(colorRampTexture2D, idLineImageTexture);
+
+                // Drape routing: bind the same color-ramp texture on the
+                // drape builder so the terrain mesh sees the gradient too.
+                emitDrapeLineVariant(
+                    LineLayerTweaker::LineType::Gradient,
+                    lineGradientShaderGroup,
+                    "lineGradient",
+                    [&](gfx::DrawableBuilder& db) {
+                        db.setTexture(colorRampTexture2D, idLineImageTexture);
+                    });
 
                 setSegments(builder, bucket);
 
