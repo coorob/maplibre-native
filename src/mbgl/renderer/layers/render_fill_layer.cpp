@@ -424,10 +424,28 @@ void RenderFillLayer::update(gfx::ShaderRegistry& shaders,
                     if (!drapeBuilder) return;
                     drapeBuilder->setShader(shader);
                     drapeBuilder->setCullFaceMode(gfx::CullFaceMode::disabled());
-                    drapeBuilder->setDepthType(gfx::DepthMaskType::ReadWrite);
+                    drapeBuilder->setDepthType(gfx::DepthMaskType::ReadOnly);
                     drapeBuilder->setColorMode(gfx::ColorMode::alphaBlended());
                     drapeBuilder->setRenderPass(renderPass);
-                    drapeBuilder->setVertexAttributes(vertexAttrs); // copy
+                    // Fresh vertex attrs for the drape builder — sharing
+                    // ownership with the main fillBuilder (which std::moves
+                    // them later) caused the drape draw to silently drop its
+                    // vertex attributes. Critically, we have to set the
+                    // POSITION attribute from `bucket.sharedVertices` here too;
+                    // without it the vertex shader gets zeros for position and
+                    // every fragment collapses to a single point.
+                    auto drapeVertexAttrs = context.createVertexAttributeArray();
+                    StringIDSetsPair drapePropsAsUniforms;
+                    drapeVertexAttrs->readDataDrivenPaintProperties<FillColor, FillOpacity, FillOutlineColor, FillPattern>(
+                        binders, evaluated, drapePropsAsUniforms, idFillColorVertexAttribute);
+                    if (const auto& posAttr = drapeVertexAttrs->set(idFillPosVertexAttribute)) {
+                        posAttr->setSharedRawData(bucket.sharedVertices,
+                                                  offsetof(FillLayoutVertex, a1),
+                                                  /*vertexOffset=*/0,
+                                                  sizeof(FillLayoutVertex),
+                                                  gfx::AttributeDataType::Short2);
+                    }
+                    drapeBuilder->setVertexAttributes(std::move(drapeVertexAttrs));
                     drapeBuilder->setRawVertices({}, fillVertexCount, gfx::AttributeDataType::Short2);
                     setSegments(*drapeBuilder);
                     drapeBuilder->flush(context);

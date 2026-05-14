@@ -68,7 +68,7 @@ void RenderTarget::render(RenderOrchestrator& orchestrator, const RenderTree& re
     parameters.renderPass = parameters.encoder->createRenderPass("render target",
                                                                  {.renderable = *offscreenTexture,
                                                                   .clearColor = clearColor,
-                                                                  .clearDepth = {},
+                                                                  .clearDepth = 1.0f,
                                                                   .clearStencil = {}});
 
     // Run layer tweakers to update any dynamic elements
