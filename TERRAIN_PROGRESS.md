@@ -164,11 +164,13 @@ implementation uses per-tile targets and there are concrete reasons:
 ### Why we didn't refactor `createTestMapTexture` away yet (Phase 1 vs 3)
 
 The Phase 1 commit leaves Jesse's checkerboard placeholder in place
-even though the drape cache now allocates real targets. This is
-deliberate — Phase 2 needs to actually render content into the targets
-before binding their textures is meaningful, and we wanted Phase 1 to
-land as a no-visual-change scaffolding commit so it's easy to bisect if
-something downstream breaks.
+even though the drape cache now allocates real targets. This was
+deliberate so Phase 1 could land as a no-visual-change scaffolding
+commit. Phase 3 swapped the binding (commit `5a6ff27`) — now the
+terrain shader samples the drape target's texture, which is currently
+empty, so the mesh renders dark instead of checkerboard. The
+checkerboard fallback is kept only for the defensive case where the
+cache somehow doesn't have a target for a tile.
 
 ### Why the new `TerrainDrapeTargetPtr` alias
 
@@ -181,6 +183,110 @@ inconsistency we didn't want to widen, so we use a locally-named alias
 The right cleanup, if we upstream this, is to add `using
 RenderTargetPtr = std::shared_ptr<RenderTarget>;` to `render_target.hpp`
 itself and use that everywhere. Out of scope here.
+
+## Phase 2 design notes
+
+Phase 2 is "route 2D layer drawables into per-tile drape RenderTargets
+when terrain is active". It's the heavy lift — the other phases are all
+plumbing around it. Documenting the entry points and design tradeoffs so
+the next contributor can pick up cleanly.
+
+### The orchestrator hook
+
+`src/mbgl/renderer/render_orchestrator.cpp:1002`:
+
+```cpp
+for (const auto& item : items) {
+    auto& renderLayer = item.layer.get();
+    renderLayer.update(shaders, context, state, updateParameters,
+                       renderTree, changes);
+}
+
+if (renderTerrain && renderTerrain->isEnabled()) {
+    renderTerrain->update(*this, shaders, context, state,
+                          updateParameters, renderTree, changes);
+}
+```
+
+Each `renderLayer.update()` is what causes a `RenderBackgroundLayer`,
+`RenderFillLayer`, etc. to emit `AddDrawableRequest`s for the main
+layer-group hierarchy. This is the natural intercept point. Terrain
+runs AFTER the per-layer loop, which is correct for Phase 1+3 (we need
+visible-tile data to know what targets to allocate), but Phase 2 needs
+to influence the loop itself.
+
+### Three design approaches and tradeoffs
+
+1. **Per-layer terrain-awareness.** Add a `RenderTarget*` (or tile set)
+   argument to `RenderLayer::update()`. Each layer type knows how to
+   redirect its drawables. Highest fidelity, but touches every layer
+   class.
+
+2. **Change-request interception.** After each `layer.update()` call,
+   walk the new `AddDrawableRequest`s. If terrain is on and the layer
+   is drapeable, clone the request to also target each visible tile's
+   drape target with the tile's projection matrix. Mid-blast-radius;
+   doesn't require modifying layer classes, but the per-tile cloning
+   has to happen at the request level which is awkward (drawables
+   aren't cheaply clone-able).
+
+3. **Drawable shim layer.** Introduce a new abstraction — a
+   `RoutingLayerGroup` that wraps the main layer group and, when
+   terrain is on, splays each `addDrawable()` call across the visible
+   tiles' drape-target layer groups. Layers stay unaware; the
+   orchestrator hands them this routing wrapper instead of the main
+   layer group when terrain is on. Cleanest in terms of layer code,
+   but requires careful matrix arithmetic in the wrapper.
+
+`maplibre-gl-js` uses **approach 1** via the
+`IRenderToTexture.renderLayer(layer, renderOptions)` interface (see
+`src/render/render_to_texture_interface.ts` and `src/render/painter.ts:530+`).
+Each layer is given a chance to "render itself into the texture"
+before the painter renders it normally. The texture binding stays in
+the layer, which keeps its matrix handling intact.
+
+Recommendation for MapLibre Native: **mirror approach 1.** It matches
+the JS architecture (easier to port the gl-js logic file-by-file), it
+keeps layer-specific matrix math inside the layer (so we don't have
+to re-implement projection math in a wrapper), and the existing
+`RenderLayer::update()` signature already takes a `changes` vector
+which the layer can populate differently.
+
+### Concrete first step (when picking this up)
+
+Start with **background layer only** — it's the simplest:
+
+1. Add an optional `RenderTarget*` parameter (or a per-tile `RenderTarget*`
+   lookup) to `RenderLayer::update()`.
+2. In `RenderBackgroundLayer::update()`, when the optional is set,
+   emit a drawable for each visible DEM tile (looked up via the new
+   `RenderTerrain::getDrapeTarget(tileID)` accessor — needs adding)
+   whose `addLayerGroup` is the drape target's layer group, instead
+   of the main layer group.
+3. Verify visually: terrain mesh now renders the background colour
+   (a flat colour for most styles) draped over the displaced surface.
+4. Repeat the pattern for `RenderFillLayer`, `RenderLineLayer`,
+   `RenderRasterLayer` in order of complexity.
+
+`RenderSymbolLayer` is special — symbols (text + icons) typically
+should NOT be draped (they should float above the terrain at their
+unprojected positions). Per gl-js, symbol layers skip the drape pass
+and render to the main framebuffer last, on top of the terrain.
+
+### Files that will need touching (Phase 2)
+
+- `include/mbgl/renderer/render_layer.hpp` — add the drape-target hook
+  to `RenderLayer::update()`
+- `src/mbgl/renderer/render_orchestrator.cpp` — line ~1002, pass the
+  drape-target lookup through to each layer's update
+- `src/mbgl/renderer/render_terrain.hpp/.cpp` — add a public
+  `getDrapeTarget(tileID)` accessor (or a "for each visible tile,
+  drape target" callable)
+- `src/mbgl/renderer/layers/render_background_layer.cpp` (start here)
+- `src/mbgl/renderer/layers/render_fill_layer.cpp`
+- `src/mbgl/renderer/layers/render_line_layer.cpp`
+- `src/mbgl/renderer/layers/render_raster_layer.cpp`
+- Skip `render_symbol_layer.cpp` for first ship (see above)
 
 ## Known issues / things to revisit
 
