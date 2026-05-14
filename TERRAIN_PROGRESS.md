@@ -674,6 +674,32 @@ Likely next steps for whoever picks this up:
    quad and visibly works upstream. The structural similarity might
    reveal a missing call.
 
+### GL backend port (2026-05-15)
+
+Commit `24efce5` ports the terrain shader to the OpenGL backend:
+
+- `include/mbgl/shaders/gl/terrain.hpp` — vertex + fragment shaders in
+  GLSL ES with `std140` uniform blocks. Mirrors the Metal shader
+  structurally: DEM-sampled elevation in the vertex stage, drape-texture
+  sample + dfdx/dfdy diffuse hillshading + style light in the fragment
+  stage. Falls back to elevation gradient when the drape is empty,
+  same as Metal.
+- `include/mbgl/shaders/gl/shader_info.hpp` — declares the
+  `ShaderInfo<TerrainShader, OpenGL>` specialisation alongside the
+  others.
+- `src/mbgl/shaders/gl/shader_info.cpp` — defines the attribute /
+  uniform block / texture registration so the linker knows about
+  `TerrainDrawableUBO`, `TerrainEvaluatedPropsUBO`, the two attributes
+  and the two textures.
+- `src/mbgl/gl/renderer_backend.cpp` — adds `BuiltIn::TerrainShader`
+  to the GL backend's `initShaders` registration list.
+
+Core lib (`//:mbgl-core`) builds clean with `--//:renderer=drawable`
+(GL/drawable mode). Cannot visually verify on iOS — MapLibre Native
+iOS is Metal-only (`MLNMapView.mm` hardcodes `mbgl/mtl` headers), so
+the GL shader will exercise on Android / Linux / macOS native targets.
+Metal still builds clean (no regression).
+
 ### Overnight session summary (2026-05-15, 00:00–00:30)
 
 Three commits added while the user slept (`de288b0`, `c859228`,
