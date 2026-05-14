@@ -713,8 +713,13 @@ NSArray<MLNAttributionInfo *> *MLNAttributionInfosFromAttributions(mbgl::MapSnap
         resourceOptions.withApiKey([apiKey UTF8String]);
     }
 
-    // Create the snapshotter
-    auto localFontFamilyName = config.localFontFamilyName ? std::string(config.localFontFamilyName.UTF8String) : nullptr;
+    // Create the snapshotter. The mbgl ctor takes std::optional<std::string>
+    // for the optional local font family — modern Clang (Xcode 26) won't let
+    // a ternary unify std::string and nullptr, so explicitly construct the
+    // optional and use std::nullopt when no family is set.
+    std::optional<std::string> localFontFamilyName = config.localFontFamilyName
+        ? std::optional<std::string>(std::string(config.localFontFamilyName.UTF8String))
+        : std::nullopt;
     _delegateHost = std::make_unique<MLNMapSnapshotterDelegateHost>(self);
     _mbglMapSnapshotter = std::make_unique<mbgl::MapSnapshotter>(
                                                                  size, pixelRatio, resourceOptions, clientOptions, *_delegateHost, localFontFamilyName);

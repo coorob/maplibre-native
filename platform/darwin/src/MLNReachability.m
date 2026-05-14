@@ -29,7 +29,9 @@
 
 #import <sys/socket.h>
 #import <netinet/in.h>
-#import <netinet6/in6.h>
+// Xcode 26 SDK rejects direct inclusion of <netinet6/in6.h>; <netinet/in.h>
+// transitively pulls in the IPv6 definitions per RFC 2553. Dropped the
+// explicit netinet6/in6.h import to satisfy the SDK module check.
 #import <arpa/inet.h>
 #import <ifaddrs.h>
 #import <netdb.h>

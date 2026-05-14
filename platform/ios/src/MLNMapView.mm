@@ -6475,8 +6475,12 @@ static void *windowScreenContext = &windowScreenContext;
           peakAltitude:-1
      completionHandler:^{
         MLNMapView *strongSelf = weakSelf;
-        if (strongSelf.userTrackingState == MLNUserTrackingStateBegan ||
-            strongSelf.userTrackingState == MLNDistanceThresholdForCameraPause)
+        // The second clause of the original OR compared the enum to
+        // `MLNDistanceThresholdForCameraPause` (a CLLocationDistance), which
+        // was always false — Xcode 26's clang errors on the type mismatch.
+        // The intent was clearly just "if we were still mid-fly, advance to
+        // Changed", so drop the dead comparison.
+        if (strongSelf.userTrackingState == MLNUserTrackingStateBegan)
         {
             strongSelf.userTrackingState = MLNUserTrackingStateChanged;
         }
