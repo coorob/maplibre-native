@@ -375,6 +375,69 @@ void RenderFillLayer::update(gfx::ShaderRegistry& shaders,
                                        !evaluated.get<FillOpacity>().isConstant();
 #endif
 
+        // Phase 2 drape routing: per-variant helper that emits a copy of the
+        // current source-tile's fill geometry into each overlapping DEM tile's
+        // drape RenderTarget. Called for FillVariant::Fill (triangles) below,
+        // and again for FillVariant::FillOutline (lines) so polygon edges
+        // also drape onto the terrain mesh.
+        const auto emitDrapeVariant = [&](FillVariant variant,
+                                           const std::shared_ptr<gfx::ShaderProgramBase>& shader,
+                                           const std::string& nameSuffix,
+                                           const std::function<void(gfx::DrawableBuilder&)>& setSegments) {
+            if (!activeTerrain || !shader) return;
+            activeTerrain->visitDrapeTargets(
+                [&](const OverscaledTileID& drapeID, TerrainDrapeTargetPtr& drapeTarget) {
+                    if (!drapeTarget || !LayerTweaker::tilesOverlap(tileID, drapeID)) return;
+
+                    auto& tw = drapeLayerTweakers[drapeID];
+                    if (!tw) {
+                        tw = std::make_shared<FillLayerTweaker>(
+                            getID() + "-drape", evaluatedProperties, drapeID);
+                    }
+
+                    auto* drapeGroup = static_cast<TileLayerGroup*>(
+                        drapeTarget->getLayerGroup(layerIndex).get());
+                    if (!drapeGroup) {
+                        auto newGroup = context.createTileLayerGroup(
+                            layerIndex, /*initialCapacity=*/4, getID() + "-drape");
+                        if (!newGroup) return;
+                        newGroup->addLayerTweaker(tw);
+                        drapeTarget->addLayerGroup(newGroup, /*replace=*/false);
+                        drapeGroup = newGroup.get();
+                    }
+
+                    // Per-variant dedup so Fill and FillOutline can coexist
+                    // for the same source tile in the same drape group.
+                    bool alreadyHasVariant = false;
+                    drapeGroup->visitDrawables(renderPass, tileID, [&](const gfx::Drawable& d) {
+                        if (d.getType() == static_cast<size_t>(variant)) alreadyHasVariant = true;
+                    });
+                    if (alreadyHasVariant) return;
+
+                    auto drapeBuilder = context.createDrawableBuilder(layerPrefix + nameSuffix + "-drape");
+                    if (!drapeBuilder) return;
+                    drapeBuilder->setShader(shader);
+                    drapeBuilder->setCullFaceMode(gfx::CullFaceMode::disabled());
+                    drapeBuilder->setDepthType(gfx::DepthMaskType::ReadWrite);
+                    drapeBuilder->setColorMode(gfx::ColorMode::alphaBlended());
+                    drapeBuilder->setRenderPass(renderPass);
+                    drapeBuilder->setVertexAttributes(vertexAttrs); // copy
+                    drapeBuilder->setRawVertices({}, fillVertexCount, gfx::AttributeDataType::Short2);
+                    setSegments(*drapeBuilder);
+                    drapeBuilder->flush(context);
+
+                    for (auto& drapeDrawable : drapeBuilder->clearDrawables()) {
+                        drapeDrawable->setTileID(tileID);
+                        drapeDrawable->setType(static_cast<size_t>(variant));
+                        drapeDrawable->setLayerTweaker(tw);
+                        drapeDrawable->setBinders(renderData->bucket, &binders);
+                        drapeDrawable->setRenderTile(renderTilesOwner, &tile);
+                        drapeGroup->addDrawable(renderPass, tileID, std::move(drapeDrawable));
+                        ++stats.drawablesAdded;
+                    }
+                });
+        };
+
         if (unevaluated.get<FillPattern>().isUndefined()) {
             // Simple fill
             if (!fillShaderGroup || (doOutline && !outlineShaderGroup)) {
@@ -449,64 +512,23 @@ void RenderFillLayer::update(gfx::ShaderRegistry& shaders,
                 }
 #endif
 
-                // Phase 2 drape routing: when terrain is active, also emit a
-                // copy of this fill drawable into each overlapping DEM tile's
-                // drape RenderTarget so the terrain mesh can sample landcover,
-                // water, etc. as its surface texture. We piggy-back on the
-                // existing bucket/binders/shader/vertexAttrs — the drape
-                // drawable differs only in its matrix (computed by the
-                // per-target FillLayerTweaker via getDrapeMatrix).
-                if (activeTerrain) {
-                    activeTerrain->visitDrapeTargets(
-                        [&](const OverscaledTileID& drapeID, TerrainDrapeTargetPtr& drapeTarget) {
-                            if (!drapeTarget || !LayerTweaker::tilesOverlap(tileID, drapeID)) return;
-
-                            auto& tw = drapeLayerTweakers[drapeID];
-                            if (!tw) {
-                                tw = std::make_shared<FillLayerTweaker>(
-                                    getID() + "-drape", evaluatedProperties, drapeID);
-                            }
-
-                            auto* drapeGroup = static_cast<TileLayerGroup*>(
-                                drapeTarget->getLayerGroup(layerIndex).get());
-                            if (!drapeGroup) {
-                                auto newGroup = context.createTileLayerGroup(
-                                    layerIndex, /*initialCapacity=*/4, getID() + "-drape");
-                                if (!newGroup) return;
-                                newGroup->addLayerTweaker(tw);
-                                drapeTarget->addLayerGroup(newGroup, /*replace=*/false);
-                                drapeGroup = newGroup.get();
-                            }
-
-                            // Skip if drape already has a drawable for this source tile.
-                            if (drapeGroup->getDrawableCount(renderPass, tileID) > 0) return;
-
-                            auto drapeBuilder = context.createDrawableBuilder(layerPrefix + "fill-drape");
-                            if (!drapeBuilder) return;
-                            drapeBuilder->setShader(fillShader);
-                            drapeBuilder->setCullFaceMode(gfx::CullFaceMode::disabled());
-                            drapeBuilder->setDepthType(gfx::DepthMaskType::ReadWrite);
-                            drapeBuilder->setColorMode(gfx::ColorMode::alphaBlended());
-                            drapeBuilder->setRenderPass(renderPass);
-                            drapeBuilder->setVertexAttributes(vertexAttrs); // copy
-                            drapeBuilder->setRawVertices(
-                                {}, fillVertexCount, gfx::AttributeDataType::Short2);
-                            drapeBuilder->setSegments(gfx::Triangles(),
-                                                       bucket.sharedTriangles,
-                                                       bucket.triangleSegments.data(),
-                                                       bucket.triangleSegments.size());
-                            drapeBuilder->flush(context);
-
-                            for (auto& drapeDrawable : drapeBuilder->clearDrawables()) {
-                                drapeDrawable->setTileID(tileID);
-                                drapeDrawable->setType(static_cast<size_t>(FillVariant::Fill));
-                                drapeDrawable->setLayerTweaker(tw);
-                                drapeDrawable->setBinders(renderData->bucket, &binders);
-                                drapeDrawable->setRenderTile(renderTilesOwner, &tile);
-                                drapeGroup->addDrawable(
-                                    renderPass, tileID, std::move(drapeDrawable));
-                                ++stats.drawablesAdded;
-                            }
+                emitDrapeVariant(
+                    FillVariant::Fill, fillShader, "fill", [&](gfx::DrawableBuilder& b) {
+                        b.setSegments(gfx::Triangles(),
+                                      bucket.sharedTriangles,
+                                      bucket.triangleSegments.data(),
+                                      bucket.triangleSegments.size());
+                    });
+                if (doOutline && outlineShader && bucket.sharedBasicLineIndexes->elements()) {
+                    emitDrapeVariant(
+                        FillVariant::FillOutline,
+                        outlineShader,
+                        "fill-outline",
+                        [&](gfx::DrawableBuilder& b) {
+                            b.setSegments(gfx::Lines(lineWidth),
+                                          bucket.sharedBasicLineIndexes,
+                                          bucket.basicLineSegments.data(),
+                                          bucket.basicLineSegments.size());
                         });
                 }
 
