@@ -10,6 +10,7 @@
 #include <mbgl/util/convert.hpp>
 #include <mbgl/util/mat4.hpp>
 #include <mbgl/util/logging.hpp>
+#include <mbgl/util/projection.hpp>
 
 namespace mbgl {
 
@@ -73,6 +74,19 @@ void TerrainLayerTweaker::execute(LayerGroupBase& layerGroup, const PaintParamet
         // Calculate transformation matrix for this terrain tile
         // This uses the same matrix calculation as other layers
         mat4 matrix = parameters.matrixForTile(tileID);
+
+        // Vertices feed elevation in metres on the Z axis. The base tile
+        // matrix scales X/Y from tile units to mercator world-pixels but
+        // leaves Z scale at 1, so meters would feed into clip-space
+        // unscaled and the mesh collapses to a near-flat plane. Scale
+        // the Z column by pixelsPerMeter (same trick Camera uses for
+        // its world-to-camera matrix), so metres feed in correctly.
+        const double pixelsPerMeter = 1.0 / Projection::getMetersPerPixelAtLatitude(
+            state.getLatLng().latitude(), state.getZoom());
+        matrix[8] *= pixelsPerMeter;
+        matrix[9] *= pixelsPerMeter;
+        matrix[10] *= pixelsPerMeter;
+        matrix[11] *= pixelsPerMeter;
 
 #if !MLN_UBO_CONSOLIDATION
         auto& drawableUniforms = drawable.mutableUniformBuffers();
