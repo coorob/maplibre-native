@@ -317,12 +317,14 @@ CLLocationCoordinate2D randomWorldCoordinate(void) {
 //        [self.mapView setCenterCoordinate:C zoomLevel:10 direction:0 animated:NO];
         // Klättra default: Kebnekaise massif (Sweden's highest peak, 2100 m).
         // Picked for testing — most dramatic 3D terrain in our DEM coverage.
-        // Start at modest pitch + zoom so the map content is visible; pitch
-        // can be tilted up in-app to test the 3D terrain extrusion.
-        [self.mapView setCenterCoordinate:CLLocationCoordinate2DMake(67.9026, 18.4954)
-                                zoomLevel:10
-                                direction:0
-                                 animated:NO];
+        // Use a tilted camera so the 3D-extruded terrain mesh is visibly
+        // distinct from a flat overhead view. Pitch 55° gives a clear
+        // mountain silhouette without losing too much surrounding context.
+        MLNMapCamera *camera = [MLNMapCamera cameraLookingAtCenterCoordinate:CLLocationCoordinate2DMake(67.9026, 18.4954)
+                                                              acrossDistance:15000
+                                                                       pitch:55
+                                                                     heading:0];
+        [self.mapView setCamera:camera withDuration:0 animationTimingFunction:nil completionHandler:nil];
     } else {
         // Revert to the previously saved state
         [self restoreMapState:nil];
