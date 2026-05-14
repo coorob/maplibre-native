@@ -5,6 +5,7 @@
 #include <mbgl/tile/tile_id.hpp>
 #include <mbgl/gfx/vertex_buffer.hpp>
 #include <mbgl/gfx/index_buffer.hpp>
+#include <mbgl/renderer/render_terrain_drape_cache.hpp>
 
 #include <memory>
 #include <map>
@@ -173,6 +174,20 @@ private:
 
     // Track which tiles have terrain drawables
     std::unordered_map<OverscaledTileID, bool> tilesWithDrawables;
+
+    // Per-tile drape RenderTargets. When terrain is active, the 2D layers
+    // for each visible tile render into one of these offscreen textures
+    // instead of straight to the framebuffer; the terrain shader then
+    // samples the matching target as the surface colour of the displaced
+    // mesh. Phase 1 just allocates and lifecycle-manages the targets; the
+    // actual layer routing into them is Phase 2 (see FINISH_TERRAIN.md).
+    TerrainDrapeCache drapeCache;
+
+    // Pixel size of each drape target. Matches our DEM tile size so the
+    // texture sampling lines up 1:1 with the elevation grid in the vertex
+    // shader. Hard-coded for now; future work may read this from the DEM
+    // source metadata to support 256-tile terrarium sources too.
+    static constexpr int32_t DRAPE_TARGET_SIZE = 512;
 
     // Mesh resolution (vertices per side)
     static constexpr size_t MESH_SIZE = 128;

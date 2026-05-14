@@ -267,6 +267,8 @@ MLN_CORE_SOURCE = [
     "src/mbgl/renderer/render_static_data.cpp",
     "src/mbgl/renderer/render_terrain.cpp",
     "src/mbgl/renderer/render_terrain.hpp",
+    "src/mbgl/renderer/render_terrain_drape_cache.cpp",
+    "include/mbgl/renderer/render_terrain_drape_cache.hpp",
     "src/mbgl/renderer/render_static_data.hpp",
     "src/mbgl/renderer/render_tile.cpp",
     "src/mbgl/renderer/render_tile.hpp",

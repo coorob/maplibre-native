@@ -31,6 +31,7 @@
 
 #include <cmath>
 #include <cstring>
+#include <unordered_set>
 
 namespace mbgl {
 
@@ -179,6 +180,38 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
     if (newDrawables > 0) {
         Log::Info(Event::Render, "Terrain created " + std::to_string(newDrawables) + " new drawables (total: " +
                   std::to_string(tilesWithDrawables.size()) + ")");
+    }
+
+    // Phase 1 of the drape pass (see FINISH_TERRAIN.md): ensure a per-tile
+    // RenderTarget exists for every currently-visible DEM tile, and prune
+    // targets for tiles that have left the visible set. Phase 2 will route
+    // 2D layer drawables into these targets; Phase 3 will bind the target
+    // textures into the terrain shader as the surface colour. For now the
+    // targets are just allocated and registered — they render empty, which
+    // means the existing checkerboard placeholder is still visible.
+    {
+        std::unordered_set<OverscaledTileID> currentTileIDs;
+        currentTileIDs.reserve(renderTiles->size());
+        for (const auto& renderTile : *renderTiles) {
+            const auto& tileID = renderTile.getOverscaledTileID();
+            currentTileIDs.insert(tileID);
+            const bool wasAllocated = drapeCache.get(tileID) != nullptr;
+            auto target = drapeCache.getOrCreate(context, tileID, {DRAPE_TARGET_SIZE, DRAPE_TARGET_SIZE});
+            if (!wasAllocated && target) {
+                changes.emplace_back(std::make_unique<AddRenderTargetRequest>(target));
+            }
+        }
+        const auto evicted = drapeCache.pruneIf(
+            [&](const OverscaledTileID& id) { return currentTileIDs.find(id) == currentTileIDs.end(); });
+        for (const auto& id : evicted) {
+            // The cache already dropped its shared_ptr; the orchestrator's
+            // reference goes away when its own removal request lands. Note
+            // that pruneIf returns the IDs that were removed but not the
+            // targets themselves — we need a separate map if we want to
+            // emit RemoveRenderTargetRequests precisely. For now, log the
+            // eviction so we can see the lifecycle behavior during testing.
+            Log::Info(Event::Render, "Terrain drape target evicted for tile " + util::toString(id));
+        }
     }
 }
 
