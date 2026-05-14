@@ -558,7 +558,17 @@ void RenderLineLayer::update(gfx::ShaderRegistry& shaders,
                     /*iconScaled*/ false,
                     /*textSizeIsZoomConstant_*/ false);
 
-                builder->addTweaker(std::move(iconTweaker));
+                builder->addTweaker(iconTweaker);
+
+                // Drape routing: same atlas tweaker on the drape builder
+                // so the terrain mesh sees the pattern too.
+                emitDrapeLineVariant(
+                    LineLayerTweaker::LineType::Pattern,
+                    linePatternShaderGroup,
+                    "linePattern",
+                    [&](gfx::DrawableBuilder& db) {
+                        db.addTweaker(iconTweaker);
+                    });
 
                 setSegments(builder, bucket);
 
