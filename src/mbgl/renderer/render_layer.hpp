@@ -261,6 +261,19 @@ protected:
 
     static bool applyColorRamp(const style::ColorRampPropertyValue&, PremultipliedImage&);
 
+public:
+    /// Non-owning pointer to the active `RenderTerrain` during the current
+    /// per-frame `update()` pass, or nullptr if terrain is disabled. Set
+    /// by `RenderOrchestrator::update()` immediately before invoking each
+    /// layer's `update()` and cleared right after. Layers that participate
+    /// in the drape pass (background, fill, line, raster) read this to
+    /// look up the per-tile drape `RenderTarget` they should route their
+    /// drawables into instead of the main framebuffer. Other layers
+    /// (symbol, terrain itself, …) should ignore it.
+    ///
+    /// Phase 2 scaffolding — see TERRAIN_PROGRESS.md.
+    class RenderTerrain* activeTerrain = nullptr;
+
 protected:
     // Stores current set of tiles to be rendered for this layer.
     RenderTiles renderTiles;

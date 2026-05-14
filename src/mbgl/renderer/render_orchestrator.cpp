@@ -990,6 +990,22 @@ void RenderOrchestrator::updateLayers(gfx::ShaderRegistry& shaders,
     std::vector<std::unique_ptr<ChangeRequest>> changes;
     changes.reserve(items.size() * 3);
 
+    // Phase 2 scaffolding: run terrain.update() BEFORE the per-layer loop
+    // so the drape cache is populated by the time each layer's update()
+    // runs and tries to look up its tile's drape target via
+    // `activeTerrain->getDrapeTarget(tileID)`. Drawable order within the
+    // frame doesn't matter — the GPU passes render drape targets first
+    // (filling the per-tile textures) then the main framebuffer (where
+    // the terrain mesh samples those textures), regardless of the order
+    // in which the CPU-side drawables were created.
+    if (renderTerrain && renderTerrain->isEnabled()) {
+        renderTerrain->update(*this, shaders, context, state, updateParameters, renderTree, changes);
+    }
+
+    RenderTerrain* const activeTerrain = (renderTerrain && renderTerrain->isEnabled())
+                                             ? renderTerrain.get()
+                                             : nullptr;
+
     for (const auto& item : items) {
         auto& renderLayer = item.layer.get();
 #if MLN_RENDER_BACKEND_OPENGL
@@ -999,12 +1015,12 @@ void RenderOrchestrator::updateLayers(gfx::ShaderRegistry& shaders,
             renderLayer.removeAllDrawables();
         }
 #endif
+        // Give the layer access to RenderTerrain only for the duration of
+        // its update() call. Cleared afterward so any out-of-band caller
+        // can't accidentally use a stale pointer.
+        renderLayer.activeTerrain = activeTerrain;
         renderLayer.update(shaders, context, state, updateParameters, renderTree, changes);
-    }
-
-    // Update terrain if enabled
-    if (renderTerrain && renderTerrain->isEnabled()) {
-        renderTerrain->update(*this, shaders, context, state, updateParameters, renderTree, changes);
+        renderLayer.activeTerrain = nullptr;
     }
 
     addChanges(changes);
