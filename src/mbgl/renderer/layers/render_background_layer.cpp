@@ -241,6 +241,14 @@ void RenderBackgroundLayer::update(gfx::ShaderRegistry& shaders,
     // setup almost line-for-line, swapping the source of the RenderTarget
     // (Phase 1 drape cache instead of a fresh allocation per layer).
     if (activeTerrain) {
+        // Lazily construct the drape-pass tweaker (ortho matrix instead of
+        // the camera's getTileMatrix). Same evaluated properties as the
+        // main tweaker so colour / opacity / pattern stay in sync.
+        if (!drapeLayerTweaker) {
+            drapeLayerTweaker = std::make_shared<BackgroundLayerTweaker>(
+                getID() + "-drape", evaluatedProperties, /*drapeMode=*/true);
+        }
+
         std::unique_ptr<gfx::DrawableBuilder> drapeBuilder;
         for (const auto& tileID : tileCover) {
             auto drape = activeTerrain->getDrapeTarget(tileID);
@@ -255,7 +263,7 @@ void RenderBackgroundLayer::update(gfx::ShaderRegistry& shaders,
                 auto newGroup = context.createTileLayerGroup(
                     /*layerIndex=*/0, /*initialCapacity=*/1, getID() + "-drape");
                 if (!newGroup) continue;
-                newGroup->addLayerTweaker(layerTweaker); // reuse main tweaker for v1
+                newGroup->addLayerTweaker(drapeLayerTweaker);
                 drape->addLayerGroup(newGroup, /*replace=*/false);
                 drapeGroup = newGroup.get();
             }
@@ -284,7 +292,7 @@ void RenderBackgroundLayer::update(gfx::ShaderRegistry& shaders,
 
             for (auto& drawable : drapeBuilder->clearDrawables()) {
                 drawable->setTileID(tileID);
-                drawable->setLayerTweaker(layerTweaker);
+                drawable->setLayerTweaker(drapeLayerTweaker);
                 drapeGroup->addDrawable(drawPasses, tileID, std::move(drawable));
                 ++stats.drawablesAdded;
             }

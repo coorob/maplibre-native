@@ -47,6 +47,13 @@ private:
     // Drawable shaders
     gfx::ShaderProgramBasePtr plainShader;
     gfx::ShaderProgramBasePtr patternShader;
+
+    // Phase 2 drape pass — separate tweaker used for drawables emitted
+    // into per-tile drape RenderTargets when terrain is active. Lazily
+    // constructed on first use. Same evaluated properties as the main
+    // tweaker, but constructed with drapeMode=true so it produces the
+    // tile-local-to-NDC ortho matrix expected by an offscreen pass.
+    std::shared_ptr<class BackgroundLayerTweaker> drapeLayerTweaker;
 };
 
 } // namespace mbgl
