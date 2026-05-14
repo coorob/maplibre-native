@@ -673,3 +673,26 @@ Likely next steps for whoever picks this up:
    builder setup**, which uses a RenderTarget with a single full-tile
    quad and visibly works upstream. The structural similarity might
    reveal a missing call.
+
+### Magenta-test confirmation
+
+Last diagnostic run before stopping: forced the drape FillLayerTweaker
+to write `Color{1, 0, 1, 1}` (bright magenta) into the FillEvaluatedPropsUBO
+when `drapeTargetID` is set. With main fill disabled (so drape is the
+only source of fill colour on the terrain), the terrain mesh shows
+the same cream-shaded hillshade — **no magenta anywhere**. The drape
+trace still says `drew=2` for `land-glaciar-drape`.
+
+Combined with the trace log, this proves: the fill drape drawable
+gets fully through `drawable.draw(parameters)`, but the resulting
+fragments produce zero visible output in the drape target's colour
+attachment. Either the vertex shader transforms vertices outside
+clip space (silent), the fragment shader writes alpha=0, or the
+Metal pipeline state is mis-configured in a way that drops fragments.
+
+The same fragment shader visibly works for main-pass fill drawables
+with otherwise-identical setup (only the matrix differs via the drape
+tweaker's `drapeTargetID` branch). The most suspect remaining surface
+is the vertex shader path through `FillBinders` and per-vertex
+attribute setup. Worth attaching a Metal frame capture next session
+to inspect the drape pipeline state and the actual fragments emitted.
