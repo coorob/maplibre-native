@@ -16,6 +16,7 @@
 #include <mbgl/gfx/drawable_impl.hpp>
 #include <mbgl/gfx/drawable_builder.hpp>
 #include <mbgl/renderer/layer_group.hpp>
+#include <mbgl/renderer/render_terrain.hpp>
 #include <mbgl/renderer/update_parameters.hpp>
 #include <mbgl/shaders/shader_program_base.hpp>
 
@@ -362,6 +363,50 @@ void RenderRasterLayer::update(gfx::ShaderRegistry& shaders,
                 drawable->setLayerTweaker(layerTweaker);
                 tileLayerGroup->addDrawable(renderPass, tileID, std::move(drawable));
                 ++stats.drawablesAdded;
+            }
+
+            // Phase 2 drape routing: emit a copy of this raster tile into each
+            // overlapping DEM drape RenderTarget so the terrain mesh can sample
+            // raster basemap content (e.g. satellite tiles) as it displaces.
+            if (activeTerrain) {
+                activeTerrain->visitDrapeTargets(
+                    [&](const OverscaledTileID& drapeID, TerrainDrapeTargetPtr& drapeTarget) {
+                        if (!drapeTarget || !LayerTweaker::tilesOverlap(tileID, drapeID)) return;
+
+                        auto& tw = drapeLayerTweakers[drapeID];
+                        if (!tw) {
+                            tw = std::make_shared<RasterLayerTweaker>(
+                                getID() + "-drape", evaluatedProperties, drapeID);
+                        }
+
+                        auto* drapeGroup = static_cast<TileLayerGroup*>(
+                            drapeTarget->getLayerGroup(layerIndex).get());
+                        if (!drapeGroup) {
+                            auto newGroup = context.createTileLayerGroup(
+                                layerIndex, /*initialCapacity=*/4, getID() + "-drape");
+                            if (!newGroup) return;
+                            newGroup->addLayerTweaker(tw);
+                            drapeTarget->addLayerGroup(newGroup, /*replace=*/false);
+                            drapeGroup = newGroup.get();
+                        }
+
+                        if (drapeGroup->getDrawableCount(renderPass, tileID) > 0) return;
+
+                        auto drapeBuilder = createBuilder();
+                        if (!drapeBuilder) return;
+                        if (bucket.image) {
+                            setTextures(drapeBuilder, bucket);
+                        }
+                        buildVertexData(drapeBuilder, /*drawable=*/nullptr, bucket);
+                        drapeBuilder->flush(context);
+
+                        for (auto& drapeDrawable : drapeBuilder->clearDrawables()) {
+                            drapeDrawable->setTileID(tileID);
+                            drapeDrawable->setLayerTweaker(tw);
+                            drapeGroup->addDrawable(renderPass, tileID, std::move(drapeDrawable));
+                            ++stats.drawablesAdded;
+                        }
+                    });
             }
         }
     }

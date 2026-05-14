@@ -5,10 +5,15 @@
 #include <mbgl/style/layers/raster_layer_impl.hpp>
 #include <mbgl/style/layers/raster_layer_properties.hpp>
 #include <mbgl/gfx/context.hpp>
+#include <mbgl/tile/tile_id.hpp>
+
+#include <unordered_map>
 
 namespace mbgl {
 
 class ImageSourceRenderData;
+class RasterLayerTweaker;
+using RasterLayerTweakerPtr = std::shared_ptr<RasterLayerTweaker>;
 
 class RenderRasterLayer final : public RenderLayer {
 public:
@@ -64,6 +69,9 @@ private:
     using RasterSegmentVector = SegmentVector;
     using RasterSegmentVectorPtr = std::shared_ptr<RasterSegmentVector>;
     std::shared_ptr<RasterSegmentVector> staticDataSegments;
+
+    // Phase 2 drape routing: per-drape-target RasterLayerTweakers.
+    std::unordered_map<OverscaledTileID, RasterLayerTweakerPtr> drapeLayerTweakers;
 };
 
 } // namespace mbgl

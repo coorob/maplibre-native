@@ -91,6 +91,10 @@ void RasterLayerTweaker::execute([[maybe_unused]] LayerGroupBase& layerGroup,
                 Log::Error(Event::General, "Invalid raster layer drawable: neither tile id nor image data is set.");
                 return;
             }
+        } else if (drapeTargetID) {
+            // Drape mode: project this tile's quad into the per-DEM-tile drape
+            // RenderTarget instead of the camera.
+            matrix = getDrapeMatrix(*drawable.getTileID(), *drapeTargetID);
         } else {
             // this is a tile drawable
             const UnwrappedTileID tileID = drawable.getTileID()->toUnwrapped();
