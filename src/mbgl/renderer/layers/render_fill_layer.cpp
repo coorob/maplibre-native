@@ -389,7 +389,8 @@ void RenderFillLayer::update(gfx::ShaderRegistry& shaders,
         const auto emitDrapeVariant = [&](FillVariant variant,
                                            const gfx::ShaderGroupPtr& shaderGroup,
                                            const std::string& nameSuffix,
-                                           const std::function<void(gfx::DrawableBuilder&)>& setSegments) {
+                                           const std::function<void(gfx::DrawableBuilder&)>& setSegments,
+                                           const std::function<void(gfx::DrawableBuilder&)>& configureExtras = {}) {
             if (!activeTerrain || !shaderGroup) return;
             activeTerrain->visitDrapeTargets(
                 [&](const OverscaledTileID& drapeID, TerrainDrapeTargetPtr& drapeTarget) {
@@ -452,6 +453,9 @@ void RenderFillLayer::update(gfx::ShaderRegistry& shaders,
                     drapeBuilder->setVertexAttributes(std::move(drapeVertexAttrs));
                     drapeBuilder->setRawVertices({}, fillVertexCount, gfx::AttributeDataType::Short2);
                     setSegments(*drapeBuilder);
+                    if (configureExtras) {
+                        configureExtras(*drapeBuilder);
+                    }
                     drapeBuilder->flush(context);
 
                     for (auto& drapeDrawable : drapeBuilder->clearDrawables()) {
@@ -658,6 +662,43 @@ void RenderFillLayer::update(gfx::ShaderRegistry& shaders,
                 if (doOutline && outlinePatternBuilder) {
                     outlinePatternBuilder->setVertexAttributes(vertexAttrs);
                 }
+
+                // Drape routing for the pattern variants — atlas tweaker
+                // attached via configureExtras so the terrain mesh sees
+                // the pattern fill / outline-pattern.
+                emitDrapeVariant(
+                    FillVariant::FillPattern,
+                    patternShaderGroup,
+                    "fill-pattern",
+                    [&](gfx::DrawableBuilder& b) {
+                        b.setSegments(gfx::Triangles(),
+                                      bucket.sharedTriangles,
+                                      bucket.triangleSegments.data(),
+                                      bucket.triangleSegments.size());
+                    },
+                    [&](gfx::DrawableBuilder& b) {
+                        if (const auto& tweaker = getAtlasTweaker()) {
+                            b.addTweaker(tweaker);
+                        }
+                    });
+                if (doOutline && outlinePatternBuilder && bucket.sharedBasicLineIndexes->elements()) {
+                    emitDrapeVariant(
+                        FillVariant::FillOutlinePattern,
+                        outlinePatternShaderGroup,
+                        "fill-outline-pattern",
+                        [&](gfx::DrawableBuilder& b) {
+                            b.setSegments(gfx::Lines(lineWidth),
+                                          bucket.sharedBasicLineIndexes,
+                                          bucket.basicLineSegments.data(),
+                                          bucket.basicLineSegments.size());
+                        },
+                        [&](gfx::DrawableBuilder& b) {
+                            if (const auto& tweaker = getAtlasTweaker()) {
+                                b.addTweaker(tweaker);
+                            }
+                        });
+                }
+
                 patternBuilder->setVertexAttributes(std::move(vertexAttrs));
                 patternBuilder->setRawVertices({}, fillVertexCount, gfx::AttributeDataType::Short2);
                 patternBuilder->setSegments(gfx::Triangles(),
