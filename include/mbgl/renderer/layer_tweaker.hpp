@@ -68,6 +68,11 @@ public:
     static mat4 getDrapeMatrix(const OverscaledTileID& sourceID,
                                const OverscaledTileID& drapeID);
 
+    /// True if the two tiles' canonical coordinates intersect (same / parent /
+    /// child relationship). Used to decide whether a layer's source tile
+    /// should be drawn into a given terrain drape target.
+    static bool tilesOverlap(const OverscaledTileID& a, const OverscaledTileID& b);
+
 protected:
     /// Determine whether this tweaker should apply to the given drawable
     bool checkTweakDrawable(const gfx::Drawable&) const;

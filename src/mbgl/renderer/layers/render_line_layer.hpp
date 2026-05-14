@@ -6,9 +6,11 @@
 #include <mbgl/shaders/uniforms.hpp>
 #include <mbgl/style/image_impl.hpp>
 #include <mbgl/layout/pattern_layout.hpp>
+#include <mbgl/tile/tile_id.hpp>
 
 #include <optional>
 #include <memory>
+#include <unordered_map>
 
 namespace mbgl {
 
@@ -63,6 +65,10 @@ private:
     gfx::ShaderGroupPtr lineGradientShaderGroup;
     gfx::ShaderGroupPtr lineSDFShaderGroup;
     gfx::ShaderGroupPtr linePatternShaderGroup;
+
+    // Phase 2 drape routing: per-drape-target LineLayerTweakers, keyed by
+    // the drape target's tile ID. Lazily populated when terrain is active.
+    std::unordered_map<OverscaledTileID, LineLayerTweakerPtr> drapeLayerTweakers;
 };
 
 } // namespace mbgl

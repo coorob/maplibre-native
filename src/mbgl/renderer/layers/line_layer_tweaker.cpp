@@ -190,8 +190,19 @@ void LineLayerTweaker::execute(LayerGroupBase& layerGroup, const PaintParameters
         const auto anchor = evaluated.get<LineTranslateAnchor>();
         constexpr bool nearClipped = false;
         constexpr bool inViewportPixelUnits = false; // from RenderTile::translatedMatrix
-        const auto matrix = getTileMatrix(
-            tileID, parameters, translation, anchor, nearClipped, inViewportPixelUnits, drawable);
+        // Drape mode: route the drawable into the per-DEM-tile drape texture
+        // instead of the camera. Line width / ratio still uses the camera
+        // zoom — visually a touch off when source and drape zoom differ, but
+        // mirrors what gl-js does for layer-relative line metrics.
+        const auto matrix = drapeTargetID
+                                ? getDrapeMatrix(*drawable.getTileID(), *drapeTargetID)
+                                : getTileMatrix(tileID,
+                                                parameters,
+                                                translation,
+                                                anchor,
+                                                nearClipped,
+                                                inViewportPixelUnits,
+                                                drawable);
 
 #if !MLN_UBO_CONSOLIDATION
         auto& drawableUniforms = drawable.mutableUniformBuffers();

@@ -428,20 +428,7 @@ void RenderFillLayer::update(gfx::ShaderRegistry& shaders,
                 if (activeTerrain) {
                     activeTerrain->visitDrapeTargets(
                         [&](const OverscaledTileID& drapeID, TerrainDrapeTargetPtr& drapeTarget) {
-                            if (!drapeTarget) return;
-
-                            // Source / drape tile overlap test — same / parent / child relationships.
-                            const auto& s = tileID.canonical;
-                            const auto& d = drapeID.canonical;
-                            if (s.z == d.z) {
-                                if (s.x != d.x || s.y != d.y) return;
-                            } else if (s.z > d.z) {
-                                const auto shift = s.z - d.z;
-                                if ((s.x >> shift) != d.x || (s.y >> shift) != d.y) return;
-                            } else {
-                                const auto shift = d.z - s.z;
-                                if ((d.x >> shift) != s.x || (d.y >> shift) != s.y) return;
-                            }
+                            if (!drapeTarget || !LayerTweaker::tilesOverlap(tileID, drapeID)) return;
 
                             auto& tw = drapeLayerTweakers[drapeID];
                             if (!tw) {

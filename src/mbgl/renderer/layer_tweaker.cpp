@@ -68,6 +68,20 @@ mat4 LayerTweaker::getDrapeMatrix(const OverscaledTileID& sourceID, const Oversc
     return m;
 }
 
+bool LayerTweaker::tilesOverlap(const OverscaledTileID& a, const OverscaledTileID& b) {
+    const auto& A = a.canonical;
+    const auto& B = b.canonical;
+    if (A.z == B.z) {
+        return A.x == B.x && A.y == B.y;
+    }
+    if (A.z > B.z) {
+        const auto shift = A.z - B.z;
+        return (A.x >> shift) == B.x && (A.y >> shift) == B.y;
+    }
+    const auto shift = B.z - A.z;
+    return (B.x >> shift) == A.x && (B.y >> shift) == A.y;
+}
+
 void LayerTweaker::updateProperties(Immutable<style::LayerProperties> newProps) {
     evaluatedProperties = std::move(newProps);
     propertiesUpdated = true;

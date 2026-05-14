@@ -2,11 +2,13 @@
 
 #include <mbgl/renderer/layer_tweaker.hpp>
 #include <mbgl/style/layers/line_layer_properties.hpp>
+#include <mbgl/tile/tile_id.hpp>
 
 #if MLN_RENDER_BACKEND_METAL
 #include <mbgl/shaders/line_layer_ubo.hpp>
 #endif // MLN_RENDER_BACKEND_METAL
 
+#include <optional>
 #include <string>
 
 namespace mbgl {
@@ -28,8 +30,11 @@ public:
         SDF
     };
 
-    LineLayerTweaker(std::string id_, Immutable<style::LayerProperties> properties)
-        : LayerTweaker(std::move(id_), properties) {}
+    LineLayerTweaker(std::string id_,
+                     Immutable<style::LayerProperties> properties,
+                     std::optional<OverscaledTileID> drapeTargetID_ = std::nullopt)
+        : LayerTweaker(std::move(id_), properties),
+          drapeTargetID(drapeTargetID_) {}
 
     ~LineLayerTweaker() override = default;
 
@@ -71,6 +76,11 @@ protected:
     shaders::LineExpressionMask expressionMask = shaders::LineExpressionMask::None;
     bool gpuExpressionsUpdated = true;
 #endif // MLN_RENDER_BACKEND_METAL
+
+    // Phase 2: when set, this tweaker is serving the terrain drape pass for
+    // the drape target tile. The per-drawable matrix swaps from the camera's
+    // getTileMatrix() to LayerTweaker::getDrapeMatrix(sourceID, drapeTargetID).
+    std::optional<OverscaledTileID> drapeTargetID;
 };
 
 } // namespace mbgl
