@@ -233,5 +233,12 @@ struct ShaderInfo<BuiltIn::SymbolTextAndIconShader, gfx::Backend::Type::OpenGL> 
     static const std::vector<TextureInfo> textures;
 };
 
+template <>
+struct ShaderInfo<BuiltIn::TerrainShader, gfx::Backend::Type::OpenGL> {
+    static const std::vector<AttributeInfo> attributes;
+    static const std::vector<UniformBlockInfo> uniformBlocks;
+    static const std::vector<TextureInfo> textures;
+};
+
 } // namespace shaders
 } // namespace mbgl
