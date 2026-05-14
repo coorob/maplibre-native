@@ -36,10 +36,17 @@ no draping of other layer types. This work picks up there.
 | 0 — Xcode 26 / clang strictness | ✅ Done | Build passes again on Xcode 26.4 |
 | 0 — Klättra rebrand of sample app | ✅ Done | Iteration target with our own DEM data |
 | 1 — Per-tile drape RenderTarget cache | ✅ Done | Targets allocated, registered, pruned |
-| 2 — Route 2D layer drawables into per-tile targets | ⏳ Pending | Currently blocks visible progress |
-| 3 — Bind drape texture into terrain shader | ⏳ Pending | Trivial once Phase 2 lands |
+| 3 — Bind drape texture into terrain shader | ✅ Done (wiring) | Terrain mesh samples drape target instead of checkerboard; still dark until Phase 2 routes content into the targets |
+| 2 — Route 2D layer drawables into per-tile targets | ⏳ Pending | The remaining blocker |
 | 4 — Proper depth + opaque pass + `setIs3D(true)` | ⏳ Pending | Mostly debugging once it "kinda works" |
 | 5 — `getElevation()` for layer draping | ⏳ Pending | Optional for first ship |
+
+Note: Phase 3 wiring landed before Phase 2 because it's a 50-line change
+that's safe to merge — the visual state goes from "checkerboard on
+displaced mesh" to "transparent black on displaced mesh", both incorrect,
+but the latter proves the texture-binding path. Phase 2 fills the
+targets and the mesh comes alive without further changes to the
+terrain drawable code.
 
 ## How to build and run
 
@@ -284,3 +291,11 @@ errors on the type mismatch. Dropped the dead clause.
   `RenderTerrain::createDrawableForTile` + the Metal vertex shader work
   end-to-end with real production DEM tiles
 - Phase 1: TerrainDrapeCache (commit `d453783`)
+- Wrote TERRAIN_PROGRESS.md (commit `bd3924e`)
+- Phase 3 wiring: bind drape texture into terrain drawables (commit
+  `5a6ff27`). Visual check confirmed pipeline: terrain mesh now
+  samples the (currently empty) drape target rather than the
+  checkerboard, so the mesh renders dark on Kebnekaise. Once Phase 2
+  populates the drape targets with real layer content, the same
+  drawable configuration will display the basemap draped over the
+  displaced mesh — no further changes in terrain drawable code.
