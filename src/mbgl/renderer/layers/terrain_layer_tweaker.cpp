@@ -2,6 +2,7 @@
 
 #include <mbgl/gfx/context.hpp>
 #include <mbgl/gfx/drawable.hpp>
+#include <mbgl/renderer/buckets/fill_extrusion_bucket.hpp>
 #include <mbgl/renderer/layer_group.hpp>
 #include <mbgl/renderer/paint_parameters.hpp>
 #include <mbgl/renderer/render_terrain.hpp>
@@ -31,13 +32,22 @@ void TerrainLayerTweaker::execute(LayerGroupBase& layerGroup, const PaintParamet
     const float exaggeration = terrain->getExaggeration();
     const float elevationOffset = 0.0f;
 
-    // Populate layer-level UBO with terrain properties
+    // Reuse fill-extrusion's interpretation of the global style light, so the
+    // terrain hillshade is consistent with 3D building shading in the same
+    // style.
+    const auto& evaluatedLight = parameters.evaluatedLight;
+    const auto lightColor = FillExtrusionBucket::lightColor(evaluatedLight);
+    const auto lightPos = FillExtrusionBucket::lightPosition(evaluatedLight, state);
+    const auto lightIntensity = FillExtrusionBucket::lightIntensity(evaluatedLight);
+
     auto& layerUniforms = layerGroup.mutableUniformBuffers();
     const TerrainEvaluatedPropsUBO propsUBO = {
         .exaggeration = exaggeration,
         .elevation_offset = elevationOffset,
         .pad1 = 0.0f,
-        .pad2 = 0.0f
+        .pad2 = 0.0f,
+        .light_color_pad = {lightColor[0], lightColor[1], lightColor[2], 0.0f},
+        .light_position_intensity = {lightPos[0], lightPos[1], lightPos[2], lightIntensity},
     };
     layerUniforms.createOrUpdate(idTerrainEvaluatedPropsUBO, &propsUBO, context);
 

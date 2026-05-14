@@ -19,15 +19,21 @@ struct alignas(16) TerrainTilePropsUBO {
 };
 static_assert(sizeof(TerrainTilePropsUBO) == 16);
 
-/// Evaluated properties that do not depend on the tile
+/// Evaluated properties that do not depend on the tile.
+/// `light_*` mirror the fill-extrusion layer's interpretation of the style's
+/// global `light` block, so the diffuse hillshade on the terrain mesh stays
+/// consistent with 3D building shading in the same style. Each float3 is
+/// padded to float4 (16-byte alignment for Metal).
 struct alignas(16) TerrainEvaluatedPropsUBO {
     /*  0 */ float exaggeration;
     /*  4 */ float elevation_offset;
     /*  8 */ float pad1;
     /* 12 */ float pad2;
-    /* 16 */
+    /* 16 */ std::array<float, 4> light_color_pad;          // rgb = color
+    /* 32 */ std::array<float, 4> light_position_intensity; // xyz = direction, w = intensity
+    /* 48 */
 };
-static_assert(sizeof(TerrainEvaluatedPropsUBO) == 16);
+static_assert(sizeof(TerrainEvaluatedPropsUBO) == 48);
 
 } // namespace shaders
 } // namespace mbgl
