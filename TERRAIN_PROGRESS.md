@@ -674,6 +674,54 @@ Likely next steps for whoever picks this up:
    quad and visibly works upstream. The structural similarity might
    reveal a missing call.
 
+### Overnight session summary (2026-05-15, 00:00–00:30)
+
+Three commits added while the user slept (`de288b0`, `c859228`,
+`fcb5b8d`, `7ea37a8`):
+
+1. **Two architectural fixes shipped** (commit `de288b0`):
+   - `RenderTarget::render` now clears depth to 1.0 per frame.
+     Previously empty optional left stale depth from prior frames.
+   - `RenderFillLayer` fill drape now owns its own
+     `VertexAttributeArray` (instead of sharing with the main builder
+     that std::moves it) and explicitly binds
+     `idFillPosVertexAttribute` from `bucket.sharedVertices`. Mirrors
+     the pattern the line drape already uses.
+
+2. **Diagnostic infrastructure** added in `mtl::TileLayerGroup::render`
+   (temporary, removed): logged `drew=N` per drape group per pass to
+   confirm where draws happen. Showed every fill drape group reaches
+   `drawable.draw(parameters)` — drew=2 for glacier, water, etc.
+
+3. **Magenta-test** (temporary, removed): forced fill drape
+   `FillEvaluatedPropsUBO.color` to bright magenta, disabled main fill
+   layer group. Result: **no magenta anywhere on terrain**. The drape
+   FillBuilder's `draw()` runs, but its fragments don't reach the
+   drape target's colour attachment.
+
+### Conclusion: the bug is at Metal pipeline level
+
+Combined evidence narrows the bug to between `drawable.draw(parameters)`
+issuing the Metal command and the GPU writing a fragment. The most
+likely candidates (couldn't be confirmed without Xcode frame capture):
+
+- The vertex shader outputs positions that all sit outside clip space
+  (silent clip rejection of every triangle).
+- A Metal pipeline-state mismatch between what was set on the
+  DrawableBuilder and what the FillShader expects, leading to the
+  fragment shader writing nothing.
+- An attribute layout mismatch — the fill vertex shader expects
+  certain vertex attributes at certain buffer slots that the drape
+  builder is not providing (despite our explicit position binding).
+
+Whoever picks this up next should attach an Xcode Metal frame capture
+to a drape pass, inspect:
+- The drape target's colour attachment texture content after each
+  draw call.
+- The pipeline-state objects for the drape FillBuilder vs the main
+  FillBuilder — are they actually identical? Different MTLVertexDescriptor?
+- The actual GPU buffers bound to vertex attribute slots.
+
 ### Magenta-test confirmation
 
 Last diagnostic run before stopping: forced the drape FillLayerTweaker
