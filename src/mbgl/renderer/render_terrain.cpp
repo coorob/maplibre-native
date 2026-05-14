@@ -115,6 +115,34 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
         return;
     }
 
+    // Phase 1 of the drape pass (see FINISH_TERRAIN.md / TERRAIN_PROGRESS.md):
+    // ensure a per-tile RenderTarget exists before we create drawables for
+    // those tiles, so the drawable-creation step can bind the matching
+    // target's texture as its `mapTexture` (Phase 3). Phase 2 — routing
+    // 2D layer drawables into these targets so they have real surface
+    // content — is the next step.
+    {
+        std::unordered_set<OverscaledTileID> currentTileIDs;
+        currentTileIDs.reserve(renderTiles->size());
+        for (const auto& renderTile : *renderTiles) {
+            const auto& tileID = renderTile.getOverscaledTileID();
+            currentTileIDs.insert(tileID);
+            const bool wasAllocated = drapeCache.get(tileID) != nullptr;
+            auto target = drapeCache.getOrCreate(context, tileID, {DRAPE_TARGET_SIZE, DRAPE_TARGET_SIZE});
+            if (!wasAllocated && target) {
+                changes.emplace_back(std::make_unique<AddRenderTargetRequest>(target));
+            }
+        }
+        const auto evicted = drapeCache.pruneIf(
+            [&](const OverscaledTileID& id) { return currentTileIDs.find(id) == currentTileIDs.end(); });
+        for (const auto& id : evicted) {
+            // pruneIf returns IDs but not targets; we don't currently emit
+            // a RemoveRenderTargetRequest, so the orchestrator keeps a
+            // stale reference until style change. TODO before upstream.
+            Log::Info(Event::Render, "Terrain drape target evicted for tile " + util::toString(id));
+        }
+    }
+
     // Create terrain drawables for each DEM tile
     size_t newDrawables = 0;
     for (const auto& renderTile : *renderTiles) {
@@ -180,38 +208,6 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
     if (newDrawables > 0) {
         Log::Info(Event::Render, "Terrain created " + std::to_string(newDrawables) + " new drawables (total: " +
                   std::to_string(tilesWithDrawables.size()) + ")");
-    }
-
-    // Phase 1 of the drape pass (see FINISH_TERRAIN.md): ensure a per-tile
-    // RenderTarget exists for every currently-visible DEM tile, and prune
-    // targets for tiles that have left the visible set. Phase 2 will route
-    // 2D layer drawables into these targets; Phase 3 will bind the target
-    // textures into the terrain shader as the surface colour. For now the
-    // targets are just allocated and registered — they render empty, which
-    // means the existing checkerboard placeholder is still visible.
-    {
-        std::unordered_set<OverscaledTileID> currentTileIDs;
-        currentTileIDs.reserve(renderTiles->size());
-        for (const auto& renderTile : *renderTiles) {
-            const auto& tileID = renderTile.getOverscaledTileID();
-            currentTileIDs.insert(tileID);
-            const bool wasAllocated = drapeCache.get(tileID) != nullptr;
-            auto target = drapeCache.getOrCreate(context, tileID, {DRAPE_TARGET_SIZE, DRAPE_TARGET_SIZE});
-            if (!wasAllocated && target) {
-                changes.emplace_back(std::make_unique<AddRenderTargetRequest>(target));
-            }
-        }
-        const auto evicted = drapeCache.pruneIf(
-            [&](const OverscaledTileID& id) { return currentTileIDs.find(id) == currentTileIDs.end(); });
-        for (const auto& id : evicted) {
-            // The cache already dropped its shared_ptr; the orchestrator's
-            // reference goes away when its own removal request lands. Note
-            // that pruneIf returns the IDs that were removed but not the
-            // targets themselves — we need a separate map if we want to
-            // emit RemoveRenderTargetRequests precisely. For now, log the
-            // eviction so we can see the lifecycle behavior during testing.
-            Log::Info(Event::Render, "Terrain drape target evicted for tile " + util::toString(id));
-        }
     }
 }
 
@@ -481,14 +477,28 @@ std::unique_ptr<gfx::Drawable> RenderTerrain::createDrawableForTile(gfx::Context
         Log::Warning(Event::Render, "No DEM texture provided for tile " + util::toString(tileID));
     }
 
-    // Create a test map texture (simple colored texture for now)
-    // This will be replaced with actual render-to-texture later
-    auto mapTexture = createTestMapTexture(context);
-    if (mapTexture) {
-        builder->setTexture(mapTexture, 1); // Texture index 1 for map
-        Log::Info(Event::Render, "Test map texture bound to drawable for tile " + util::toString(tileID));
+    // Phase 3 wiring: bind the drape target's offscreen texture as the
+    // surface colour input. Until Phase 2 routes real layer drawables into
+    // each drape target, the texture will read as the offscreen's clear
+    // colour (transparent / black) — the terrain mesh will look dark
+    // rather than checkerboard. That's the correct visual state for
+    // "Phase 3 wired, Phase 2 not yet".
+    //
+    // If the drape cache somehow doesn't have a target for this tile
+    // (shouldn't happen — `update()` pre-populates the cache for every
+    // visible DEM tile before this is called) we fall back to the
+    // checkerboard so we can see the drawable is at least alive.
+    if (auto drape = drapeCache.get(tileID); drape && drape->getTexture()) {
+        builder->setTexture(drape->getTexture(), 1); // slot 1 = mapTexture
+        Log::Info(Event::Render, "Drape target texture bound to drawable for tile " + util::toString(tileID));
     } else {
-        Log::Warning(Event::Render, "Failed to create test map texture for tile " + util::toString(tileID));
+        auto mapTexture = createTestMapTexture(context);
+        if (mapTexture) {
+            builder->setTexture(mapTexture, 1);
+            Log::Warning(Event::Render,
+                         "Drape target missing for tile " + util::toString(tileID) +
+                             " — fell back to checkerboard");
+        }
     }
 
     // Flush to create the drawable
