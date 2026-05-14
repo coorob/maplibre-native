@@ -8,7 +8,9 @@
 #include <mbgl/shaders/background_layer_ubo.hpp>
 #include <mbgl/shaders/shader_program_base.hpp>
 #include <mbgl/style/layers/background_layer_properties.hpp>
+#include <mbgl/util/constants.hpp>
 #include <mbgl/util/convert.hpp>
+#include <mbgl/util/mat4.hpp>
 
 namespace mbgl {
 
@@ -89,8 +91,25 @@ void BackgroundLayerTweaker::execute(LayerGroupBase& layerGroup, const PaintPara
                               context.getGenericShader(parameters.shaders, std::string(BackgroundPatternShaderName))));
 
         const UnwrappedTileID tileID = drawable.getTileID()->toUnwrapped();
-        const auto matrix = getTileMatrix(
-            tileID, parameters, {0.f, 0.f}, TranslateAnchorType::Viewport, false, false, drawable);
+        // For the terrain drape pass we render into a tile-sized offscreen
+        // texture where vertex coords go from (0, 0) to (EXTENT, EXTENT) and
+        // need to fill the texture's NDC space (-1..1). Skip the camera /
+        // projection chain that `getTileMatrix` performs and use a fixed
+        // ortho instead — same pattern as HillshadePrepareLayerTweaker.
+        mat4 matrix;
+        if (drapeMode) {
+            matrix::ortho(matrix,
+                          0.0,
+                          static_cast<double>(util::EXTENT),
+                          -static_cast<double>(util::EXTENT),
+                          0.0,
+                          -1.0,
+                          1.0);
+            matrix::translate(matrix, matrix, 0.0, -static_cast<double>(util::EXTENT), 0.0);
+        } else {
+            matrix = getTileMatrix(
+                tileID, parameters, {0.f, 0.f}, TranslateAnchorType::Viewport, false, false, drawable);
+        }
 
 #if !MLN_UBO_CONSOLIDATION
         auto& drawableUniforms = drawable.mutableUniformBuffers();
