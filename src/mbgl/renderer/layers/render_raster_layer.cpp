@@ -20,6 +20,8 @@
 #include <mbgl/renderer/update_parameters.hpp>
 #include <mbgl/shaders/shader_program_base.hpp>
 
+#include <unordered_set>
+
 namespace mbgl {
 
 using namespace style;
@@ -280,6 +282,32 @@ void RenderRasterLayer::update(gfx::ShaderRegistry& shaders,
             if (auto layerGroup_ = context.createTileLayerGroup(layerIndex, /*initialCapacity=*/64, getID())) {
                 layerGroup_->addLayerTweaker(layerTweaker);
                 setLayerGroup(std::move(layerGroup_), changes);
+            }
+        }
+
+        // Mirror the cover-set cleanup for drape groups and prune stale
+        // drape tweakers — same pattern as fill / line.
+        if (activeTerrain) {
+            std::unordered_set<OverscaledTileID> liveDrapeIDs;
+            activeTerrain->visitDrapeTargets(
+                [&](const OverscaledTileID& drapeID, TerrainDrapeTargetPtr& drapeTarget) {
+                    if (!drapeTarget) return;
+                    liveDrapeIDs.insert(drapeID);
+                    if (auto* drapeGroup = static_cast<TileLayerGroup*>(
+                            drapeTarget->getLayerGroup(layerIndex).get())) {
+                        stats.drawablesRemoved += drapeGroup->removeDrawablesIf(
+                            [&](gfx::Drawable& drawable) {
+                                const auto& dID = drawable.getTileID();
+                                return dID && !hasRenderTile(*dID);
+                            });
+                    }
+                });
+            for (auto it = drapeLayerTweakers.begin(); it != drapeLayerTweakers.end();) {
+                if (liveDrapeIDs.find(it->first) == liveDrapeIDs.end()) {
+                    it = drapeLayerTweakers.erase(it);
+                } else {
+                    ++it;
+                }
             }
         }
 

@@ -30,6 +30,8 @@
 #include <mbgl/shaders/line_layer_ubo.hpp>
 #include <mbgl/shaders/shader_program_base.hpp>
 
+#include <unordered_set>
+
 namespace mbgl {
 
 using namespace style;
@@ -265,6 +267,33 @@ void RenderLineLayer::update(gfx::ShaderRegistry& shaders,
         }
         return false;
     });
+
+    // Mirror the same cover-set cleanup for every drape group this layer
+    // owns inside the terrain drape cache, and drop drapeLayerTweakers
+    // entries whose drape target has been evicted.
+    if (activeTerrain) {
+        std::unordered_set<OverscaledTileID> liveDrapeIDs;
+        activeTerrain->visitDrapeTargets(
+            [&](const OverscaledTileID& drapeID, TerrainDrapeTargetPtr& drapeTarget) {
+                if (!drapeTarget) return;
+                liveDrapeIDs.insert(drapeID);
+                if (auto* drapeGroup = static_cast<TileLayerGroup*>(
+                        drapeTarget->getLayerGroup(layerIndex).get())) {
+                    stats.drawablesRemoved += drapeGroup->removeDrawablesIf(
+                        [&](gfx::Drawable& drawable) {
+                            const auto& dID = drawable.getTileID();
+                            return dID && !hasRenderTile(*dID);
+                        });
+                }
+            });
+        for (auto it = drapeLayerTweakers.begin(); it != drapeLayerTweakers.end();) {
+            if (liveDrapeIDs.find(it->first) == liveDrapeIDs.end()) {
+                it = drapeLayerTweakers.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
 
     auto createLineBuilder = [&](const std::string& name,
                                  gfx::ShaderPtr shader) -> std::unique_ptr<gfx::DrawableBuilder> {

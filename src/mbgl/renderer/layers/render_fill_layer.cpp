@@ -21,6 +21,8 @@
 #include <mbgl/util/math.hpp>
 #include <mbgl/util/std.hpp>
 
+#include <unordered_set>
+
 #include <mbgl/gfx/drawable_atlases_tweaker.hpp>
 #include <mbgl/gfx/drawable_builder.hpp>
 #include <mbgl/renderer/layers/fill_layer_tweaker.hpp>
@@ -186,6 +188,35 @@ void RenderFillLayer::update(gfx::ShaderRegistry& shaders,
         const auto& tileID = drawable.getTileID();
         return tileID && !hasRenderTile(*tileID);
     });
+
+    // Mirror the same cover-set cleanup for every drape group this layer
+    // owns inside the terrain drape cache, and drop drapeLayerTweakers
+    // entries whose drape target has been evicted. Without this, source
+    // tiles that pan out of view keep their drape drawables alive until
+    // the DEM tile itself unloads.
+    if (activeTerrain) {
+        std::unordered_set<OverscaledTileID> liveDrapeIDs;
+        activeTerrain->visitDrapeTargets(
+            [&](const OverscaledTileID& drapeID, TerrainDrapeTargetPtr& drapeTarget) {
+                if (!drapeTarget) return;
+                liveDrapeIDs.insert(drapeID);
+                if (auto* drapeGroup = static_cast<TileLayerGroup*>(
+                        drapeTarget->getLayerGroup(layerIndex).get())) {
+                    stats.drawablesRemoved += drapeGroup->removeDrawablesIf(
+                        [&](gfx::Drawable& drawable) {
+                            const auto& dID = drawable.getTileID();
+                            return dID && !hasRenderTile(*dID);
+                        });
+                }
+            });
+        for (auto it = drapeLayerTweakers.begin(); it != drapeLayerTweakers.end();) {
+            if (liveDrapeIDs.find(it->first) == liveDrapeIDs.end()) {
+                it = drapeLayerTweakers.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
 
     fillTileLayerGroup->setStencilTiles(renderTiles);
 
