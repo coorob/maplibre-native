@@ -78,6 +78,15 @@ de288b0   Fill drape: own vertex attrs with explicit position; clear drape depth
 
 # GL backend port
 24efce5   GL backend: port terrain shader + register attribute/texture info
+
+# Architectural improvements
+468df43   Fill drape: emitDrapeVariant fetches its own shader, like line/hillshade
+bedfb37   Phase 2 line: extend drape routing to LineGradient
+50b30a3   Phase 2 line: extend drape routing to LinePattern (atlas binding)
+7ff5c77   Phase 2 fill: extend drape routing to FillPattern + FillOutlinePattern
+
+# Render tests
+f444e8b   Add render-test scaffolds for terrain (default + exaggeration)
 ```
 
 ## Commits to SKIP
@@ -91,7 +100,7 @@ e8b07e8   Klättra: rebrand sample app + add Sweden 3D test style
 bd3924e, 5f9e821, 4d6e2fd, c433721, 60b6279, d499db4, 7f70908,
 204c11b, 869e869, c859228, fcb5b8d, 7ea37a8, 68a34a7, e1cff3f
 # This PR handoff doc
-d9ad3f3
+d9ad3f3, a88acca
 ```
 
 ## Cherry-pick procedure
@@ -171,11 +180,14 @@ Expect conflicts at:
 >   depth disabled; they sit on top of terrain rather than following
 >   it. `getElevation()` is the building block for the eventual
 >   plumbing.
-> - **Fill/line variants partially covered.** Fill: Fill +
->   FillOutline drape; FillPattern + FillOutlinePattern bypass drape
->   (need atlas binding). Line: Simple + SDF drape; LineGradient +
->   LinePattern bypass.
-> - **No render tests.**
+> - **Fill/line variants fully covered.** Fill: Fill, FillOutline,
+>   FillPattern, FillOutlinePattern all emit drape drawables.
+>   FillOutlineTriangulated (Metal-only niche) is the one exception.
+>   Line: Simple, SDF, Gradient, Pattern all drape.
+> - **Render tests scaffolded.** `metrics/integration/render-tests/terrain/`
+>   contains `default/` and `exaggeration/` styles. Baselines need to
+>   be captured by running the render-test tool once on a known-good
+>   build.
 >
 > Total ≈1700 lines added across ~25 commits, mostly Phase 2 layer
 > routing. Happy to split into smaller PRs if maintainers prefer.
