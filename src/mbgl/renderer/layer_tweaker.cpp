@@ -7,6 +7,8 @@
 #include <mbgl/shaders/layer_ubo.hpp>
 #include <mbgl/util/mat4.hpp>
 #include <mbgl/util/containers.hpp>
+#include <mbgl/util/constants.hpp>
+#include <mbgl/tile/tile_id.hpp>
 
 #if MLN_RENDER_BACKEND_METAL
 #include <mbgl/util/monotonic_timer.hpp>
@@ -42,6 +44,28 @@ mat4 LayerTweaker::getTileMatrix(const UnwrappedTileID& tileID,
     multiplyWithProjectionMatrix(/*in-out*/ tileMatrix, parameters, drawable, nearClipped, aligned);
     return RenderTile::translateVtxMatrix(
         tileID, tileMatrix, translation, anchor, parameters.state, inViewportPixelUnits);
+}
+
+mat4 LayerTweaker::getDrapeMatrix(const OverscaledTileID& sourceID, const OverscaledTileID& drapeID) {
+    // Source vertex (x_s, y_s) ∈ [0, EXTENT] maps to drape coordinates
+    //     (x_d, y_d) = (x_s * r + (sX * r - dX) * EXTENT,
+    //                   y_s * r + (sY * r - dY) * EXTENT)
+    // where r = 2^(dZ - sZ) handles zoom-level mismatch between the
+    // basemap tile and the DEM tile owning the drape target.
+    // The ortho projection then maps drape coordinates to clip space,
+    // with Y flipped so the drape texture is sampled correctly by the
+    // terrain mesh fragment shader.
+    const double sZ = sourceID.canonical.z;
+    const double dZ = drapeID.canonical.z;
+    const double r = std::pow(2.0, dZ - sZ);
+    const double tx = (static_cast<double>(sourceID.canonical.x) * r - drapeID.canonical.x) * util::EXTENT;
+    const double ty = (static_cast<double>(sourceID.canonical.y) * r - drapeID.canonical.y) * util::EXTENT;
+
+    mat4 m;
+    matrix::ortho(m, 0.0, util::EXTENT, -util::EXTENT, 0.0, -1.0, 1.0);
+    matrix::translate(m, m, tx, ty - util::EXTENT, 0.0);
+    matrix::scale(m, m, r, r, 1.0);
+    return m;
 }
 
 void LayerTweaker::updateProperties(Immutable<style::LayerProperties> newProps) {

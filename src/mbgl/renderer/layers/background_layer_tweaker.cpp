@@ -91,21 +91,14 @@ void BackgroundLayerTweaker::execute(LayerGroupBase& layerGroup, const PaintPara
                               context.getGenericShader(parameters.shaders, std::string(BackgroundPatternShaderName))));
 
         const UnwrappedTileID tileID = drawable.getTileID()->toUnwrapped();
-        // For the terrain drape pass we render into a tile-sized offscreen
-        // texture where vertex coords go from (0, 0) to (EXTENT, EXTENT) and
-        // need to fill the texture's NDC space (-1..1). Skip the camera /
-        // projection chain that `getTileMatrix` performs and use a fixed
-        // ortho instead — same pattern as HillshadePrepareLayerTweaker.
+        // For the terrain drape pass the background drawable is registered
+        // with the drape target's own tile ID, so source == drape and
+        // getDrapeMatrix collapses to a fill-EXTENT ortho. Same trick as
+        // HillshadePrepareLayerTweaker, but expressed through the shared
+        // helper so fill / line / raster reuse the same path.
         mat4 matrix;
         if (drapeMode) {
-            matrix::ortho(matrix,
-                          0.0,
-                          static_cast<double>(util::EXTENT),
-                          -static_cast<double>(util::EXTENT),
-                          0.0,
-                          -1.0,
-                          1.0);
-            matrix::translate(matrix, matrix, 0.0, -static_cast<double>(util::EXTENT), 0.0);
+            matrix = getDrapeMatrix(*drawable.getTileID(), *drawable.getTileID());
         } else {
             matrix = getTileMatrix(
                 tileID, parameters, {0.f, 0.f}, TranslateAnchorType::Viewport, false, false, drawable);

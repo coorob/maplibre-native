@@ -24,6 +24,7 @@ enum class TranslateAnchorType : bool;
 } // namespace style
 
 class LayerGroupBase;
+class OverscaledTileID;
 class PaintParameters;
 class RenderTree;
 class TransformState;
@@ -57,6 +58,15 @@ public:
                               bool inViewportPixelUnits,
                               const gfx::Drawable& drawable,
                               bool aligned = false);
+
+    /// Matrix that maps `sourceID` tile-extent coordinates into the drape
+    /// RenderTarget for `drapeID` (ortho-projected, Y-flipped to match the
+    /// terrain mesh's texture sample). Used when terrain is active to draw
+    /// source-tile layer geometry into the per-DEM-tile drape texture.
+    /// `sourceID` and `drapeID` can be at different zooms; the scale and
+    /// translation fall out of canonical (z, x, y).
+    static mat4 getDrapeMatrix(const OverscaledTileID& sourceID,
+                               const OverscaledTileID& drapeID);
 
 protected:
     /// Determine whether this tweaker should apply to the given drawable
