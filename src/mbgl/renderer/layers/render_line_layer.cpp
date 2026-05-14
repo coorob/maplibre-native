@@ -413,6 +413,87 @@ void RenderLineLayer::update(gfx::ShaderRegistry& shaders,
                                                    LinePattern>(
             paintPropertyBinders, evaluated, propertiesAsUniforms, idLineColorVertexAttribute);
 
+        // Phase 2 drape routing helper, shared across line variants. Emits a
+        // copy of this source-tile's line geometry into each overlapping DEM
+        // tile's drape RenderTarget. Variant-specific bits (shader group +
+        // type tag) are parameters.
+        const auto emitDrapeLineVariant = [&](LineLayerTweaker::LineType variant,
+                                                const gfx::ShaderGroupPtr& shaderGroup,
+                                                const std::string& nameSuffix) {
+            if (!activeTerrain || !shaderGroup) return;
+            activeTerrain->visitDrapeTargets(
+                [&](const OverscaledTileID& drapeID, TerrainDrapeTargetPtr& drapeTarget) {
+                    if (!drapeTarget || !LayerTweaker::tilesOverlap(tileID, drapeID)) return;
+
+                    auto& tw = drapeLayerTweakers[drapeID];
+                    if (!tw) {
+                        tw = std::make_shared<LineLayerTweaker>(
+                            getID() + "-drape", evaluatedProperties, drapeID);
+                    }
+
+                    auto* drapeGroup = static_cast<TileLayerGroup*>(
+                        drapeTarget->getLayerGroup(layerIndex).get());
+                    if (!drapeGroup) {
+                        auto newGroup = context.createTileLayerGroup(
+                            layerIndex, /*initialCapacity=*/4, getID() + "-drape");
+                        if (!newGroup) return;
+                        newGroup->addLayerTweaker(tw);
+                        drapeTarget->addLayerGroup(newGroup, /*replace=*/false);
+                        drapeGroup = newGroup.get();
+                    }
+
+                    bool alreadyHasVariant = false;
+                    drapeGroup->visitDrawables(passes, tileID, [&](const gfx::Drawable& d) {
+                        if (d.getType() == static_cast<size_t>(mbgl::underlying_type(variant))) {
+                            alreadyHasVariant = true;
+                        }
+                    });
+                    if (alreadyHasVariant) return;
+
+                    auto drapeShader = shaderGroup->getOrCreateShader(
+                        context, propertiesAsUniforms, posNormalAttribName);
+                    if (!drapeShader) return;
+
+                    auto drapeBuilder = createLineBuilder(nameSuffix + "-drape", std::move(drapeShader));
+                    if (!drapeBuilder) return;
+                    // Stencil clipping is a main-pass mechanism; drape groups
+                    // never set stencil tiles. Disable to skip the assert in
+                    // PaintParameters::stencilModeForClipping.
+                    drapeBuilder->setEnableStencil(false);
+
+                    auto drapeVertexAttrs = context.createVertexAttributeArray();
+                    drapeVertexAttrs->readDataDrivenPaintProperties<LineColor,
+                                                                    LineBlur,
+                                                                    LineOpacity,
+                                                                    LineGapWidth,
+                                                                    LineOffset,
+                                                                    LineWidth,
+                                                                    LineFloorWidth,
+                                                                    LinePattern>(
+                        paintPropertyBinders,
+                        evaluated,
+                        propertiesAsUniforms,
+                        idLineColorVertexAttribute);
+
+                    addAttributes(*drapeBuilder, bucket, std::move(drapeVertexAttrs));
+                    setSegments(drapeBuilder, bucket);
+                    drapeBuilder->flush(context);
+
+                    const bool roundCap = bucket.layout.get<LineCap>() == LineCapType::Round;
+                    const auto capType = roundCap ? LinePatternCap::Round : LinePatternCap::Square;
+                    for (auto& drapeDrawable : drapeBuilder->clearDrawables()) {
+                        drapeDrawable->setTileID(tileID);
+                        drapeDrawable->setType(mbgl::underlying_type(variant));
+                        drapeDrawable->setLayerTweaker(tw);
+                        drapeDrawable->setRenderTile(renderTilesOwner, &tile);
+                        drapeDrawable->setBinders(renderData->bucket, &paintPropertyBinders);
+                        drapeDrawable->setData(std::make_unique<gfx::LineDrawableData>(capType));
+                        drapeGroup->addDrawable(passes, tileID, std::move(drapeDrawable));
+                        ++stats.drawablesAdded;
+                    }
+                });
+        };
+
         if (!evaluated.get<LineDasharray>().from.empty()) {
             // dash array line (SDF)
             if (!lineSDFShaderGroup) {
@@ -426,6 +507,8 @@ void RenderLineLayer::update(gfx::ShaderRegistry& shaders,
             if (!shader) {
                 continue;
             }
+
+            emitDrapeLineVariant(LineLayerTweaker::LineType::SDF, lineSDFShaderGroup, "lineSDF");
 
             auto builder = createLineBuilder("lineSDF", std::move(shader));
 
@@ -531,79 +614,7 @@ void RenderLineLayer::update(gfx::ShaderRegistry& shaders,
                 continue;
             }
 
-            // Phase 2 drape routing: emit a copy of this line drawable into
-            // each overlapping DEM tile's drape RenderTarget before the main
-            // builder consumes vertexAttrs. Roads / contours / trails / etc.
-            // are then visible on the terrain mesh.
-            if (activeTerrain) {
-                activeTerrain->visitDrapeTargets(
-                    [&](const OverscaledTileID& drapeID, TerrainDrapeTargetPtr& drapeTarget) {
-                        if (!drapeTarget || !LayerTweaker::tilesOverlap(tileID, drapeID)) return;
-
-                        auto& tw = drapeLayerTweakers[drapeID];
-                        if (!tw) {
-                            tw = std::make_shared<LineLayerTweaker>(
-                                getID() + "-drape", evaluatedProperties, drapeID);
-                        }
-
-                        auto* drapeGroup = static_cast<TileLayerGroup*>(
-                            drapeTarget->getLayerGroup(layerIndex).get());
-                        if (!drapeGroup) {
-                            auto newGroup = context.createTileLayerGroup(
-                                layerIndex, /*initialCapacity=*/4, getID() + "-drape");
-                            if (!newGroup) return;
-                            newGroup->addLayerTweaker(tw);
-                            drapeTarget->addLayerGroup(newGroup, /*replace=*/false);
-                            drapeGroup = newGroup.get();
-                        }
-
-                        if (drapeGroup->getDrawableCount(renderPass, tileID) > 0) return;
-
-                        auto drapeShader = lineShaderGroup->getOrCreateShader(
-                            context, propertiesAsUniforms, posNormalAttribName);
-                        if (!drapeShader) return;
-
-                        auto drapeBuilder = createLineBuilder("line-drape", std::move(drapeShader));
-                        if (!drapeBuilder) return;
-                        // Stencil clipping is a main-pass mechanism (the drape
-                        // group never calls setStencilTiles), so disable it
-                        // here — otherwise stencilModeForClipping asserts.
-                        drapeBuilder->setEnableStencil(false);
-
-                        // Fresh attrs for the drape builder so we don't fight
-                        // ownership with the main builder.
-                        auto drapeVertexAttrs = context.createVertexAttributeArray();
-                        drapeVertexAttrs->readDataDrivenPaintProperties<LineColor,
-                                                                        LineBlur,
-                                                                        LineOpacity,
-                                                                        LineGapWidth,
-                                                                        LineOffset,
-                                                                        LineWidth,
-                                                                        LineFloorWidth,
-                                                                        LinePattern>(
-                            paintPropertyBinders,
-                            evaluated,
-                            propertiesAsUniforms,
-                            idLineColorVertexAttribute);
-
-                        addAttributes(*drapeBuilder, bucket, std::move(drapeVertexAttrs));
-                        setSegments(drapeBuilder, bucket);
-                        drapeBuilder->flush(context);
-
-                        const bool roundCap = bucket.layout.get<LineCap>() == LineCapType::Round;
-                        const auto capType = roundCap ? LinePatternCap::Round : LinePatternCap::Square;
-                        for (auto& drapeDrawable : drapeBuilder->clearDrawables()) {
-                            drapeDrawable->setTileID(tileID);
-                            drapeDrawable->setType(mbgl::underlying_type(LineLayerTweaker::LineType::Simple));
-                            drapeDrawable->setLayerTweaker(tw);
-                            drapeDrawable->setRenderTile(renderTilesOwner, &tile);
-                            drapeDrawable->setBinders(renderData->bucket, &paintPropertyBinders);
-                            drapeDrawable->setData(std::make_unique<gfx::LineDrawableData>(capType));
-                            drapeGroup->addDrawable(renderPass, tileID, std::move(drapeDrawable));
-                            ++stats.drawablesAdded;
-                        }
-                    });
-            }
+            emitDrapeLineVariant(LineLayerTweaker::LineType::Simple, lineShaderGroup, "line");
 
             auto builder = createLineBuilder("line", std::move(shader));
 
