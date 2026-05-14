@@ -9,7 +9,6 @@
 #include <mbgl/shaders/shader_defines.hpp>
 #include <mbgl/util/convert.hpp>
 #include <mbgl/util/mat4.hpp>
-#include <mbgl/util/logging.hpp>
 #include <mbgl/util/projection.hpp>
 
 namespace mbgl {
@@ -17,15 +16,9 @@ namespace mbgl {
 using namespace shaders;
 
 void TerrainLayerTweaker::execute(LayerGroupBase& layerGroup, const PaintParameters& parameters) {
-    Log::Info(Event::Render, "TerrainLayerTweaker::execute called, layerGroup.empty()=" + std::to_string(layerGroup.empty()) +
-              ", terrain=" + std::to_string(terrain != nullptr));
-
     if (layerGroup.empty() || !terrain) {
-        Log::Warning(Event::Render, "TerrainLayerTweaker::execute early return - empty or no terrain");
         return;
     }
-
-    Log::Info(Event::Render, "TerrainLayerTweaker processing " + std::to_string(layerGroup.getDrawableCount()) + " drawables");
 
     const auto& state = parameters.state;
     auto& context = parameters.context;
@@ -35,18 +28,8 @@ void TerrainLayerTweaker::execute(LayerGroupBase& layerGroup, const PaintParamet
     const auto debugGroup = parameters.encoder->createDebugGroup(label.c_str());
 #endif
 
-    // Get terrain properties
-    const float baseExaggeration = terrain->getExaggeration();
-    // Apply moderate exaggeration for visible 3D terrain (3x)
-    const float exaggeration = baseExaggeration * 3.0f;
+    const float exaggeration = terrain->getExaggeration();
     const float elevationOffset = 0.0f;
-
-    static bool hasLoggedExaggeration = false;
-    if (!hasLoggedExaggeration) {
-        Log::Info(Event::Render, "Terrain exaggeration: base=" + std::to_string(baseExaggeration) +
-                  ", multiplied=" + std::to_string(exaggeration));
-        hasLoggedExaggeration = true;
-    }
 
     // Populate layer-level UBO with terrain properties
     auto& layerUniforms = layerGroup.mutableUniformBuffers();

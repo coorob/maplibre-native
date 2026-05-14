@@ -240,14 +240,6 @@ private:
     std::shared_ptr<gfx::Texture2D> createDEMTexture(gfx::Context& context, const DEMData& demData);
 
     /**
-     * @brief Create a test map texture (checkerboard pattern)
-     * This will be replaced with render-to-texture output later
-     * @param context Graphics context
-     * @return Shared pointer to created texture
-     */
-    std::shared_ptr<gfx::Texture2D> createTestMapTexture(gfx::Context& context);
-
-    /**
      * @brief Create a terrain drawable for a specific tile
      * @param context Graphics context
      * @param shaders Shader registry

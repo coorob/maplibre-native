@@ -60,39 +60,24 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
     // Find the DEM source if we haven't already
     if (!demSource && !impl->sourceID.empty()) {
         demSource = orchestrator.getRenderSource(impl->sourceID);
-        if (demSource) {
-            Log::Info(Event::Render, "Terrain found DEM source: " + impl->sourceID);
-        } else {
+        if (!demSource) {
             Log::Warning(Event::Render, "Terrain could not find DEM source: " + impl->sourceID);
         }
     }
 
-    // TEMP: Always rebuild to pick up latest code changes
-    // Clear and recreate layer group every time until terrain is stable
-    if (layerGroup && tilesWithDrawables.size() > 0) {
-        Log::Info(Event::Render, "Force rebuilding terrain layer group (had " +
-                  std::to_string(tilesWithDrawables.size()) + " old drawables)");
-        activateLayerGroup(false, changes);  // Deactivate old layer group
-        layerGroup.reset();  // Clear the layer group to force recreation
-        tilesWithDrawables.clear();
-    }
-
-    // Create layer group if we don't have one (including after rebuild)
+    // Create layer group if we don't have one
     if (!layerGroup) {
         if (auto layerGroup_ = context.createLayerGroup(TERRAIN_LAYER_INDEX, /*initialCapacity=*/1, "terrain")) {
             layerGroup = std::move(layerGroup_);
             activateLayerGroup(true, changes);
-            Log::Info(Event::Render, "Created terrain layer group");
         } else {
             Log::Error(Event::Render, "Failed to create terrain layer group");
             return;
         }
     }
 
-    // Create tweaker if we don't have one
     if (!tweaker) {
         tweaker = std::make_unique<TerrainLayerTweaker>(this);
-        Log::Info(Event::Render, "Created terrain layer tweaker");
     }
 
     // If we don't have a DEM source, we can't create terrain drawables
@@ -100,16 +85,11 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
         return;
     }
 
-    // Get tiles from the DEM source
     auto renderTiles = demSource->getRawRenderTiles();
     if (renderTiles->empty()) {
-        Log::Warning(Event::Render, "Terrain DEM source has no tiles loaded yet");
         return;
     }
 
-    Log::Info(Event::Render, "Terrain processing " + std::to_string(renderTiles->size()) + " DEM tiles");
-
-    // Cast to LayerGroup for addDrawable
     auto* lg = static_cast<LayerGroup*>(layerGroup.get());
     if (!lg) {
         return;
@@ -121,6 +101,11 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
     // target's texture as its `mapTexture` (Phase 3). Phase 2 — routing
     // 2D layer drawables into these targets so they have real surface
     // content — is the next step.
+    // Allocate a per-tile drape RenderTarget for each visible DEM tile if
+    // one doesn't already exist, and prune any targets whose tiles have
+    // dropped out of the cover set. The terrain mesh fragment shader
+    // samples this target as the surface colour; basemap layers route
+    // drawables into it (RenderBackgroundLayer / RenderFillLayer / ...).
     {
         std::unordered_set<OverscaledTileID> currentTileIDs;
         currentTileIDs.reserve(renderTiles->size());
@@ -130,46 +115,23 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
             const bool wasAllocated = drapeCache.get(tileID) != nullptr;
             auto target = drapeCache.getOrCreate(context, tileID, {DRAPE_TARGET_SIZE, DRAPE_TARGET_SIZE});
             if (!wasAllocated && target) {
-                // Debug clear color so the displaced terrain mesh shows
-                // *something* visible even before Phase 2 routes basemap
-                // drawables into the target. Picked as a low-saturation
-                // forest-green so it reads as "land-ish" rather than as a
-                // bright alarm colour. Real Phase 2 routing will overwrite
-                // every pixel each frame; this only shows through where
-                // the layer drawables haven't covered the texture (which
-                // for a fully-draped basemap should be: nowhere).
-                target->setClearColor(Color{0.45f, 0.55f, 0.40f, 1.0f});
                 changes.emplace_back(std::make_unique<AddRenderTargetRequest>(target));
             }
         }
-        // pruneIf returns the evicted IDs but not the targets — we don't
-        // currently emit a RemoveRenderTargetRequest, so the orchestrator
-        // keeps a stale reference until style change. Small memory creep
-        // on map pans; TODO before upstream is to return (id, target) pairs
-        // and emit removal requests.
         drapeCache.pruneIf(
             [&](const OverscaledTileID& id) { return currentTileIDs.find(id) == currentTileIDs.end(); });
     }
 
     // Create terrain drawables for each DEM tile
-    size_t newDrawables = 0;
     for (const auto& renderTile : *renderTiles) {
         const auto& tileID = renderTile.getOverscaledTileID();
 
-        Log::Info(Event::Render, "Terrain examining tile " + util::toString(tileID));
-
-        // Skip if we already have a drawable for this tile
         if (tilesWithDrawables.count(tileID) > 0) {
-            Log::Info(Event::Render, "Terrain tile " + util::toString(tileID) + " already has drawable, skipping");
             continue;
         }
 
-        // Get the underlying Tile and cast to RasterDEMTile
         const auto& tile = renderTile.getTile();
-        Log::Info(Event::Render, "Terrain tile " + util::toString(tileID) + " kind=" + std::to_string(static_cast<int>(tile.kind)));
-
         if (tile.kind != Tile::Kind::RasterDEM) {
-            Log::Warning(Event::Render, "Terrain tile " + util::toString(tileID) + " is not RasterDEM type");
             continue;
         }
 
@@ -178,44 +140,27 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
             continue;
         }
 
-        // Get the HillshadeBucket from the DEM tile
         auto* hillshadeBucket = demTile->getBucket();
         if (!hillshadeBucket) {
-            Log::Info(Event::Render, "Terrain tile " + util::toString(tileID) + " has no bucket yet (still loading)");
             continue;
         }
 
-        // Get DEM data from the bucket
         const auto& demData = hillshadeBucket->getDEMData();
         auto imagePtr = demData.getImagePtr();
         if (!imagePtr || imagePtr->size.isEmpty()) {
-            Log::Warning(Event::Render, "Terrain tile " + util::toString(tileID) + " has empty DEM data");
             continue;
         }
 
-        Log::Info(Event::Render, "Terrain creating texture for tile " + util::toString(tileID) +
-                  " (DEM size: " + std::to_string(imagePtr->size.width) + "x" + std::to_string(imagePtr->size.height) + ")");
-
-        // Create DEM texture from the data
         auto demTexture = createDEMTexture(context, demData);
         if (!demTexture) {
-            Log::Warning(Event::Render, "Failed to create DEM texture for tile " + util::toString(tileID));
             continue;
         }
 
-        // Create terrain drawable for this tile
         auto drawable = createDrawableForTile(context, shaders, tileID, demTexture);
         if (drawable) {
             lg->addDrawable(std::move(drawable));
             tilesWithDrawables[tileID] = true;
-            newDrawables++;
-            Log::Info(Event::Render, "Created terrain drawable for tile " + util::toString(tileID));
         }
-    }
-
-    if (newDrawables > 0) {
-        Log::Info(Event::Render, "Terrain created " + std::to_string(newDrawables) + " new drawables (total: " +
-                  std::to_string(tilesWithDrawables.size()) + ")");
     }
 }
 
@@ -312,116 +257,29 @@ void RenderTerrain::generateMesh(gfx::Context& context) {
         std::move(vertices),
         std::move(indices)
     };
-
-    Log::Info(Event::General,
-              "Terrain mesh generated: " + std::to_string(mesh->vertexCount) + " vertices, " +
-              std::to_string(mesh->indexCount) + " indices");
 }
 
 std::shared_ptr<gfx::Texture2D> RenderTerrain::createDEMTexture(gfx::Context& context, const DEMData& demData) {
-    // Get the DEM image data
     auto imagePtr = demData.getImagePtr();
     if (!imagePtr || imagePtr->size.isEmpty()) {
-        Log::Warning(Event::Render, "DEM data has no image");
         return nullptr;
     }
 
-    Log::Info(Event::Render, "Creating DEM texture: size=" + std::to_string(imagePtr->size.width) + "x" +
-              std::to_string(imagePtr->size.height) + ", bytes=" + std::to_string(imagePtr->bytes()));
-
-    // DEBUG: Check actual pixel values in the image
-    if (imagePtr->data && imagePtr->bytes() > 0) {
-        const uint8_t* pixels = imagePtr->data.get();
-        // Check first 10 pixels' RGB values
-        std::string pixelValues = "First 10 DEM pixels (RGBA): ";
-        for (size_t i = 0; i < std::min(size_t(10), imagePtr->bytes() / 4); i++) {
-            size_t offset = i * 4;
-            pixelValues += "[" + std::to_string(pixels[offset]) + "," +
-                          std::to_string(pixels[offset+1]) + "," +
-                          std::to_string(pixels[offset+2]) + "," +
-                          std::to_string(pixels[offset+3]) + "] ";
-        }
-        Log::Info(Event::Render, pixelValues);
-    }
-
-    // Create a new texture
     auto texture = context.createTexture2D();
     if (!texture) {
         Log::Error(Event::Render, "Failed to create DEM texture");
         return nullptr;
     }
 
-    // Set the image data
     texture->setImage(imagePtr);
-    Log::Info(Event::Render, "DEM texture image data set successfully");
 
-    // Configure sampler - use linear filtering for smooth elevation interpolation
+    // Linear filtering for smooth elevation interpolation between texels.
     texture->setSamplerConfiguration({
         .filter = gfx::TextureFilterType::Linear,
         .wrapU = gfx::TextureWrapType::Clamp,
         .wrapV = gfx::TextureWrapType::Clamp
     });
 
-    Log::Info(Event::Render, "DEM texture created and configured successfully");
-    return texture;
-}
-
-std::shared_ptr<gfx::Texture2D> RenderTerrain::createTestMapTexture(gfx::Context& context) {
-    // Create a simple test texture with a checkerboard pattern
-    // This will be replaced with actual render-to-texture output later
-    const uint32_t size = 512; // 512x512 texture
-    const uint32_t checkerSize = 64; // Size of each checker square
-
-    // Create RGBA pixel data
-    auto imageData = std::make_unique<uint8_t[]>(size * size * 4);
-
-    for (uint32_t y = 0; y < size; y++) {
-        for (uint32_t x = 0; x < size; x++) {
-            uint32_t index = (y * size + x) * 4;
-
-            // Create checkerboard pattern
-            bool isWhite = ((x / checkerSize) + (y / checkerSize)) % 2 == 0;
-
-            if (isWhite) {
-                // White with full alpha
-                imageData[index + 0] = 255; // R
-                imageData[index + 1] = 255; // G
-                imageData[index + 2] = 255; // B
-                imageData[index + 3] = 255; // A
-            } else {
-                // Light blue with full alpha
-                imageData[index + 0] = 100; // R
-                imageData[index + 1] = 150; // G
-                imageData[index + 2] = 255; // B
-                imageData[index + 3] = 255; // A
-            }
-        }
-    }
-
-    // Create PremultipliedImage from raw data
-    auto image = std::make_shared<PremultipliedImage>(
-        Size{size, size},
-        std::move(imageData)
-    );
-
-    // Create texture
-    auto texture = context.createTexture2D();
-    if (!texture) {
-        Log::Error(Event::Render, "Failed to create test map texture");
-        return nullptr;
-    }
-
-    // Set the image
-    texture->setImage(image);
-
-    // Configure sampler
-    texture->setSamplerConfiguration({
-        .filter = gfx::TextureFilterType::Linear,
-        .wrapU = gfx::TextureWrapType::Repeat,
-        .wrapV = gfx::TextureWrapType::Repeat
-    });
-
-    Log::Info(Event::Render, "Test map texture created: " + std::to_string(size) + "x" + std::to_string(size));
     return texture;
 }
 
@@ -480,36 +338,19 @@ std::unique_ptr<gfx::Drawable> RenderTerrain::createDrawableForTile(gfx::Context
     std::vector<uint16_t> indexData = terrainMesh.indices;
     builder->setSegments(gfx::Triangles(), std::move(indexData), segments.data(), segments.size());
 
-    // Set the DEM texture
     if (demTexture) {
-        builder->setTexture(demTexture, 0); // Texture index 0 for DEM
-        Log::Info(Event::Render, "DEM texture bound to drawable for tile " + util::toString(tileID));
-    } else {
-        Log::Warning(Event::Render, "No DEM texture provided for tile " + util::toString(tileID));
+        builder->setTexture(demTexture, 0); // slot 0 = demTexture
     }
 
-    // Phase 3 wiring: bind the drape target's offscreen texture as the
-    // surface colour input. Until Phase 2 routes real layer drawables into
-    // each drape target, the texture will read as the offscreen's clear
-    // colour (transparent / black) — the terrain mesh will look dark
-    // rather than checkerboard. That's the correct visual state for
-    // "Phase 3 wired, Phase 2 not yet".
-    //
-    // If the drape cache somehow doesn't have a target for this tile
-    // (shouldn't happen — `update()` pre-populates the cache for every
-    // visible DEM tile before this is called) we fall back to the
-    // checkerboard so we can see the drawable is at least alive.
+    // Bind the per-tile drape RenderTarget's offscreen texture as the
+    // surface colour input. The drape pass writes basemap layer drawables
+    // into this target; the terrain fragment shader samples it. update()
+    // always pre-populates the cache for every visible DEM tile, so if we
+    // somehow miss here it's a logic error worth flagging.
     if (auto drape = drapeCache.get(tileID); drape && drape->getTexture()) {
         builder->setTexture(drape->getTexture(), 1); // slot 1 = mapTexture
-        Log::Info(Event::Render, "Drape target texture bound to drawable for tile " + util::toString(tileID));
     } else {
-        auto mapTexture = createTestMapTexture(context);
-        if (mapTexture) {
-            builder->setTexture(mapTexture, 1);
-            Log::Warning(Event::Render,
-                         "Drape target missing for tile " + util::toString(tileID) +
-                             " — fell back to checkerboard");
-        }
+        Log::Warning(Event::Render, "Drape target missing for tile " + util::toString(tileID));
     }
 
     // Flush to create the drawable
