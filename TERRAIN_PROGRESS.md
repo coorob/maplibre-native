@@ -674,6 +674,43 @@ Likely next steps for whoever picks this up:
    quad and visibly works upstream. The structural similarity might
    reveal a missing call.
 
+### Overnight push 2 (2026-05-15, ~01:00)
+
+Continued working after the first overnight session reached a natural
+stopping point. Eight more commits:
+
+1. **GL backend port** (`24efce5`) — terrain shader in GLSL ES,
+   ShaderInfo registration, registerTypes inclusion. Core lib builds
+   clean with `--//:renderer=drawable`. Documented under "GL backend
+   port" below.
+
+2. **Fill drape uses its own shader pointer** (`468df43`) — instead
+   of borrowing the main builder's. Matches line / hillshade pattern.
+   Architectural correctness; didn't fix the visibility bug.
+
+3. **LineGradient drape** (`bedfb37`) — extends `emitDrapeLineVariant`
+   with an optional `configureExtras` callback for variant-specific
+   texture binding. Color-ramp texture attaches via the callback.
+
+4. **LinePattern drape** (`50b30a3`) — atlas tweaker on drape builder
+   via the same configureExtras hook. After this, **all four line
+   variants drape**.
+
+5. **FillPattern + FillOutlinePattern drape** (`7ff5c77`) — same
+   pattern, atlas tweaker via configureExtras on the fill version of
+   the lambda. After this, **four of five fill variants drape**.
+   (FillOutlineTriangulated is Metal-only niche, left for later.)
+
+6. **Render-test scaffolds** (`f444e8b`) — two style.json files under
+   `metrics/integration/render-tests/terrain/` for `default` and
+   `exaggeration`. Baseline `expected.png` files need to be generated
+   on a known-good build.
+
+7. **PR_HANDOFF updates** (`a88acca`, `92f9a85`) — cherry-pick list
+   kept in sync with the new commits.
+
+Branch ends overnight at **52 commits** with clean working tree.
+
 ### GL backend port (2026-05-15)
 
 Commit `24efce5` ports the terrain shader to the OpenGL backend:
