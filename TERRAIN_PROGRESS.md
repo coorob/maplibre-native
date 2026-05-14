@@ -574,3 +574,33 @@ errors on the type mismatch. Dropped the dead clause.
   expand from background to fill/line/raster/symbol; Phase 4 still
   needs proper depth-write + opaque-pass + `setIs3D(true)` before
   this is fit for upstream review. But the visual proof is in.
+
+## Known bug discovered during skip-main-pass experiment
+
+When `RenderFillLayer`'s main `TileLayerGroup` is disabled
+(`setEnabled(false)`) while terrain is active, the visible glaciers /
+water on the terrain mesh disappear. This means the fills we *thought*
+were appearing on the terrain mesh via drape were actually the
+main-pass fill drawables rendering on top of the terrain mesh (depth
+test apparently doesn't reject them in translucent pass) — the drape
+routing emits fill drawables into the drape target's TileLayerGroup,
+but those drawables don't visibly contribute to the terrain mesh's
+sampled texture.
+
+Things that might be wrong:
+- Drape target's depth buffer never clears between frames (RenderTarget
+  passes `.clearDepth = {}`). Each frame's drape drawables write z=0;
+  next frame's identical z=0 fail the LESS depth test.
+- Fill drape builder uses `DepthMaskType::ReadWrite` (writes depth);
+  line drape uses `ReadOnly` (no write). The line drape visibly works,
+  the fill drape doesn't — consistent with the depth-buffer-not-clearing
+  hypothesis since lines don't disturb it.
+- Easy fix to try first: set fill drape `DepthMaskType::ReadOnly`. If
+  that works it's evidence for the depth-not-clearing root cause.
+
+This explains why the visual was so close to baseline even on the
+phases where drape was supposedly "the source of truth": main pass
+content was always on top. The drape pipeline is structurally correct
+but the per-target render needs depth clearing (or depth-disabled
+drape drawables) before "skip main pass when terrain is active" can
+be safely turned on.
