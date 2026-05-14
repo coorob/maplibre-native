@@ -303,7 +303,10 @@ CLLocationCoordinate2D randomWorldCoordinate(void) {
         // Create a new state with the below default values
         self.currentState = [[MBXState alloc] init];
 
-        self.mapView.showsUserHeadingIndicator = YES;
+        // Klättra: skip the user-location ornament by default so no
+        // location-permission dialog blocks the map on first launch.
+        // (The original sample app requested location upfront.)
+        self.mapView.showsUserHeadingIndicator = NO;
         self.mapView.showsScale = YES;
         self.mapView.showsLogoView = YES;
         self.mapView.showsCompassView = YES;
@@ -312,11 +315,14 @@ CLLocationCoordinate2D randomWorldCoordinate(void) {
         self.frameTimeGraphEnabled = NO;
         self.mapView.pitchEnabled = YES;
 //        [self.mapView setCenterCoordinate:C zoomLevel:10 direction:0 animated:NO];
-        MLNMapCamera *camera = [MLNMapCamera cameraLookingAtCenterCoordinate:CLLocationCoordinate2DMake(47.2586, 11.38481)
-                                                              acrossDistance:10000
-                                                                       pitch:80
-                                                                     heading:0];
-        [self.mapView setCamera:camera withDuration:0 animationTimingFunction:nil completionHandler:nil];
+        // Klättra default: Kebnekaise massif (Sweden's highest peak, 2100 m).
+        // Picked for testing — most dramatic 3D terrain in our DEM coverage.
+        // Start at modest pitch + zoom so the map content is visible; pitch
+        // can be tilted up in-app to test the 3D terrain extrusion.
+        [self.mapView setCenterCoordinate:CLLocationCoordinate2DMake(67.9026, 18.4954)
+                                zoomLevel:10
+                                direction:0
+                                 animated:NO];
     } else {
         // Revert to the previously saved state
         [self restoreMapState:nil];
@@ -2345,6 +2351,12 @@ CLLocationCoordinate2D randomWorldCoordinate(void) {
     self.styleNames = [NSMutableArray array];
     self.styleURLs = [NSMutableArray array];
 
+
+    // Klättra (Sweden 3D test): real Lantmäteriet 10m DEM via PMTiles +
+    // topo basemap. Default style on launch — verifies 3D terrain works
+    // against production data. Put first so the map opens on Sweden.
+    [self.styleNames addObject:@"Klättra (Sweden 3D)"];
+    [self.styleURLs addObject:[NSURL URLWithString:@"https://mjdapzvtkkqghsmszjjb.supabase.co/storage/v1/object/public/maps/sweden-terrain-test-style.json"]];
 
     [self.styleNames addObject:@"Terrain "];
     // [self.styleURLs addObject:[NSURL URLWithString:@"https://demotiles.maplibre.org/styles/osm-bright-gl-terrain/style.json"]];

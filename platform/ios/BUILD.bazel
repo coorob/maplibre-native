@@ -203,14 +203,16 @@ apple_bundle_version(
 
 ios_application(
     name = "App",
-    bundle_id = "{}.maplibre.app".format(BUNDLE_ID_PREFIX),
+    bundle_id = "app.klattra.dev",
     families = [
         "iphone",
         "ipad",
     ],
     infoplists = ["info_app_plist"],
     minimum_os_version = "12.0",
-    provisioning_profile = "xcode_profile",
+    # No provisioning_profile — simulator builds don't need one, and the
+    # xcode_profile target requires an active Apple Developer account
+    # configured in Xcode, which we don't need for local terrain testing.
     resources = _IOS_APPLICATION_RESOURCES,
     version = ":maplibre_app_version",
     visibility = ["//visibility:public"],
