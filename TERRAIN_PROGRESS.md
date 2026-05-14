@@ -39,7 +39,8 @@ no draping of other layer types. This work picks up there.
 | 3 — Bind drape texture into terrain shader | ✅ Done | Terrain mesh samples drape target instead of checkerboard |
 | 2 — Scaffolding: `RenderLayer::activeTerrain` hook | ✅ Done | Layers can access `RenderTerrain` during `update()` |
 | 2 — `RenderTerrain::getDrapeTarget(tileID)` accessor | ✅ Done | Public lookup for drape RenderTarget per tile |
-| 2 — Actual layer routing (background, fill, line, raster) | ⏳ Pending | The remaining real work |
+| End-to-end pipeline verified | ✅ Done | Terrain mesh visibly samples drape target's clear colour — every step from cache allocation → GPU render pass → texture binding → fragment sampling confirmed |
+| 2 — Actual layer routing (background, fill, line, raster) | ⏳ Pending | Replace the debug clear colour with real basemap content |
 | 4 — Proper depth + opaque pass + `setIs3D(true)` | ⏳ Pending | Mostly debugging once it "kinda works" |
 | 5 — `getElevation()` for layer draping | ⏳ Pending | Optional for first ship |
 
@@ -454,3 +455,13 @@ errors on the type mismatch. Dropped the dead clause.
   reordering (commit `2ce7ce7`). No runtime change yet — runtime path
   identical because no layer subclass uses `activeTerrain`. Next step
   is implementing the routing in `RenderBackgroundLayer::update()`.
+- End-to-end visual proof (commit `a876439`). Added a configurable
+  clear colour on `RenderTarget` (default unchanged) and set drape
+  targets to a muted forest-green debug colour. Terrain mesh now
+  renders that green — confirming **every step of the drape pipeline
+  is wired correctly** from cache allocation through GPU clear pass
+  through texture binding through fragment sampling. The faint warp
+  seam at the displaced mesh edge confirms DEM displacement is still
+  happening alongside the new colour. This is the architectural
+  proof point — Phase 2 routing now just has to overwrite the green
+  with real basemap pixels.
