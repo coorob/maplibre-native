@@ -67,7 +67,7 @@ void RenderTarget::upload(gfx::UploadPass& uploadPass) {
 void RenderTarget::render(RenderOrchestrator& orchestrator, const RenderTree& renderTree, PaintParameters& parameters) {
     parameters.renderPass = parameters.encoder->createRenderPass("render target",
                                                                  {.renderable = *offscreenTexture,
-                                                                  .clearColor = Color{0.0f, 0.0f, 0.0f, 1.0f},
+                                                                  .clearColor = clearColor,
                                                                   .clearDepth = {},
                                                                   .clearStencil = {}});
 

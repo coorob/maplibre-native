@@ -1,6 +1,7 @@
 #pragma once
 
 #include <mbgl/gfx/types.hpp>
+#include <mbgl/util/color.hpp>
 #include <mbgl/util/size.hpp>
 
 #include <functional>
@@ -78,11 +79,21 @@ public:
     /// Render the layer groups
     void render(RenderOrchestrator&, const RenderTree&, PaintParameters&);
 
+    /// Clear colour applied at the start of the render-target's offscreen
+    /// pass each frame. Default is opaque black to match historical
+    /// behaviour. Terrain drape targets override this with a low-saturation
+    /// debug colour so the displaced terrain mesh is visibly distinct from
+    /// "nothing rendered" even before any layer drawables are routed into
+    /// the target — useful for verifying the drape pipeline is wired.
+    void setClearColor(Color color) { clearColor = color; }
+    Color getClearColor() const { return clearColor; }
+
 protected:
     gfx::Context& context;
     std::unique_ptr<gfx::OffscreenTexture> offscreenTexture;
     using LayerGroupMap = std::map<int32_t, LayerGroupBasePtr>;
     LayerGroupMap layerGroupsByLayerIndex;
+    Color clearColor{0.0f, 0.0f, 0.0f, 1.0f};
 };
 
 } // namespace mbgl

@@ -130,6 +130,15 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
             const bool wasAllocated = drapeCache.get(tileID) != nullptr;
             auto target = drapeCache.getOrCreate(context, tileID, {DRAPE_TARGET_SIZE, DRAPE_TARGET_SIZE});
             if (!wasAllocated && target) {
+                // Debug clear color so the displaced terrain mesh shows
+                // *something* visible even before Phase 2 routes basemap
+                // drawables into the target. Picked as a low-saturation
+                // forest-green so it reads as "land-ish" rather than as a
+                // bright alarm colour. Real Phase 2 routing will overwrite
+                // every pixel each frame; this only shows through where
+                // the layer drawables haven't covered the texture (which
+                // for a fully-draped basemap should be: nowhere).
+                target->setClearColor(Color{0.45f, 0.55f, 0.40f, 1.0f});
                 changes.emplace_back(std::make_unique<AddRenderTargetRequest>(target));
             }
         }
