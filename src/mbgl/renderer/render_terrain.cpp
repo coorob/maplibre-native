@@ -142,14 +142,13 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
                 changes.emplace_back(std::make_unique<AddRenderTargetRequest>(target));
             }
         }
-        const auto evicted = drapeCache.pruneIf(
+        // pruneIf returns the evicted IDs but not the targets — we don't
+        // currently emit a RemoveRenderTargetRequest, so the orchestrator
+        // keeps a stale reference until style change. Small memory creep
+        // on map pans; TODO before upstream is to return (id, target) pairs
+        // and emit removal requests.
+        drapeCache.pruneIf(
             [&](const OverscaledTileID& id) { return currentTileIDs.find(id) == currentTileIDs.end(); });
-        for (const auto& id : evicted) {
-            // pruneIf returns IDs but not targets; we don't currently emit
-            // a RemoveRenderTargetRequest, so the orchestrator keeps a
-            // stale reference until style change. TODO before upstream.
-            Log::Info(Event::Render, "Terrain drape target evicted for tile " + util::toString(id));
-        }
     }
 
     // Create terrain drawables for each DEM tile

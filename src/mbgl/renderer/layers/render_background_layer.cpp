@@ -118,9 +118,6 @@ void RenderBackgroundLayer::update(gfx::ShaderRegistry& shaders,
                                    const std::shared_ptr<UpdateParameters>& updateParameters,
                                    [[maybe_unused]] const RenderTree& renderTree,
                                    [[maybe_unused]] UniqueChangeRequestVec& changes) {
-    Log::Info(Event::Render,
-              std::string("BG.update() ENTRY id=") + getID() +
-                  " activeTerrain=" + (activeTerrain ? "set" : "null"));
     assert(updateParameters);
     const auto zoom = state.getIntegerZoom();
     const auto tileCover = util::tileCover({state,
@@ -233,19 +230,16 @@ void RenderBackgroundLayer::update(gfx::ShaderRegistry& shaders,
     }
 
     // Phase 2 drape routing: when terrain is active, ALSO emit a background
-    // drawable into each visible-tile's drape RenderTarget so the terrain
-    // mesh can sample the basemap-coloured surface as it displaces. We keep
-    // the main-tileLayerGroup drawables above too — the terrain mesh
-    // overlays them at the same screen position, hiding the doubled cost.
-    // Phase 4 cleanup will skip the main path when terrain is on (matches
-    // gl-js's IRenderToTexture.renderLayer() returning true).
+    // drawable into each visible DEM tile's drape RenderTarget so the
+    // terrain mesh can sample the basemap-coloured surface as it displaces.
+    // We keep the main-tileLayerGroup drawables above too — the terrain
+    // mesh overlays them at the same screen position, hiding the doubled
+    // cost. Phase 4 cleanup will skip the main path when terrain is on
+    // (matches gl-js's IRenderToTexture.renderLayer() returning true).
     //
     // The pattern below mirrors RenderHillshadeLayer's per-tile RenderTarget
     // setup almost line-for-line, swapping the source of the RenderTarget
     // (Phase 1 drape cache instead of a fresh allocation per layer).
-    Log::Info(Event::Render,
-              std::string("background.update() reached drape check, activeTerrain=") +
-                  (activeTerrain ? "set" : "null"));
     if (activeTerrain) {
         // Lazily construct the drape-pass tweaker (ortho matrix instead of
         // the camera's getTileMatrix). Same evaluated properties as the
@@ -265,13 +259,7 @@ void RenderBackgroundLayer::update(gfx::ShaderRegistry& shaders,
                 if (tgt) drapeEntries.emplace_back(id, tgt);
             });
 
-        Log::Info(Event::Render,
-                  "background drape: terrain active, drape tiles=" +
-                      std::to_string(drapeEntries.size()) +
-                      " (basemap tileCover=" + std::to_string(tileCover.size()) + ")");
-
         std::unique_ptr<gfx::DrawableBuilder> drapeBuilder;
-        size_t emittedCount = 0;
         for (auto& [tileID, drape] : drapeEntries) {
 
             // Get or create a single-tile TileLayerGroup inside the target
@@ -313,13 +301,8 @@ void RenderBackgroundLayer::update(gfx::ShaderRegistry& shaders,
                 drawable->setLayerTweaker(drapeLayerTweaker);
                 drapeGroup->addDrawable(drawPasses, tileID, std::move(drawable));
                 ++stats.drawablesAdded;
-                ++emittedCount;
             }
         }
-
-        Log::Info(Event::Render,
-                  "background drape summary: drape tiles=" + std::to_string(drapeEntries.size()) +
-                      " drawables emitted this frame=" + std::to_string(emittedCount));
     }
 }
 
