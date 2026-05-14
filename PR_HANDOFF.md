@@ -75,6 +75,9 @@ c85b1a2   Property-change propagation
 3a8097a   Phase 2 line: extend drape routing to LineSDF + refactor into helper
 23e798f   Implement RenderTerrain::getElevation with bilinear DEM sampling
 de288b0   Fill drape: own vertex attrs with explicit position; clear drape depth
+
+# GL backend port
+24efce5   GL backend: port terrain shader + register attribute/texture info
 ```
 
 ## Commits to SKIP
@@ -86,7 +89,9 @@ e8b07e8   Klättra: rebrand sample app + add Sweden 3D test style
 592e417   Klättra: default view pitch 55°
 # All TERRAIN_PROGRESS doc updates — internal log, not for upstream
 bd3924e, 5f9e821, 4d6e2fd, c433721, 60b6279, d499db4, 7f70908,
-204c11b, 869e869, c859228, fcb5b8d, 7ea37a8, 68a34a7
+204c11b, 869e869, c859228, fcb5b8d, 7ea37a8, 68a34a7, e1cff3f
+# This PR handoff doc
+d9ad3f3
 ```
 
 ## Cherry-pick procedure
@@ -150,7 +155,11 @@ Expect conflicts at:
 >
 > ## Known limitations
 >
-> - **Metal-only.** GL backend not yet implemented.
+> - **GL backend partially implemented.** GLSL terrain shader and
+>   shader registration are in place. Visual verification on a GL
+>   target (Android / Linux / macOS native) still needed —
+>   MapLibre Native iOS is Metal-only so the GL shader can't be
+>   exercised from the iOS sample app.
 > - **Fill drape draws but produces no visible fragments.** The
 >   architecture routes fill drawables into drape RenderTargets and
 >   `drawable.draw()` runs, but the resulting fragments don't reach the
