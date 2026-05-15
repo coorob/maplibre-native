@@ -176,13 +176,16 @@ Expect conflicts at:
 >   target (Android / Linux / macOS native) still needed —
 >   MapLibre Native iOS is Metal-only so the GL shader can't be
 >   exercised from the iOS sample app.
-> - **Fill drape draws but produces no visible fragments.** The
->   architecture routes fill drawables into drape RenderTargets and
->   `drawable.draw()` runs, but the resulting fragments don't reach the
->   target's colour attachment. Diagnosed via per-frame trace logs and
->   forced-magenta colour test — see the rolling progress doc for
->   details. Suspect Metal pipeline-state mismatch or vertex shader
->   clip-rejection; needs Xcode frame capture.
+> - **Fill drape verified working via Xcode Metal frame capture.**
+>   The drape RenderTarget texture readback shows the expected cream
+>   background, water lake fills, and line features; the terrain mesh
+>   fragment shader samples this texture and the main framebuffer
+>   pixel readback confirms the sampled drape colour reaches the
+>   screen. The earlier "draws but no visible fragments" hypothesis
+>   (from trace logs + forced-magenta test) is superseded by the
+>   captured frame — the magenta override likely missed the
+>   drape-tweaker UBO. See `TERRAIN_PROGRESS.md` for the capture
+>   details and pixel readouts.
 > - **Symbol elevation: per-tile only.** Labels are lifted to the
 >   centre elevation of their tile via `getElevation()`. Visible
 >   correctness improvement at zoom levels where tiles are small,
@@ -198,10 +201,15 @@ Expect conflicts at:
 >   FillPattern, FillOutlinePattern all emit drape drawables.
 >   FillOutlineTriangulated (Metal-only niche) is the one exception.
 >   Line: Simple, SDF, Gradient, Pattern all drape.
-> - **Render tests scaffolded.** `metrics/integration/render-tests/terrain/`
->   contains `default/` and `exaggeration/` styles. Baselines need to
->   be captured by running the render-test tool once on a known-good
->   build.
+> - **Render tests with baselines.** `metrics/integration/render-tests/terrain/`
+>   contains `default/` and `exaggeration/` styles plus captured
+>   `expected.png` baselines (256×256, pitch 60°, hillshade overlay).
+>   Captured via `mbgl-render-test-runner --update default` against
+>   `macos-xcode11-release-style.json`. The default and exaggeration
+>   baselines are currently byte-identical because hillshade renders
+>   as a 2D overlay — exaggeration changes the terrain mesh elevation
+>   but not the hillshade layer's pixels. A future test with a draped
+>   layer (fill/line) would show the difference.
 >
 > Total ≈1700 lines added across ~25 commits, mostly Phase 2 layer
 > routing. Happy to split into smaller PRs if maintainers prefer.

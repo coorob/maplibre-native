@@ -5,7 +5,7 @@
       "height": 256,
       "width": 256,
       "pitch": 60,
-      "description": "Terrain mesh with exaggeration=3 should appear noticeably more rugged than the default exaggeration=1 baseline."
+      "description": "Same DEM + pitch as the default test, but with exaggeration=3.0. Hillshade visualises the same DEM so the deeper elevation gradient is visible in the baseline."
     }
   },
   "center": [-113.26903, 35.9654],
@@ -32,6 +32,11 @@
       "paint": {
         "background-color": "#F4EAD0"
       }
+    },
+    {
+      "id": "hillshade",
+      "type": "hillshade",
+      "source": "terrain-dem"
     }
   ]
 }

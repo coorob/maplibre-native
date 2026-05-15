@@ -831,3 +831,120 @@ tweaker's `drapeTargetID` branch). The most suspect remaining surface
 is the vertex shader path through `FillBinders` and per-vertex
 attribute setup. Worth attaching a Metal frame capture next session
 to inspect the drape pipeline state and the actual fragments emitted.
+
+### GPU frame capture findings (2026-05-15, 08:30)
+
+Successfully attached Xcode and captured a Metal frame from the
+Klättra sample app running on iPhone 16 Pro simulator. Required
+`SIMCTL_CHILD_MTL_CAPTURE_ENABLED=1` env var when launching the
+process so Xcode's GPU Capture button isn't greyed out.
+
+Frame stats: 11 Command Buffers, 11 Render Encoders, 368 Draw Calls.
+
+**Render Encoder 0 (drape pass)** — 13 draw calls, 1MB load/store,
+draws into Texture 0x117c40180 (512×512 RGBA8Unorm, the drape
+RenderTarget for one DEM tile). Pipeline-State grouping shows:
+
+- BackgroundShader
+- FillShader (~25 draws via this pipeline across the frame)
+- FillOutlineShader
+- LineShader / LineSDFShader×2
+- TerrainShader
+- ClippingMaskProgram
+- FillOutlineTriangulatedShader
+- CircleShader×2
+- SymbolSDFShader
+
+**Drape texture contents at capture time:**
+- Cream/tan base (background fill drape) ✓
+- Light-blue water lakes (fill drape) ✓
+- Pixel readout at (101, 161) inside drape texture: R=0.86, G=0.81,
+  B=0.69, A=1 — recognisable tan-cream value, NOT zero.
+
+**FillShader draw 63 (an actual fill drape draw):**
+- indexCount=2892, instanceCount=1
+- Pipeline state: FillShader
+- Output: the same cream-tan drape texture filled with the layer's
+  geometry. Xcode's "draw highlight" green outlined the affected
+  fragments; pixels inside the outlines were the fill colour (not
+  zero, not transparent).
+
+**Terrain mesh draw 2168 (main pass):**
+- Pipeline state: TerrainShader
+- Vertex stage Texture 1 = 0x117c40180 (drape texture, 512×512)
+- Vertex stage Texture 0 = 0x117c40000 (DEM, 514×514)
+- Fragment stage binds the same two textures + samplers
+- Attachments: CAMetalLayer Display Drawable (main framebuffer)
+- Output pixel readout at (715, 638) on main framebuffer: R=0.74,
+  G=0.77, B=0.79, A=1 — a sampled drape colour with diffuse-lighting
+  tint applied. Visible terrain colour in the live render.
+
+### Conclusion: fill drape is contributing
+
+The captured frame disproves the earlier "fill drape produces no
+visible fragments" hypothesis. In the captured frame:
+
+1. The drape texture has rendered content (cream background, water
+   lake fills, line features).
+2. The terrain mesh fragment shader samples that drape texture at
+   the right slot (Texture 1) with a valid sampler.
+3. The main framebuffer pixel reads back a recognisable sampled
+   drape colour — confirming the sampling path reaches the screen.
+
+The "magenta-test no magenta" result from the overnight session is
+explained by which fill drape draw was overridden — the test forced
+the colour in the main fill tweaker path, but the drape path uses
+its own `drapeTargetID`-branched matrix and runs through a
+separately-bound `FillEvaluatedPropsUBO` per drape target. The
+magenta override likely missed the drape-tweaker UBO that the GPU
+actually read.
+
+**Net effect for the PR:** the "fill drape draws but doesn't contribute"
+known limitation in `PR_HANDOFF.md` is overstated. The fill drape
+pipeline works as designed in the captured frame. The remaining
+real limitation is the per-tile vs per-vertex elevation on
+connected geometry (seams at tile boundaries), which is a different
+issue (vertex-attribute scope, not pipeline state).
+
+### Render-test baselines captured (2026-05-15, 09:00)
+
+Built `mbgl-render-test-runner` from `cmake --preset macos` after
+adding terrain source files to `CMakeLists.txt` (`include/`/`src/`
+under `renderer/`, `renderer/layers/`, `style/`, `style/conversion/`,
+plus Metal/GL shader headers). The Bazel build already tracked the
+files; CMake did not.
+
+Files added to `CMakeLists.txt`:
+- `include/mbgl/renderer/render_terrain_drape_cache.hpp`
+- `include/mbgl/style/conversion/terrain.hpp`
+- `include/mbgl/style/terrain.hpp`
+- `include/mbgl/style/terrain_observer.hpp`
+- `src/mbgl/renderer/layers/terrain_layer_tweaker.{cpp,hpp}`
+- `src/mbgl/renderer/render_terrain.{cpp,hpp}`
+- `src/mbgl/renderer/render_terrain_drape_cache.cpp`
+- `src/mbgl/style/conversion/terrain.cpp`
+- `src/mbgl/style/terrain.cpp` + `terrain_impl.hpp`
+- Metal section: `include/mbgl/shaders/mtl/terrain.hpp`,
+  `include/mbgl/shaders/terrain_layer_ubo.hpp`,
+  `src/mbgl/shaders/mtl/terrain.cpp`
+- GL section: `include/mbgl/shaders/gl/terrain.hpp`
+
+Build clean, `mbgl-render-test-runner` produced. Ran:
+
+```
+./build-macos/mbgl-render-test-runner \
+    --manifestPath=metrics/macos-xcode11-release-style.json \
+    --update default --filter "terrain/.*"
+```
+
+Updated both terrain style.json scaffolds to include a hillshade
+layer so the baseline is visually meaningful (otherwise the test
+renders only the background colour). Baselines now show recognisable
+hillshaded mountain terrain at pitch 60°.
+
+`default/expected.png` and `exaggeration/expected.png` are byte-
+identical because the hillshade layer renders as a 2D overlay and
+doesn't follow the terrain mesh — the exaggeration setting changes
+the terrain-mesh elevation but not the hillshade output. A future
+test scenario with a draped layer (fill or line) would surface the
+difference.
