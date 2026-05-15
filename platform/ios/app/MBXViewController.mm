@@ -317,13 +317,14 @@ CLLocationCoordinate2D randomWorldCoordinate(void) {
 //        [self.mapView setCenterCoordinate:C zoomLevel:10 direction:0 animated:NO];
         // Klättra default: Kebnekaise massif (Sweden's highest peak, 2100 m).
         // Picked for testing — most dramatic 3D terrain in our DEM coverage.
-        // Use a tilted camera so the 3D-extruded terrain mesh is visibly
-        // distinct from a flat overhead view. Pitch 55° gives a clear
-        // mountain silhouette without losing too much surrounding context.
+        // Camera tuned to mirror the traska.app web 3D view: close-in,
+        // strongly pitched, looking south-west across the massif so the
+        // east-facing slopes catch the directional hillshade and the
+        // glaciated bowls (Storglaciären, Rabots) read clearly.
         MLNMapCamera *camera = [MLNMapCamera cameraLookingAtCenterCoordinate:CLLocationCoordinate2DMake(67.9026, 18.4954)
-                                                              acrossDistance:15000
-                                                                       pitch:55
-                                                                     heading:0];
+                                                              acrossDistance:12000
+                                                                       pitch:68
+                                                                     heading:215];
         [self.mapView setCamera:camera withDuration:0 animationTimingFunction:nil completionHandler:nil];
     } else {
         // Revert to the previously saved state
@@ -2395,10 +2396,92 @@ CLLocationCoordinate2D randomWorldCoordinate(void) {
 {
     self.styleIndex = (self.styleIndex + 1) % self.styleNames.count;
 
-    self.mapView.styleURL = self.styleURLs[self.styleIndex];
+    NSURL *targetURL = self.styleURLs[self.styleIndex];
+    NSString *targetName = self.styleNames[self.styleIndex];
+
+    // Klättra hack: the published Sweden 3D style on Supabase has terrain
+    // enabled but no hillshade layer, so the topo basemap drapes onto the
+    // mesh as a flat skin. The web app injects a hillshade layer at runtime
+    // via map.addLayer(...) — iOS lacks MLNHillshadeStyleLayer bindings, so
+    // we fetch the style JSON, splice in a hillshade layer (matching the
+    // web's exaggeration ramp), and load via styleJSON.
+    if ([targetName hasPrefix:@"Klättra"]) {
+        NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithURL:targetURL
+            completionHandler:^(NSData *data, __unused NSURLResponse *response, NSError *error) {
+                if (error || !data) {
+                    NSLog(@"Klättra style fetch failed: %@", error);
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        self.mapView.styleURL = targetURL;
+                    });
+                    return;
+                }
+                NSError *jsonError = nil;
+                NSMutableDictionary *style = [[NSJSONSerialization JSONObjectWithData:data
+                                                                              options:NSJSONReadingMutableContainers
+                                                                                error:&jsonError] mutableCopy];
+                NSLog(@"[Klättra DEBUG] downloaded bytes=%lu  raw-terrain-from-parse=%@",
+                      (unsigned long)data.length, style[@"terrain"]);
+                if (jsonError || !style) {
+                    NSLog(@"Klättra style parse failed: %@", jsonError);
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        self.mapView.styleURL = targetURL;
+                    });
+                    return;
+                }
+                NSMutableArray *layers = style[@"layers"];
+                BOOL alreadyHasHillshade = NO;
+                for (NSDictionary *layer in layers) {
+                    if ([layer[@"type"] isEqualToString:@"hillshade"]) { alreadyHasHillshade = YES; break; }
+                }
+                if (!alreadyHasHillshade && style[@"sources"][@"terrain-dem"]) {
+                    NSDictionary *hillshade = @{
+                        @"id": @"hillshade",
+                        @"type": @"hillshade",
+                        @"source": @"terrain-dem",
+                        @"minzoom": @5,
+                        @"paint": @{
+                            // Push exaggeration + custom dark shadow / warm
+                            // highlight to match the dramatic relief look of
+                            // the traska.app web 3D view.
+                            @"hillshade-exaggeration": @[@"interpolate", @[@"linear"], @[@"zoom"],
+                                                          @5, @0.7, @10, @1.0, @14, @1.0],
+                            @"hillshade-shadow-color": @"#1a1611",
+                            @"hillshade-highlight-color": @"#fff8e6",
+                            @"hillshade-accent-color": @"#5e4a2e",
+                        },
+                    };
+                    // Insert AFTER all opaque basemap fills/lines but BEFORE
+                    // symbols (icons + text labels). Putting hillshade right
+                    // after the background gets it instantly covered by every
+                    // opaque fill above it; putting it at the very top covers
+                    // labels. The first symbol layer is the natural seam.
+                    NSUInteger insertIdx = layers.count;
+                    for (NSUInteger i = 0; i < layers.count; ++i) {
+                        if ([layers[i][@"type"] isEqualToString:@"symbol"]) { insertIdx = i; break; }
+                    }
+                    [layers insertObject:hillshade atIndex:insertIdx];
+                }
+                // Also bump terrain exaggeration so the mesh extrusion is
+                // unmistakable from the dramatic Kebnekaise camera angle.
+                NSMutableDictionary *terrain = style[@"terrain"];
+                if ([terrain isKindOfClass:[NSMutableDictionary class]]) {
+                    terrain[@"exaggeration"] = @2.5;
+                }
+                NSData *patched = [NSJSONSerialization dataWithJSONObject:style options:0 error:nil];
+                NSString *jsonString = [[NSString alloc] initWithData:patched encoding:NSUTF8StringEncoding];
+                NSLog(@"[Klättra] patched terrain=%@ hillshade-injected=%d layers=%lu",
+                      style[@"terrain"], !alreadyHasHillshade, (unsigned long)layers.count);
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    self.mapView.styleJSON = jsonString;
+                });
+            }];
+        [task resume];
+    } else {
+        self.mapView.styleURL = targetURL;
+    }
 
     UIButton *titleButton = (UIButton *)self.navigationItem.titleView;
-    [titleButton setTitle:self.styleNames[self.styleIndex] forState:UIControlStateNormal];
+    [titleButton setTitle:targetName forState:UIControlStateNormal];
 }
 
 - (IBAction)locateUser:(id)sender
