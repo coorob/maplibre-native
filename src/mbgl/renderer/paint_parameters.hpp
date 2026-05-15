@@ -72,6 +72,12 @@ public:
     const TransformState& state;
     const EvaluatedLight& evaluatedLight;
 
+    /// Active terrain for this frame, or nullptr if terrain is disabled.
+    /// Set by the renderer after the orchestrator's update() pass, so
+    /// tweakers and layers can read elevation-aware state without
+    /// reaching into the orchestrator directly.
+    const class RenderTerrain* activeTerrain = nullptr;
+
     RenderStaticData& staticData;
     LineAtlas& lineAtlas;
     PatternAtlas& patternAtlas;

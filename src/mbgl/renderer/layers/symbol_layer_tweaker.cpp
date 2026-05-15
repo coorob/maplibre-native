@@ -10,11 +10,14 @@
 #include <mbgl/renderer/layer_group.hpp>
 #include <mbgl/renderer/paint_parameters.hpp>
 #include <mbgl/renderer/paint_property_binder.hpp>
+#include <mbgl/renderer/render_terrain.hpp>
 #include <mbgl/renderer/render_tree.hpp>
 #include <mbgl/shaders/shader_program_base.hpp>
 #include <mbgl/shaders/symbol_layer_ubo.hpp>
 #include <mbgl/style/layers/symbol_layer_properties.hpp>
 #include <mbgl/util/convert.hpp>
+#include <mbgl/util/mat4.hpp>
+#include <mbgl/util/projection.hpp>
 #include <mbgl/util/std.hpp>
 
 #if MLN_RENDER_BACKEND_METAL
@@ -135,6 +138,21 @@ void SymbolLayerTweaker::execute(LayerGroupBase& layerGroup, const PaintParamete
             const auto anchor = isText ? evaluated.get<style::TextTranslateAnchor>()
                                        : evaluated.get<style::IconTranslateAnchor>();
             matrix = getTileMatrix(tileID, parameters, translate, anchor, nearClipped, inViewportPixelUnits, drawable);
+
+            // Phase 5: when terrain is active, lift symbols off z=0 to the
+            // terrain elevation at the tile's centre so labels follow ridges
+            // and valleys instead of clipping into mountains. Per-tile
+            // sampling is coarse (all labels in a tile get the same offset)
+            // — a finer per-symbol elevation would need a vertex attribute,
+            // deferred for later. Same Z-scale fix the terrain mesh uses.
+            if (parameters.activeTerrain) {
+                const float elevation = parameters.activeTerrain->getElevation(tileID, 0.5f, 0.5f);
+                if (elevation != 0.0f) {
+                    const double pixelsPerMeter = 1.0 / Projection::getMetersPerPixelAtLatitude(
+                        state.getLatLng().latitude(), state.getZoom());
+                    matrix::translate(matrix, matrix, 0.0, 0.0, elevation * pixelsPerMeter);
+                }
+            }
         }
 
         // from symbol_program, makeValues

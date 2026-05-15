@@ -204,6 +204,13 @@ void Renderer::Impl::render(const RenderTree& renderTree, const std::shared_ptr<
 
     parameters.symbolFadeChange = renderTreeParameters.symbolFadeChange;
     parameters.opaquePassCutoff = renderTreeParameters.opaquePassCutOff;
+
+    // Expose the orchestrator's RenderTerrain to tweakers via PaintParameters.
+    // Only set when terrain is actually enabled (matches the gating the
+    // orchestrator does internally before setting each layer's activeTerrain).
+    if (auto* terrain = orchestrator.getRenderTerrain(); terrain && terrain->isEnabled()) {
+        parameters.activeTerrain = terrain;
+    }
     const auto& sourceRenderItems = renderTree.getSourceRenderItems();
 
     const auto& layerRenderItems = renderTree.getLayerRenderItemMap();
