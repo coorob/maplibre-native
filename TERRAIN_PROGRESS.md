@@ -1258,3 +1258,39 @@ re-verification this session.
 
 Reverted the `target_environments` edit in `platform/ios/BUILD.bazel`
 since it's a local convenience, not part of the PR.
+
+### iOS visual verification — SUCCESS (2026-05-15, 11:36)
+
+Root-caused the earlier "iOS build broken" finding: was passing the
+wrong renderer flag. `bazel-xcodeproj.sh` defaults to
+`--flavor drawable` which maps to `--//:renderer=drawable` (drawable
+OpenGL mode); for Metal you need `--//:renderer=metal`. The
+`drawable_renderer` config_setting defines `MLN_RENDER_BACKEND_OPENGL=1`,
+not `MLN_RENDER_BACKEND_METAL=1`, so the plugin file's accesses to
+`MLNBackendResource.device` / `mtkView` (which are guarded by
+`#if MLN_RENDER_BACKEND_METAL`) had no properties to bind to.
+
+Correct build command:
+```
+bazel build //platform/ios:App --ios_multi_cpus=sim_arm64 \
+            --apple_platform_type=ios --//:renderer=metal
+```
+
+550 actions, ~3 min, exit 0. Installed via `xcrun simctl install`,
+launched via `xcrun simctl launch app.klattra.dev`. The Klättra
+(Sweden 3D) style loads by default and renders correctly:
+
+- 3D terrain mesh visible with proper shading and depth.
+- Topo basemap drapes onto the terrain (kalfjäll, glaciar,
+  hojdkurva, skog, hydrolinje, strandlinje, vatten all visible at
+  correct mesh-relative positions).
+- Place labels (Kebnekaise, Råbots glaciär, etc.) lift to terrain
+  elevation via the Phase 5 symbol-elevation path.
+- Hiking trails (red dashed) follow ridges and valleys.
+- Background (sky beyond the silhouette) shows correctly past the
+  terrain mesh — confirms TERRAIN_LAYER_INDEX = -1 fix works in
+  the real app, not just the render-test runner.
+
+Net: the entire branch's terrain-rendering pipeline is now verified
+end-to-end on iOS Metal at runtime. The earlier "iOS verification
+deferred" note can be removed in the next PR_HANDOFF.md edit.
