@@ -230,11 +230,10 @@ private:
 
     // Mesh resolution (vertices per side). The index buffer uses UInt16,
     // so total vertex count must stay under 65,536 — that's (MESH_SIZE+1)²
-    // and caps MESH_SIZE at 254. Increasing from the previous 128
-    // (16,641 vertices) to 192 (37,249 vertices) ~2.25× the triangle
-    // count, which is enough to eliminate the visible tessellation
-    // faceting on close-up slopes without changing the index type.
-    static constexpr size_t MESH_SIZE = 192;
+    // and caps MESH_SIZE at 254 (255² = 65,025 vertices, 129,032 triangles
+    // per tile). This is the maximum density we can run without switching
+    // to UInt32 indices.
+    static constexpr size_t MESH_SIZE = 254;
 
     // Cached DEM source
     RenderSource* demSource = nullptr;

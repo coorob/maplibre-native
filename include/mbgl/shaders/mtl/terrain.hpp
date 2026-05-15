@@ -70,7 +70,16 @@ struct FragmentStage {
     float4 position [[position, invariant]];
     float2 uv;
     float elevation;
+    float3 normal;
 };
+
+// Decode one Mapbox Terrain-RGB texel to elevation (metres).
+static inline float decodeElevation(float4 demSample) {
+    float r = demSample.r * 255.0;
+    float g = demSample.g * 255.0;
+    float b = demSample.b * 255.0;
+    return -10000.0 + ((r * 256.0 * 256.0 + g * 256.0 + b) * 0.1);
+}
 
 FragmentStage vertex vertexMain(thread const VertexStage vertx [[stage_in]],
                                 device const uint32_t& uboIndex [[buffer(idGlobalUBOIndex)]],
@@ -86,32 +95,42 @@ FragmentStage vertex vertexMain(thread const VertexStage vertx [[stage_in]],
     float2 pos = float2(vertx.pos);
     float2 uv = pos / 8192.0;
 
-    // Sample DEM texture to get raw RGBA values
-    float4 demSample = demTexture.sample(demSampler, uv);
+    // Decode the centre elevation at this vertex.
+    float elevationMeters = decodeElevation(demTexture.sample(demSampler, uv));
 
-    // Decode Mapbox Terrain RGB format to get elevation in meters
-    // Format: height = -10000 + ((R*256*256 + G*256 + B) * 0.1)
-    // DEM values are in range [0, 1] so convert back to [0, 255]
-    float r = demSample.r * 255.0;
-    float g = demSample.g * 255.0;
-    float b = demSample.b * 255.0;
+    // Per-vertex smooth normal: sample the four 4-neighbours in DEM-texel
+    // units and decode each independently. We cannot bilinearly average
+    // Terrain-RGB texels with a linear sampler because the RGB→metres
+    // encoding is non-linear in the byte values, so sample at texel
+    // centres and decode separately. Width of the DEM texture is queried
+    // at runtime so this works for 256-px or 512-px tile sources alike.
+    const float2 texSize = float2(demTexture.get_width(), demTexture.get_height());
+    const float2 texelStep = float2(1.0, 1.0) / texSize;
+    float elevXP = decodeElevation(demTexture.sample(demSampler, uv + float2(texelStep.x, 0.0)));
+    float elevXN = decodeElevation(demTexture.sample(demSampler, uv - float2(texelStep.x, 0.0)));
+    float elevYP = decodeElevation(demTexture.sample(demSampler, uv + float2(0.0, texelStep.y)));
+    float elevYN = decodeElevation(demTexture.sample(demSampler, uv - float2(0.0, texelStep.y)));
 
-    // Calculate elevation in meters
-    float elevationMeters = -10000.0 + ((r * 256.0 * 256.0 + g * 256.0 + b) * 0.1);
-
-    // Apply exaggeration for visible relief (default: 1.0, can be set higher for dramatic effect)
+    // Apply exaggeration for visible relief (default: 1.0, higher exaggerates).
     float elevation = elevationMeters * props.exaggeration;
+    float dE_dx = (elevXP - elevXN) * 0.5 * props.exaggeration;
+    float dE_dy = (elevYP - elevYN) * 0.5 * props.exaggeration;
+
+    // Normal: gradient is in metres per (UV in [0..1] across the tile),
+    // not per-metre, but the lighting only needs the direction so we
+    // normalise. The Z component is the constant "tile-extent" reference
+    // chosen empirically so the normal isn't dominated by the gradient
+    // on steep terrain.
+    float3 normal = normalize(float3(-dE_dx, -dE_dy, 50.0));
 
     // Create 3D position with elevation as Z coordinate
     float4 position = drawable.matrix * float4(pos.x, pos.y, elevation, 1.0);
 
-    // Pack elevation value for fragment shader visualization
-    float packedValue = elevation;
-
     return {
-        .position    = position,
-        .uv          = uv,
-        .elevation   = packedValue,  // Pass packed RGBA to detect any non-zero values
+        .position  = position,
+        .uv        = uv,
+        .elevation = elevation,
+        .normal    = normal,
     };
 }
 
@@ -127,13 +146,11 @@ half4 fragment fragmentMain(FragmentStage in [[stage_in]],
     // Note: Y-coordinate is flipped (1.0 - y) to match OpenGL convention
     float4 mapColor = mapTexture.sample(mapSampler, float2(in.uv.x, 1.0 - in.uv.y));
 
-    // Reconstruct a surface normal from screen-space elevation gradients so
-    // the 3D extrusion is visible even when the draped surface is a flat
-    // colour. Light direction / colour / intensity come from the style's
-    // global `light` block (same path fill-extrusion uses).
-    float dE_dx = dfdx(in.elevation);
-    float dE_dy = dfdy(in.elevation);
-    float3 normal = normalize(float3(-dE_dx, -dE_dy, 1.0));
+    // Smooth per-vertex normal interpolated across the triangle, then
+    // re-normalised here because the linear interpolator doesn't preserve
+    // unit length. The earlier `dfdx`/`dfdy` approach gave flat shading
+    // per triangle and produced visible mesh faceting on slopes.
+    float3 normal = normalize(in.normal);
     float3 lightDir = normalize(props.light_position_intensity.xyz);
     float lightIntensity = props.light_position_intensity.w;
     float ambient = 1.0 - lightIntensity;

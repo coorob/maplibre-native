@@ -28,28 +28,46 @@ uniform sampler2D u_dem_texture;
 
 out vec2 v_uv;
 out float v_elevation;
+out vec3 v_normal;
+
+float decodeElevation(vec4 demSample) {
+    float r = demSample.r * 255.0;
+    float g = demSample.g * 255.0;
+    float b = demSample.b * 255.0;
+    return -10000.0 + ((r * 256.0 * 256.0 + g * 256.0 + b) * 0.1);
+}
 
 void main() {
     vec2 pos = vec2(a_pos);
     vec2 uv = pos / 8192.0;
 
-    // Sample DEM texture (Mapbox Terrain RGB encoding) and decode the
-    // elevation in metres. Same formula as the Metal vertex shader.
-    vec4 demSample = texture(u_dem_texture, uv);
-    float r = demSample.r * 255.0;
-    float g = demSample.g * 255.0;
-    float b = demSample.b * 255.0;
-    float elevationMeters = -10000.0 + ((r * 256.0 * 256.0 + g * 256.0 + b) * 0.1);
+    float elevationMeters = decodeElevation(texture(u_dem_texture, uv));
+
+    // Per-vertex smooth normal: sample 4-neighbours in DEM-texel units and
+    // decode each independently (the RGB→metres encoding is non-linear
+    // in the byte values, so a linear filter can't be relied on for
+    // gradient computation).
+    vec2 texSize = vec2(textureSize(u_dem_texture, 0));
+    vec2 texelStep = vec2(1.0, 1.0) / texSize;
+    float elevXP = decodeElevation(texture(u_dem_texture, uv + vec2(texelStep.x, 0.0)));
+    float elevXN = decodeElevation(texture(u_dem_texture, uv - vec2(texelStep.x, 0.0)));
+    float elevYP = decodeElevation(texture(u_dem_texture, uv + vec2(0.0, texelStep.y)));
+    float elevYN = decodeElevation(texture(u_dem_texture, uv - vec2(0.0, texelStep.y)));
 
     float elevation = elevationMeters * u_exaggeration;
+    float dE_dx = (elevXP - elevXN) * 0.5 * u_exaggeration;
+    float dE_dy = (elevYP - elevYN) * 0.5 * u_exaggeration;
+    vec3 normal = normalize(vec3(-dE_dx, -dE_dy, 50.0));
 
     gl_Position = u_matrix * vec4(pos.x, pos.y, elevation, 1.0);
     v_uv = uv;
     v_elevation = elevation;
+    v_normal = normal;
 }
 )";
     static constexpr const char* fragment = R"(in vec2 v_uv;
 in float v_elevation;
+in vec3 v_normal;
 
 uniform sampler2D u_map_texture;
 
@@ -73,12 +91,10 @@ void main() {
     // y-down tile coords.
     vec4 mapColor = texture(u_map_texture, vec2(v_uv.x, 1.0 - v_uv.y));
 
-    // Reconstruct a surface normal from screen-space derivatives of the
-    // elevation varying so the 3D mesh self-shades even when the drape
-    // surface is a flat colour.
-    float dE_dx = dFdx(v_elevation);
-    float dE_dy = dFdy(v_elevation);
-    vec3 normal = normalize(vec3(-dE_dx, -dE_dy, 1.0));
+    // Smooth per-vertex normal interpolated across the triangle, then
+    // re-normalised here because linear interpolation doesn't preserve
+    // unit length.
+    vec3 normal = normalize(v_normal);
     vec3 lightDir = normalize(u_light_position_intensity.xyz);
     float lightIntensity = u_light_position_intensity.w;
     float ambient = 1.0 - lightIntensity;
