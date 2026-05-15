@@ -2470,29 +2470,14 @@ CLLocationCoordinate2D randomWorldCoordinate(void) {
                     terrain[@"exaggeration"] = @2.5;
                 }
 
-                // Drop the opacity of full-coverage alpine fills (glacier,
-                // ice, bare alpine ground). At opacity 1.0 these polygons
-                // completely mask the hillshade underneath and the valleys
-                // read as flat plates — the polygon's edges look like they
-                // "stick out" because there's no depth shading inside the
-                // polygon to anchor it to the mesh.  Letting hillshade bleed
-                // through ~50% restores the apparent depth.
-                NSDictionary<NSString *, NSNumber *> *fillOpacityOverrides = @{
-                    @"land-glaciar": @0.55,
-                    @"ofm-landcover-ice": @0.55,
-                    @"land-kalfjall": @0.7,
-                };
-                for (NSMutableDictionary *layer in layers) {
-                    if (![layer isKindOfClass:[NSMutableDictionary class]]) continue;
-                    NSNumber *override = fillOpacityOverrides[layer[@"id"]];
-                    if (!override) continue;
-                    NSMutableDictionary *paint = layer[@"paint"];
-                    if (![paint isKindOfClass:[NSMutableDictionary class]]) {
-                        paint = [NSMutableDictionary dictionary];
-                        layer[@"paint"] = paint;
-                    }
-                    paint[@"fill-opacity"] = override;
-                }
+                // (Earlier version dropped land-glaciar / ofm-landcover-ice /
+                // land-kalfjall to ~0.55 opacity to let hillshade show
+                // through. That made glaciers look muddy because the
+                // beige land-kalfjall layer underneath bled up through
+                // the white snow polygon. Keeping fills opaque now and
+                // relying on the hillshade layer (which is inserted just
+                // before the symbol layers, i.e. above all fills) to
+                // composite shading on top of the white snow instead.)
 
                 // Hide topographic contour lines when terrain is active.
                 // Contours convey elevation on a flat 2D map; on the
