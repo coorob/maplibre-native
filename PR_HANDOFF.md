@@ -87,6 +87,9 @@ bedfb37   Phase 2 line: extend drape routing to LineGradient
 
 # Render tests
 f444e8b   Add render-test scaffolds for terrain (default + exaggeration)
+
+# Phase 5: symbol elevation
+2db2590   Phase 5: per-tile symbol elevation via getElevation()
 ```
 
 ## Commits to SKIP
@@ -98,7 +101,8 @@ e8b07e8   Klättra: rebrand sample app + add Sweden 3D test style
 592e417   Klättra: default view pitch 55°
 # All TERRAIN_PROGRESS doc updates — internal log, not for upstream
 bd3924e, 5f9e821, 4d6e2fd, c433721, 60b6279, d499db4, 7f70908,
-204c11b, 869e869, c859228, fcb5b8d, 7ea37a8, 68a34a7, e1cff3f
+204c11b, 869e869, c859228, fcb5b8d, 7ea37a8, 68a34a7, e1cff3f,
+c2b2bbc, f3cc678
 # This PR handoff doc
 d9ad3f3, a88acca
 ```
@@ -176,10 +180,17 @@ Expect conflicts at:
 >   forced-magenta colour test — see the rolling progress doc for
 >   details. Suspect Metal pipeline-state mismatch or vertex shader
 >   clip-rejection; needs Xcode frame capture.
-> - **Symbol drape not implemented.** Labels render in main pass with
->   depth disabled; they sit on top of terrain rather than following
->   it. `getElevation()` is the building block for the eventual
->   plumbing.
+> - **Symbol elevation: per-tile only.** Labels are lifted to the
+>   centre elevation of their tile via `getElevation()`. Visible
+>   correctness improvement at zoom levels where tiles are small,
+>   but per-symbol elevation (vertex attribute) would be more
+>   accurate.
+> - **Fill / line connected-geometry elevation: deferred.** Per-tile
+>   elevation produced visible seams at tile boundaries (see
+>   `TERRAIN_PROGRESS.md`). Proper fix needs a per-vertex elevation
+>   attribute populated when the bucket is built; not critical
+>   because the depth-tested terrain mesh occludes main-pass fills /
+>   lines and the drape pass handles the visible content.
 > - **Fill/line variants fully covered.** Fill: Fill, FillOutline,
 >   FillPattern, FillOutlinePattern all emit drape drawables.
 >   FillOutlineTriangulated (Metal-only niche) is the one exception.
