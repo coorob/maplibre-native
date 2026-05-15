@@ -37,25 +37,44 @@ float decodeElevation(vec4 demSample) {
     return -10000.0 + ((r * 256.0 * 256.0 + g * 256.0 + b) * 0.1);
 }
 
+// Bilinear sample of decoded elevation. The naïve linear-filter sample
+// produces tens of metres of noise per vertex because the RGB → metres
+// formula is non-linear; we read texel centres exactly and interpolate
+// the decoded metres directly.
+float sampleElevationBilinear(sampler2D tex, vec2 uv) {
+    vec2 texSize = vec2(textureSize(tex, 0));
+    vec2 texelCoord = uv * texSize - 0.5;
+    vec2 floorTexel = floor(texelCoord);
+    vec2 frac = texelCoord - floorTexel;
+    vec2 uv00 = (floorTexel + vec2(0.5, 0.5)) / texSize;
+    vec2 uv10 = (floorTexel + vec2(1.5, 0.5)) / texSize;
+    vec2 uv01 = (floorTexel + vec2(0.5, 1.5)) / texSize;
+    vec2 uv11 = (floorTexel + vec2(1.5, 1.5)) / texSize;
+    float e00 = decodeElevation(texture(tex, uv00));
+    float e10 = decodeElevation(texture(tex, uv10));
+    float e01 = decodeElevation(texture(tex, uv01));
+    float e11 = decodeElevation(texture(tex, uv11));
+    float e0 = mix(e00, e10, frac.x);
+    float e1 = mix(e01, e11, frac.x);
+    return mix(e0, e1, frac.y);
+}
+
 void main() {
     vec2 pos = vec2(a_pos);
     vec2 uv = pos / 8192.0;
 
-    float elevationMeters = decodeElevation(texture(u_dem_texture, uv));
+    // Bilinear-on-decoded centre elevation (avoids RGB-blend noise).
+    float elevationMeters = sampleElevationBilinear(u_dem_texture, uv);
 
-    // Per-vertex smooth normal. Sample at a 4-texel step rather than the
-    // immediate 4-neighbours; the single-texel gradient was too noisy and
-    // produced visible artifacts on slopes, while averaging over 4 texels
-    // gives a smoother, more natural-looking hillshade. RGB→metres is
-    // non-linear in the byte values so we decode each sample separately
-    // instead of relying on a linear filter.
+    // Per-vertex smooth normal at a 4-texel step (averages local variation
+    // for softer hillshade), using the same bilinear-on-decoded helper.
     vec2 texSize = vec2(textureSize(u_dem_texture, 0));
     float stepTexels = 4.0;
     vec2 texelStep = vec2(stepTexels, stepTexels) / texSize;
-    float elevXP = decodeElevation(texture(u_dem_texture, uv + vec2(texelStep.x, 0.0)));
-    float elevXN = decodeElevation(texture(u_dem_texture, uv - vec2(texelStep.x, 0.0)));
-    float elevYP = decodeElevation(texture(u_dem_texture, uv + vec2(0.0, texelStep.y)));
-    float elevYN = decodeElevation(texture(u_dem_texture, uv - vec2(0.0, texelStep.y)));
+    float elevXP = sampleElevationBilinear(u_dem_texture, uv + vec2(texelStep.x, 0.0));
+    float elevXN = sampleElevationBilinear(u_dem_texture, uv - vec2(texelStep.x, 0.0));
+    float elevYP = sampleElevationBilinear(u_dem_texture, uv + vec2(0.0, texelStep.y));
+    float elevYN = sampleElevationBilinear(u_dem_texture, uv - vec2(0.0, texelStep.y));
 
     float elevation = elevationMeters * u_exaggeration;
     float dE_dx = (elevXP - elevXN) * 0.5 * u_exaggeration;

@@ -81,6 +81,35 @@ static inline float decodeElevation(float4 demSample) {
     return -10000.0 + ((r * 256.0 * 256.0 + g * 256.0 + b) * 0.1);
 }
 
+// Bilinearly sample elevation by decoding the four surrounding texels
+// separately and interpolating the metres values. The naïve approach of
+// using a linear-filter sampler over Terrain-RGB texels produces tens of
+// metres of noise per vertex, because the RGB → metres formula is
+// non-linear in the byte values and a 0.5% RGB blend can become a 50 m
+// elevation error. The fix is to read exact texel values (sample at the
+// texel centres) and interpolate the decoded metres directly.
+static inline float sampleElevationBilinear(texture2d<float, access::sample> tex,
+                                            sampler sam,
+                                            float2 uv) {
+    float2 texSize = float2(tex.get_width(), tex.get_height());
+    // Convert UV → texel coords offset by half a texel so that texel
+    // centres land on integer texel coordinates after subtraction.
+    float2 texelCoord = uv * texSize - 0.5;
+    float2 floorTexel = floor(texelCoord);
+    float2 frac = texelCoord - floorTexel;
+    float2 uv00 = (floorTexel + float2(0.5, 0.5)) / texSize;
+    float2 uv10 = (floorTexel + float2(1.5, 0.5)) / texSize;
+    float2 uv01 = (floorTexel + float2(0.5, 1.5)) / texSize;
+    float2 uv11 = (floorTexel + float2(1.5, 1.5)) / texSize;
+    float e00 = decodeElevation(tex.sample(sam, uv00));
+    float e10 = decodeElevation(tex.sample(sam, uv10));
+    float e01 = decodeElevation(tex.sample(sam, uv01));
+    float e11 = decodeElevation(tex.sample(sam, uv11));
+    float e0 = mix(e00, e10, frac.x);
+    float e1 = mix(e01, e11, frac.x);
+    return mix(e0, e1, frac.y);
+}
+
 FragmentStage vertex vertexMain(thread const VertexStage vertx [[stage_in]],
                                 device const uint32_t& uboIndex [[buffer(idGlobalUBOIndex)]],
                                 device const TerrainDrawableUBO* drawableVector [[buffer(idTerrainDrawableUBO)]],
@@ -95,24 +124,22 @@ FragmentStage vertex vertexMain(thread const VertexStage vertx [[stage_in]],
     float2 pos = float2(vertx.pos);
     float2 uv = pos / 8192.0;
 
-    // Decode the centre elevation at this vertex.
-    float elevationMeters = decodeElevation(demTexture.sample(demSampler, uv));
+    // Centre elevation at this vertex, bilinearly interpolated on the
+    // *decoded* values so vertices between DEM texels don't pick up the
+    // non-linear RGB-blend noise.
+    float elevationMeters = sampleElevationBilinear(demTexture, demSampler, uv);
 
-    // Per-vertex smooth normal. Sample the DEM at four neighbour offsets
-    // and decode each independently — Terrain-RGB is non-linear in the
-    // byte values so we cannot rely on a linear sampler to interpolate
-    // elevations for us. We sample at offsets of `stepTexels` away from
-    // the centre (rather than the immediate 4-neighbours) because the
-    // single-texel gradient was too noisy and produced visible artifacts
-    // on slopes; a 4-texel step averages over more local variation and
-    // gives a smoother, more natural-looking hillshade.
+    // Per-vertex smooth normal. Sample at a wider step than the immediate
+    // 4-neighbours so the gradient averages over local variation and the
+    // hillshade comes out softer rather than highlighting every DEM-pixel
+    // step. Same bilinear-on-decoded helper avoids the encoding noise.
     const float2 texSize = float2(demTexture.get_width(), demTexture.get_height());
     const float stepTexels = 4.0;
     const float2 texelStep = float2(stepTexels, stepTexels) / texSize;
-    float elevXP = decodeElevation(demTexture.sample(demSampler, uv + float2(texelStep.x, 0.0)));
-    float elevXN = decodeElevation(demTexture.sample(demSampler, uv - float2(texelStep.x, 0.0)));
-    float elevYP = decodeElevation(demTexture.sample(demSampler, uv + float2(0.0, texelStep.y)));
-    float elevYN = decodeElevation(demTexture.sample(demSampler, uv - float2(0.0, texelStep.y)));
+    float elevXP = sampleElevationBilinear(demTexture, demSampler, uv + float2(texelStep.x, 0.0));
+    float elevXN = sampleElevationBilinear(demTexture, demSampler, uv - float2(texelStep.x, 0.0));
+    float elevYP = sampleElevationBilinear(demTexture, demSampler, uv + float2(0.0, texelStep.y));
+    float elevYN = sampleElevationBilinear(demTexture, demSampler, uv - float2(0.0, texelStep.y));
 
     // Apply exaggeration for visible relief (default: 1.0, higher exaggerates).
     float elevation = elevationMeters * props.exaggeration;
