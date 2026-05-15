@@ -322,8 +322,8 @@ CLLocationCoordinate2D randomWorldCoordinate(void) {
         // east-facing slopes catch the directional hillshade and the
         // glaciated bowls (Storglaciären, Rabots) read clearly.
         MLNMapCamera *camera = [MLNMapCamera cameraLookingAtCenterCoordinate:CLLocationCoordinate2DMake(67.9026, 18.4954)
-                                                              acrossDistance:12000
-                                                                       pitch:68
+                                                              acrossDistance:5000
+                                                                       pitch:72
                                                                      heading:215];
         [self.mapView setCamera:camera withDuration:0 animationTimingFunction:nil completionHandler:nil];
     } else {
@@ -2468,6 +2468,30 @@ CLLocationCoordinate2D randomWorldCoordinate(void) {
                 NSMutableDictionary *terrain = style[@"terrain"];
                 if ([terrain isKindOfClass:[NSMutableDictionary class]]) {
                     terrain[@"exaggeration"] = @2.5;
+                }
+
+                // Drop the opacity of full-coverage alpine fills (glacier,
+                // ice, bare alpine ground). At opacity 1.0 these polygons
+                // completely mask the hillshade underneath and the valleys
+                // read as flat plates — the polygon's edges look like they
+                // "stick out" because there's no depth shading inside the
+                // polygon to anchor it to the mesh.  Letting hillshade bleed
+                // through ~50% restores the apparent depth.
+                NSDictionary<NSString *, NSNumber *> *fillOpacityOverrides = @{
+                    @"land-glaciar": @0.55,
+                    @"ofm-landcover-ice": @0.55,
+                    @"land-kalfjall": @0.7,
+                };
+                for (NSMutableDictionary *layer in layers) {
+                    if (![layer isKindOfClass:[NSMutableDictionary class]]) continue;
+                    NSNumber *override = fillOpacityOverrides[layer[@"id"]];
+                    if (!override) continue;
+                    NSMutableDictionary *paint = layer[@"paint"];
+                    if (![paint isKindOfClass:[NSMutableDictionary class]]) {
+                        paint = [NSMutableDictionary dictionary];
+                        layer[@"paint"] = paint;
+                    }
+                    paint[@"fill-opacity"] = override;
                 }
                 NSData *patched = [NSJSONSerialization dataWithJSONObject:style options:0 error:nil];
                 NSString *jsonString = [[NSString alloc] initWithData:patched encoding:NSUTF8StringEncoding];
