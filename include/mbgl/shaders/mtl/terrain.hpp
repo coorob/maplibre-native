@@ -70,7 +70,6 @@ struct FragmentStage {
     float4 position [[position, invariant]];
     float2 uv;
     float elevation;
-    float3 normal;
 };
 
 // Decode one Mapbox Terrain-RGB texel to elevation (metres).
@@ -128,33 +127,7 @@ FragmentStage vertex vertexMain(thread const VertexStage vertx [[stage_in]],
     // *decoded* values so vertices between DEM texels don't pick up the
     // non-linear RGB-blend noise.
     float elevationMeters = sampleElevationBilinear(demTexture, demSampler, uv);
-
-    // Per-vertex smooth normal. The gradient is sampled over a 16-texel
-    // step so each vertex averages elevation variation over a wide
-    // enough neighborhood that adjacent vertices' normals stay
-    // correlated even when the DEM has pixel-level noise. Narrower
-    // steps (4 and 8 texels) left visible per-pixel/per-vertex bumps in
-    // flat areas at closer zoom — adjacent vertices end up with
-    // measurably different gradients when their sample windows only
-    // overlap by a few texels.
-    const float2 texSize = float2(demTexture.get_width(), demTexture.get_height());
-    const float stepTexels = 16.0;
-    const float2 texelStep = float2(stepTexels, stepTexels) / texSize;
-    float elevXP = sampleElevationBilinear(demTexture, demSampler, uv + float2(texelStep.x, 0.0));
-    float elevXN = sampleElevationBilinear(demTexture, demSampler, uv - float2(texelStep.x, 0.0));
-    float elevYP = sampleElevationBilinear(demTexture, demSampler, uv + float2(0.0, texelStep.y));
-    float elevYN = sampleElevationBilinear(demTexture, demSampler, uv - float2(0.0, texelStep.y));
-
-    // Apply exaggeration for visible relief (default: 1.0, higher exaggerates).
     float elevation = elevationMeters * props.exaggeration;
-    float dE_dx = (elevXP - elevXN) * 0.5 * props.exaggeration;
-    float dE_dy = (elevYP - elevYN) * 0.5 * props.exaggeration;
-
-    // Normal. Z scales with the horizontal step the gradient is
-    // measured over. 16-texel step on a 256-px tile is ~1/8 of a tile,
-    // ~1.2 km at zoom 12; Z=400 keeps the slope-shading mapping roughly
-    // in the same range as the previous narrower-step values.
-    float3 normal = normalize(float3(-dE_dx, -dE_dy, 400.0));
 
     // Create 3D position with elevation as Z coordinate
     float4 position = drawable.matrix * float4(pos.x, pos.y, elevation, 1.0);
@@ -163,7 +136,6 @@ FragmentStage vertex vertexMain(thread const VertexStage vertx [[stage_in]],
         .position  = position,
         .uv        = uv,
         .elevation = elevation,
-        .normal    = normal,
     };
 }
 
@@ -175,36 +147,27 @@ half4 fragment fragmentMain(FragmentStage in [[stage_in]],
     return half4(1.0);
 #endif
 
-    // Sample the map texture (render-to-texture output) for the surface color
-    // Note: Y-coordinate is flipped (1.0 - y) to match OpenGL convention
+    // Sample the map texture (render-to-texture output) for the surface
+    // colour and return it directly. Matches MapLibre GL JS, whose
+    // terrain fragment shader is a straight texture lookup with no
+    // lighting. Earlier iterations of this shader synthesised diffuse
+    // lighting from the DEM gradient on top of the drape, but the
+    // gradient is a high-frequency function of the DEM and the
+    // perspective projection of that noise shifted with camera motion
+    // — the swimming-shadow effect the user flagged as worse than
+    // having no shading at all. Styles that want a hillshade can bake
+    // it into the drape via a hillshade layer.
+    // Note: Y-coordinate is flipped (1.0 - y) to match OpenGL convention.
     float4 mapColor = mapTexture.sample(mapSampler, float2(in.uv.x, 1.0 - in.uv.y));
-
-    // Soft diffuse from the per-vertex normal. The diffuse term is
-    // intentionally clamped to a narrow [0.85, 1.0] range so that any
-    // residual per-vertex noise in the DEM-derived normal produces at
-    // most a 15% brightness variation. A wider range (e.g. the
-    // [0.5, 1.0] you'd get from a "physical" diffuse * intensity=0.5)
-    // amplifies pixel-level DEM noise into visibly shifting shadows
-    // when the camera moves, especially on flatter terrain where the
-    // gradient is dominated by source noise rather than real slope.
-    float3 normal = normalize(in.normal);
-    float3 lightDir = normalize(props.light_position_intensity.xyz);
-    float diffuse = mix(0.85, 1.0, max(dot(normal, lightDir), 0.0));
-
     if (mapColor.a > 0.01) {
-        float3 lit = mapColor.rgb * diffuse * props.light_color_pad.rgb;
-        return half4(half3(lit), half(mapColor.a));
+        return half4(half3(mapColor.rgb), half(mapColor.a));
     }
 
-    // Fallback colour gradient for the no-drape case. Uses the original
-    // physical-style diffuse so the gradient is more legible there;
-    // the soft diffuse above is only applied to draped content where
-    // the noise is most visible.
-    float lightIntensity = props.light_position_intensity.w;
-    float ambient = 1.0 - lightIntensity;
-    diffuse = ambient + lightIntensity * max(dot(normal, lightDir), 0.0);
-
-    // Fallback: elevation-based color gradient for debugging
+    // Fallback: elevation-based colour for the no-drape case (no style
+    // layer covering the area). Kept for visual orientation; uses a
+    // constant 0.85 dim factor rather than computing a normal from the
+    // DEM so the fallback can't reintroduce the noise the drape path
+    // was designed to avoid.
     float elevation = in.elevation;
     float normalizedElevation = clamp((elevation - 500.0) / 3500.0, 0.0, 1.0);
 
@@ -223,7 +186,7 @@ half4 fragment fragmentMain(FragmentStage in [[stage_in]],
     float gridLine = step(0.98, fract(in.uv.x * 4.0)) + step(0.98, fract(in.uv.y * 4.0));
     color = mix(color, float3(1.0, 1.0, 1.0), gridLine * 0.5);
 
-    return half4(half3(color * diffuse * props.light_color_pad.rgb), 1.0);
+    return half4(half3(color * 0.85), 1.0);
 }
 )";
 };

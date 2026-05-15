@@ -28,7 +28,6 @@ uniform sampler2D u_dem_texture;
 
 out vec2 v_uv;
 out float v_elevation;
-out vec3 v_normal;
 
 float decodeElevation(vec4 demSample) {
     float r = demSample.r * 255.0;
@@ -65,34 +64,15 @@ void main() {
 
     // Bilinear-on-decoded centre elevation (avoids RGB-blend noise).
     float elevationMeters = sampleElevationBilinear(u_dem_texture, uv);
-
-    // Per-vertex smooth normal at a 16-texel step — wide enough that
-    // adjacent vertices' normals stay correlated under pixel-level DEM
-    // noise visible at close zoom. Narrower steps (4/8) left bumps.
-    vec2 texSize = vec2(textureSize(u_dem_texture, 0));
-    float stepTexels = 16.0;
-    vec2 texelStep = vec2(stepTexels, stepTexels) / texSize;
-    float elevXP = sampleElevationBilinear(u_dem_texture, uv + vec2(texelStep.x, 0.0));
-    float elevXN = sampleElevationBilinear(u_dem_texture, uv - vec2(texelStep.x, 0.0));
-    float elevYP = sampleElevationBilinear(u_dem_texture, uv + vec2(0.0, texelStep.y));
-    float elevYN = sampleElevationBilinear(u_dem_texture, uv - vec2(0.0, texelStep.y));
-
     float elevation = elevationMeters * u_exaggeration;
-    float dE_dx = (elevXP - elevXN) * 0.5 * u_exaggeration;
-    float dE_dy = (elevYP - elevYN) * 0.5 * u_exaggeration;
-    // Z scales with the 16-texel horizontal step — see Metal shader
-    // comment; 400 keeps slope shading in the same range.
-    vec3 normal = normalize(vec3(-dE_dx, -dE_dy, 400.0));
 
     gl_Position = u_matrix * vec4(pos.x, pos.y, elevation, 1.0);
     v_uv = uv;
     v_elevation = elevation;
-    v_normal = normal;
 }
 )";
     static constexpr const char* fragment = R"(in vec2 v_uv;
 in float v_elevation;
-in vec3 v_normal;
 
 uniform sampler2D u_map_texture;
 
@@ -111,32 +91,26 @@ void main() {
     return;
 #endif
 
-    // Sample the drape RenderTarget that holds the basemap content. Y is
-    // flipped to match the texture's Y-up convention against the mesh's
-    // y-down tile coords.
+    // Sample the drape RenderTarget that holds the basemap content and
+    // return it directly. Matches MapLibre GL JS, whose terrain
+    // fragment shader is a straight texture lookup with no lighting.
+    // Earlier iterations synthesised diffuse lighting from the DEM
+    // gradient, but the gradient is high-frequency in the DEM and the
+    // projection of that noise shifted with camera motion, producing a
+    // swimming-shadow effect that looked worse than no shading at all.
+    // Styles that want hillshade can bake it into the drape via a
+    // hillshade layer.
+    // Note: Y-coordinate is flipped (1.0 - y) to match OpenGL convention.
     vec4 mapColor = texture(u_map_texture, vec2(v_uv.x, 1.0 - v_uv.y));
-
-    // Soft diffuse clamped to a narrow range so DEM-noise normal
-    // variance doesn't translate into visibly shifting shadows on
-    // camera motion. See Metal shader comment for the rationale.
-    vec3 normal = normalize(v_normal);
-    vec3 lightDir = normalize(u_light_position_intensity.xyz);
-    float diffuse = mix(0.85, 1.0, max(dot(normal, lightDir), 0.0));
-
     if (mapColor.a > 0.01) {
-        vec3 lit = mapColor.rgb * diffuse * u_light_color_pad.rgb;
-        fragColor = vec4(lit, mapColor.a);
+        fragColor = vec4(mapColor.rgb, mapColor.a);
         return;
     }
 
-    // Fallback for no-drape case keeps the original physical-style
-    // diffuse since the elevation-colour gradient benefits from more
-    // contrast there.
-    float lightIntensity = u_light_position_intensity.w;
-    float ambient = 1.0 - lightIntensity;
-    diffuse = ambient + lightIntensity * max(dot(normal, lightDir), 0.0);
-
-    // Fallback: elevation-based colour gradient when the drape is empty.
+    // Fallback: elevation-based colour for the no-drape case (no style
+    // layer covering the area). Kept for visual orientation; flat-shaded
+    // at 0.85 brightness so the fallback can't reintroduce the shading
+    // noise the drape path is designed to avoid.
     float normalizedElevation = clamp((v_elevation - 500.0) / 3500.0, 0.0, 1.0);
     vec3 color;
     if (normalizedElevation < 0.33) {
@@ -153,7 +127,7 @@ void main() {
     float gridLine = step(0.98, fract(v_uv.x * 4.0)) + step(0.98, fract(v_uv.y * 4.0));
     color = mix(color, vec3(1.0, 1.0, 1.0), gridLine * 0.5);
 
-    fragColor = vec4(color * diffuse * u_light_color_pad.rgb, 1.0);
+    fragColor = vec4(color * 0.85, 1.0);
 }
 )";
 };
