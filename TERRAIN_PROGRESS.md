@@ -1138,3 +1138,33 @@ during PR review — it doesn't affect the Klättra app because that
 style's vector layers have plenty of opaque content, but a simple
 style with terrain + opaque background isn't behaving the way one
 would expect.
+
+### Exaggeration test design — working baselines (2026-05-15, 10:50)
+
+After understanding from the previous round that the terrain mesh
+fallback needs a non-zero `light` to paint visibly, and that the
+hillshade layer drapes onto the mesh, designed a style pair that
+actually exercises exaggeration:
+
+- **terrain/default** and **terrain/exaggeration** share:
+  - `light` block with white colour, intensity 0.5, position
+    `[1.15, 210, 30]` — so the terrain fallback shader multiplies to
+    a recognisable grey instead of black.
+  - `hillshade` layer that drapes onto the terrain mesh.
+  - No opaque `background` layer (which was overwriting the terrain
+    in the previous attempt — see prior log entry).
+  - Identical centre, zoom 11, pitch 60.
+- The only difference: `terrain.exaggeration = 1.0` vs `20.0`.
+
+Resulting baselines visibly differ. The exaggeration=20 mesh extrudes
+mountain peaks high enough that they occlude more of the upper
+viewport, producing a clearly taller relief silhouette than the
+exaggeration=1 baseline.
+
+Re-ran the full suite after `--update default`: 1246 passed, 25
+passed-but-ignored, 83 ignored, 0 failed, 0 errored. No regressions.
+
+`PR_HANDOFF.md` updated to remove the "baselines byte-identical"
+caveat — the test now meaningfully catches both "terrain rendering
+crashes / wrong colour / wrong projection" *and* "exaggeration value
+silently changed".

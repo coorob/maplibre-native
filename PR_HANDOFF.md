@@ -223,15 +223,17 @@ Expect conflicts at:
 >   FillPattern, FillOutlinePattern all emit drape drawables.
 >   FillOutlineTriangulated (Metal-only niche) is the one exception.
 >   Line: Simple, SDF, Gradient, Pattern all drape.
-> - **Render tests with baselines.** `metrics/integration/render-tests/terrain/`
->   contains `default/` and `exaggeration/` styles plus captured
->   `expected.png` baselines (256×256, pitch 60°, hillshade overlay).
->   Captured via `mbgl-render-test-runner --update default` against
->   `macos-xcode11-release-style.json`. The default and exaggeration
->   baselines are currently byte-identical because hillshade renders
->   as a 2D overlay — exaggeration changes the terrain mesh elevation
->   but not the hillshade layer's pixels. A future test with a draped
->   layer (fill/line) would show the difference.
+> - **Render tests with baselines that differ on exaggeration.**
+>   `metrics/integration/render-tests/terrain/{default,exaggeration}`
+>   ship captured `expected.png` baselines (256×256, pitch 60°). The
+>   default style uses `exaggeration: 1.0`; the exaggeration variant
+>   uses `exaggeration: 20.0`. Both styles include a `light` block
+>   so the terrain mesh fallback fragment shader paints visibly, and
+>   the `hillshade` layer drapes onto the terrain mesh. The two
+>   baselines visibly differ: exaggeration=20 produces dramatically
+>   taller relief that occludes more of the upper viewport than the
+>   exaggeration=1 baseline. Captured via `mbgl-render-test-runner
+>   --update default` against `macos-xcode11-release-style.json`.
 > - **Full render-test suite passes.** Ran the entire macOS Metal
 >   manifest after the branch's drape-routing and `activeTerrain`
 >   plumbing landed — 1246 passed, 0 failed, 0 errored (plus 25

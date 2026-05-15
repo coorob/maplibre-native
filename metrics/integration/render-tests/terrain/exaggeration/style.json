@@ -5,12 +5,18 @@
       "height": 256,
       "width": 256,
       "pitch": 60,
-      "description": "Same DEM + pitch as the default test, but with exaggeration=3.0. Hillshade visualises the same DEM so the deeper elevation gradient is visible in the baseline."
+      "description": "Same scene as terrain/default but exaggeration=20.0 — large enough that the terrain mesh's elevation pushes its depth visibly forward of the 2D layers and the rendered relief differs from the default baseline by more than sub-pixel noise."
     }
   },
   "center": [-113.26903, 35.9654],
   "zoom": 11,
   "pitch": 60,
+  "light": {
+    "anchor": "viewport",
+    "color": "white",
+    "intensity": 0.5,
+    "position": [1.15, 210.0, 30.0]
+  },
   "sources": {
     "terrain-dem": {
       "type": "raster-dem",
@@ -23,16 +29,9 @@
   },
   "terrain": {
     "source": "terrain-dem",
-    "exaggeration": 3.0
+    "exaggeration": 20.0
   },
   "layers": [
-    {
-      "id": "background",
-      "type": "background",
-      "paint": {
-        "background-color": "#F4EAD0"
-      }
-    },
     {
       "id": "hillshade",
       "type": "hillshade",
