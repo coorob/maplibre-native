@@ -2493,6 +2493,27 @@ CLLocationCoordinate2D randomWorldCoordinate(void) {
                     }
                     paint[@"fill-opacity"] = override;
                 }
+
+                // Hide topographic contour lines when terrain is active.
+                // Contours convey elevation on a flat 2D map; on the
+                // extruded mesh the hillshade + 3D extrusion already do
+                // that job. Draped contours show as wavy rib patterns
+                // that read as artifacts (especially across snow polygons),
+                // not useful elevation cues.
+                NSSet<NSString *> *contourLayerIDs = [NSSet setWithArray:@[
+                    @"hojdkurva-10m",
+                    @"hojdkurva-index",
+                ]];
+                for (NSMutableDictionary *layer in layers) {
+                    if (![layer isKindOfClass:[NSMutableDictionary class]]) continue;
+                    if (![contourLayerIDs containsObject:layer[@"id"]]) continue;
+                    NSMutableDictionary *layout = layer[@"layout"];
+                    if (![layout isKindOfClass:[NSMutableDictionary class]]) {
+                        layout = [NSMutableDictionary dictionary];
+                        layer[@"layout"] = layout;
+                    }
+                    layout[@"visibility"] = @"none";
+                }
                 NSData *patched = [NSJSONSerialization dataWithJSONObject:style options:0 error:nil];
                 NSString *jsonString = [[NSString alloc] initWithData:patched encoding:NSUTF8StringEncoding];
                 NSLog(@"[Klättra] patched terrain=%@ hillshade-injected=%d layers=%lu",
