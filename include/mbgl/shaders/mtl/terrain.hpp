@@ -98,14 +98,17 @@ FragmentStage vertex vertexMain(thread const VertexStage vertx [[stage_in]],
     // Decode the centre elevation at this vertex.
     float elevationMeters = decodeElevation(demTexture.sample(demSampler, uv));
 
-    // Per-vertex smooth normal: sample the four 4-neighbours in DEM-texel
-    // units and decode each independently. We cannot bilinearly average
-    // Terrain-RGB texels with a linear sampler because the RGB→metres
-    // encoding is non-linear in the byte values, so sample at texel
-    // centres and decode separately. Width of the DEM texture is queried
-    // at runtime so this works for 256-px or 512-px tile sources alike.
+    // Per-vertex smooth normal. Sample the DEM at four neighbour offsets
+    // and decode each independently — Terrain-RGB is non-linear in the
+    // byte values so we cannot rely on a linear sampler to interpolate
+    // elevations for us. We sample at offsets of `stepTexels` away from
+    // the centre (rather than the immediate 4-neighbours) because the
+    // single-texel gradient was too noisy and produced visible artifacts
+    // on slopes; a 4-texel step averages over more local variation and
+    // gives a smoother, more natural-looking hillshade.
     const float2 texSize = float2(demTexture.get_width(), demTexture.get_height());
-    const float2 texelStep = float2(1.0, 1.0) / texSize;
+    const float stepTexels = 4.0;
+    const float2 texelStep = float2(stepTexels, stepTexels) / texSize;
     float elevXP = decodeElevation(demTexture.sample(demSampler, uv + float2(texelStep.x, 0.0)));
     float elevXN = decodeElevation(demTexture.sample(demSampler, uv - float2(texelStep.x, 0.0)));
     float elevYP = decodeElevation(demTexture.sample(demSampler, uv + float2(0.0, texelStep.y)));
@@ -116,12 +119,12 @@ FragmentStage vertex vertexMain(thread const VertexStage vertx [[stage_in]],
     float dE_dx = (elevXP - elevXN) * 0.5 * props.exaggeration;
     float dE_dy = (elevYP - elevYN) * 0.5 * props.exaggeration;
 
-    // Normal: gradient is in metres per (UV in [0..1] across the tile),
-    // not per-metre, but the lighting only needs the direction so we
-    // normalise. The Z component is the constant "tile-extent" reference
-    // chosen empirically so the normal isn't dominated by the gradient
-    // on steep terrain.
-    float3 normal = normalize(float3(-dE_dx, -dE_dy, 50.0));
+    // Normal. The Z constant trades off shading dramatic-ness vs.
+    // flatness: too small → harsh shadows on every slope, too large →
+    // looks flat-shaded. 100 looks roughly right at zoom 10-12 (the
+    // default Klättra view), where 4 texels of the 256-px DEM tile is
+    // ~150 m of ground distance and typical mountain slopes are 20-45°.
+    float3 normal = normalize(float3(-dE_dx, -dE_dy, 100.0));
 
     // Create 3D position with elevation as Z coordinate
     float4 position = drawable.matrix * float4(pos.x, pos.y, elevation, 1.0);

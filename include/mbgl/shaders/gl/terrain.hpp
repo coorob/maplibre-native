@@ -43,12 +43,15 @@ void main() {
 
     float elevationMeters = decodeElevation(texture(u_dem_texture, uv));
 
-    // Per-vertex smooth normal: sample 4-neighbours in DEM-texel units and
-    // decode each independently (the RGB→metres encoding is non-linear
-    // in the byte values, so a linear filter can't be relied on for
-    // gradient computation).
+    // Per-vertex smooth normal. Sample at a 4-texel step rather than the
+    // immediate 4-neighbours; the single-texel gradient was too noisy and
+    // produced visible artifacts on slopes, while averaging over 4 texels
+    // gives a smoother, more natural-looking hillshade. RGB→metres is
+    // non-linear in the byte values so we decode each sample separately
+    // instead of relying on a linear filter.
     vec2 texSize = vec2(textureSize(u_dem_texture, 0));
-    vec2 texelStep = vec2(1.0, 1.0) / texSize;
+    float stepTexels = 4.0;
+    vec2 texelStep = vec2(stepTexels, stepTexels) / texSize;
     float elevXP = decodeElevation(texture(u_dem_texture, uv + vec2(texelStep.x, 0.0)));
     float elevXN = decodeElevation(texture(u_dem_texture, uv - vec2(texelStep.x, 0.0)));
     float elevYP = decodeElevation(texture(u_dem_texture, uv + vec2(0.0, texelStep.y)));
@@ -57,7 +60,9 @@ void main() {
     float elevation = elevationMeters * u_exaggeration;
     float dE_dx = (elevXP - elevXN) * 0.5 * u_exaggeration;
     float dE_dy = (elevYP - elevYN) * 0.5 * u_exaggeration;
-    vec3 normal = normalize(vec3(-dE_dx, -dE_dy, 50.0));
+    // Z trades off shading dramatic-ness vs. flatness — see Metal shader
+    // comment for the rationale; 100 looks roughly right at zoom 10-12.
+    vec3 normal = normalize(vec3(-dE_dx, -dE_dy, 100.0));
 
     gl_Position = u_matrix * vec4(pos.x, pos.y, elevation, 1.0);
     v_uv = uv;

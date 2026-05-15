@@ -8,6 +8,7 @@
 #include <mbgl/renderer/render_terrain.hpp>
 #include <mbgl/shaders/terrain_layer_ubo.hpp>
 #include <mbgl/shaders/shader_defines.hpp>
+#include <mbgl/style/light_impl.hpp>
 #include <mbgl/util/convert.hpp>
 #include <mbgl/util/mat4.hpp>
 #include <mbgl/util/projection.hpp>
@@ -32,12 +33,20 @@ void TerrainLayerTweaker::execute(LayerGroupBase& layerGroup, const PaintParamet
     const float exaggeration = terrain->getExaggeration();
     const float elevationOffset = 0.0f;
 
-    // Reuse fill-extrusion's interpretation of the global style light, so the
-    // terrain hillshade is consistent with 3D building shading in the same
-    // style.
+    // Reuse fill-extrusion's interpretation of the global style light's
+    // colour and intensity, but always compute the light position as if
+    // it were map-anchored. Fill-extrusion's helper rotates the light
+    // by `-state.getBearing()` when the style says `anchor: viewport`,
+    // which makes sense for buildings (they're small and the user
+    // intuitively expects facade highlights to stay constant as the
+    // map rotates). On a continuous terrain mesh, viewport anchoring
+    // makes the entire landscape's shading flicker every time the
+    // camera rotates — the sun shouldn't move with the camera. So we
+    // bypass that rotation: terrain always sees a sun-fixed-in-world
+    // light regardless of the style's anchor setting.
     const auto& evaluatedLight = parameters.evaluatedLight;
     const auto lightColor = FillExtrusionBucket::lightColor(evaluatedLight);
-    const auto lightPos = FillExtrusionBucket::lightPosition(evaluatedLight, state);
+    const auto lightPos = evaluatedLight.get<style::LightPosition>().getCartesian();
     const auto lightIntensity = FillExtrusionBucket::lightIntensity(evaluatedLight);
 
     auto& layerUniforms = layerGroup.mutableUniformBuffers();
