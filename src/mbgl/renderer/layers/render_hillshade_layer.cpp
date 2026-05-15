@@ -16,6 +16,7 @@
 #include <mbgl/renderer/layers/hillshade_prepare_layer_tweaker.hpp>
 #include <mbgl/renderer/layer_group.hpp>
 #include <mbgl/renderer/render_target.hpp>
+#include <mbgl/renderer/render_terrain.hpp>
 #include <mbgl/renderer/update_parameters.hpp>
 #include <mbgl/shaders/shader_program_base.hpp>
 #include <mbgl/gfx/drawable_builder.hpp>
@@ -23,6 +24,8 @@
 #include <mbgl/gfx/hillshade_prepare_drawable_data.hpp>
 #include <mbgl/gfx/shader_group.hpp>
 #include <mbgl/gfx/shader_registry.hpp>
+
+#include <unordered_set>
 
 namespace mbgl {
 
@@ -88,6 +91,11 @@ void RenderHillshadeLayer::evaluate(const PropertyEvaluationParameters& paramete
     }
     if (prepareLayerTweaker) {
         prepareLayerTweaker->updateProperties(evaluatedProperties);
+    }
+    // Mirror to per-drape-target tweakers — same pattern as
+    // RenderRasterLayer / RenderFillLayer / RenderLineLayer.
+    for (auto& [_, tw] : drapeLayerTweakers) {
+        if (tw) tw->updateProperties(evaluatedProperties);
     }
 }
 
@@ -191,6 +199,33 @@ void RenderHillshadeLayer::update(gfx::ShaderRegistry& shaders,
     stats.drawablesRemoved += tileLayerGroup->removeDrawablesIf(
         [&](gfx::Drawable& drawable) { return drawable.getTileID() && !hasRenderTile(*drawable.getTileID()); });
 
+    // Mirror the cover-set cleanup for drape groups and prune stale drape
+    // tweakers — same pattern as RenderRasterLayer / RenderFillLayer /
+    // RenderLineLayer.
+    if (activeTerrain) {
+        std::unordered_set<OverscaledTileID> liveDrapeIDs;
+        activeTerrain->visitDrapeTargets(
+            [&](const OverscaledTileID& drapeID, TerrainDrapeTargetPtr& drapeTarget) {
+                if (!drapeTarget) return;
+                liveDrapeIDs.insert(drapeID);
+                if (auto* drapeGroup = static_cast<TileLayerGroup*>(
+                        drapeTarget->getLayerGroup(layerIndex).get())) {
+                    stats.drawablesRemoved += drapeGroup->removeDrawablesIf(
+                        [&](gfx::Drawable& drawable) {
+                            const auto& dID = drawable.getTileID();
+                            return dID && !hasRenderTile(*dID);
+                        });
+                }
+            });
+        for (auto it = drapeLayerTweakers.begin(); it != drapeLayerTweakers.end();) {
+            if (liveDrapeIDs.find(it->first) == liveDrapeIDs.end()) {
+                it = drapeLayerTweakers.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+
     if (!staticDataSharedVertices) {
         staticDataSharedVertices = std::make_shared<HillshadeVertexVector>(RenderStaticData::rasterVertices());
     }
@@ -252,6 +287,18 @@ void RenderHillshadeLayer::update(gfx::ShaderRegistry& shaders,
             bucket.renderTarget = renderTarget;
             bucket.renderTargetPrepared = true;
             addRenderTarget(renderTarget, changes);
+
+            // Force the offscreen colour texture to allocate its underlying GPU
+            // texture immediately. Without this the drape pass (which renders
+            // before the prepare pass on the very first frame the bucket is
+            // alive) would try to bind a `textureDirty == true` Texture2D and
+            // hit `assert(!textureDirty)` in mtl::Texture2D::bind. The texture
+            // contents are undefined until the prepare pass runs once, but
+            // sampling an empty colour buffer is recoverable; sampling an
+            // unallocated one is a crash.
+            if (const auto& tex = renderTarget->getTexture()) {
+                tex->create();
+            }
 
             auto singleTileLayerGroup = context.createTileLayerGroup(0, /*initialCapacity=*/1, getID());
             if (!singleTileLayerGroup) {
@@ -335,6 +382,60 @@ void RenderHillshadeLayer::update(gfx::ShaderRegistry& shaders,
             }
             return hillshadeVertexAttrs;
         };
+
+        // Phase 2 drape routing: emit a copy of this hillshade tile's prepared
+        // colour quad into each overlapping DEM drape RenderTarget so the
+        // terrain mesh can sample hillshade as it displaces. Runs every frame
+        // (guarded by getDrawableCount) so a newly-allocated drape target
+        // picks up its drawable even when the source tile drawable below is
+        // updated in place. Done before the updateTile call because the
+        // updateExisting lambda may std::move(indices).
+        if (activeTerrain && bucket.renderTarget) {
+            activeTerrain->visitDrapeTargets(
+                [&](const OverscaledTileID& drapeID, TerrainDrapeTargetPtr& drapeTarget) {
+                    if (!drapeTarget || !LayerTweaker::tilesOverlap(tileID, drapeID)) return;
+
+                    auto& tw = drapeLayerTweakers[drapeID];
+                    if (!tw) {
+                        tw = std::make_shared<HillshadeLayerTweaker>(
+                            getID() + "-drape", evaluatedProperties, drapeID);
+                    }
+
+                    auto* drapeGroup = static_cast<TileLayerGroup*>(
+                        drapeTarget->getLayerGroup(layerIndex).get());
+                    if (!drapeGroup) {
+                        auto newGroup = context.createTileLayerGroup(
+                            layerIndex, /*initialCapacity=*/4, getID() + "-drape");
+                        if (!newGroup) return;
+                        newGroup->addLayerTweaker(tw);
+                        drapeTarget->addLayerGroup(newGroup, /*replace=*/false);
+                        drapeGroup = newGroup.get();
+                    }
+
+                    if (drapeGroup->getDrawableCount(renderPass, tileID) > 0) return;
+
+                    auto drapeBuilder = context.createDrawableBuilder("hillshade-drape");
+                    if (!drapeBuilder) return;
+                    drapeBuilder->setShader(hillshadeShader);
+                    drapeBuilder->setDepthType(gfx::DepthMaskType::ReadOnly);
+                    drapeBuilder->setColorMode(gfx::ColorMode::alphaBlended());
+                    drapeBuilder->setCullFaceMode(gfx::CullFaceMode::disabled());
+                    drapeBuilder->setRenderPass(renderPass);
+                    drapeBuilder->setVertexAttributes(buildVertexAttributes());
+                    drapeBuilder->setRawVertices({}, vertices->elements(), gfx::AttributeDataType::Short2);
+                    drapeBuilder->setSegments(
+                        gfx::Triangles(), indices->vector(), segments->data(), segments->size());
+                    drapeBuilder->setTexture(bucket.renderTarget->getTexture(), idHillshadeImageTexture);
+                    drapeBuilder->flush(context);
+
+                    for (auto& drapeDrawable : drapeBuilder->clearDrawables()) {
+                        drapeDrawable->setTileID(tileID);
+                        drapeDrawable->setLayerTweaker(tw);
+                        drapeGroup->addDrawable(renderPass, tileID, std::move(drapeDrawable));
+                        ++stats.drawablesAdded;
+                    }
+                });
+        }
 
         const auto updateExisting = [&](gfx::Drawable& drawable) {
             // Only current drawables are updated, ones produced for

@@ -6,6 +6,8 @@
 #include <mbgl/style/layers/hillshade_layer_properties.hpp>
 #include <mbgl/tile/tile_id.hpp>
 
+#include <unordered_map>
+
 namespace mbgl {
 
 class HillshadeLayerTweaker;
@@ -60,6 +62,11 @@ private:
     std::shared_ptr<HillshadeVertexVector> staticDataSharedVertices;
 
     LayerTweakerPtr prepareLayerTweaker;
+
+    // Phase 2 drape routing: per-drape-target HillshadeLayerTweakers. One
+    // entry per overlapping DEM drape RenderTarget, each rebinding the
+    // hillshade quad's matrix into that target's space.
+    std::unordered_map<OverscaledTileID, HillshadeLayerTweakerPtr> drapeLayerTweakers;
 };
 
 } // namespace mbgl
