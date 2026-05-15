@@ -2479,6 +2479,27 @@ CLLocationCoordinate2D randomWorldCoordinate(void) {
                 // before the symbol layers, i.e. above all fills) to
                 // composite shading on top of the white snow instead.)
 
+                // Hide the OpenFreeMap landcover/water fills when terrain is
+                // active. OFM's global landcover polygons are coarser than
+                // the Sweden topo source's equivalents (land-glaciar,
+                // ofm-water etc) — when both render into the drape texture,
+                // OFM's coarse polygons appear as low-resolution flat
+                // overlays that read as "the mesh is sunken in a low-res
+                // ocean with high-res islands sticking up". Keep the OFM
+                // place-name symbols (city/town labels) since those still
+                // add context the topo source doesn't have.
+                for (NSMutableDictionary *layer in layers) {
+                    if (![layer isKindOfClass:[NSMutableDictionary class]]) continue;
+                    if (![layer[@"source"] isEqualToString:@"openfreemap"]) continue;
+                    if ([layer[@"type"] isEqualToString:@"symbol"]) continue;
+                    NSMutableDictionary *layout = layer[@"layout"];
+                    if (![layout isKindOfClass:[NSMutableDictionary class]]) {
+                        layout = [NSMutableDictionary dictionary];
+                        layer[@"layout"] = layout;
+                    }
+                    layout[@"visibility"] = @"none";
+                }
+
                 // Hide topographic contour lines when terrain is active.
                 // Contours convey elevation on a flat 2D map; on the
                 // extruded mesh the hillshade + 3D extrusion already do
