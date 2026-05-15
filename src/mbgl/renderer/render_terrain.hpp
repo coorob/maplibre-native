@@ -234,9 +234,16 @@ private:
     // Cached DEM source
     RenderSource* demSource = nullptr;
 
-    // Layer index (terrain renders early in 3D pass, use negative index)
-    // TEMP: Using positive index to render ON TOP for debugging visibility
-    static constexpr int32_t TERRAIN_LAYER_INDEX = 10000;
+    // Layer index for the terrain mesh's layer group. Has to be lower than
+    // any user style layer (which start at 0 ascending) so that the terrain
+    // mesh draws LAST in the opaque pass — visitLayerGroupsReversed iterates
+    // highest-to-lowest, so the lowest index draws last and its opaque pixels
+    // overwrite any 2D layer (background, hillshade, etc.) underneath.
+    // Without this, the 2D-layer projection-matrix Z offset applied by
+    // LayerTweaker::multiplyWithProjectionMatrix can pull 2D layers' depth
+    // ahead of the terrain mesh's perspective depth, and the terrain mesh
+    // stays hidden.
+    static constexpr int32_t TERRAIN_LAYER_INDEX = -1;
 
     /**
      * @brief Create a DEM texture from DEMData

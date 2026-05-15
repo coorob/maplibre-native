@@ -1168,3 +1168,52 @@ passed-but-ignored, 83 ignored, 0 failed, 0 errored. No regressions.
 caveat — the test now meaningfully catches both "terrain rendering
 crashes / wrong colour / wrong projection" *and* "exaggeration value
 silently changed".
+
+### TERRAIN_LAYER_INDEX fix (2026-05-15, 11:00)
+
+Root-caused the "background overwrites terrain" symptom we
+discovered while investigating the exaggeration test design.
+
+The code had a TODO-style comment in `render_terrain.hpp`:
+> // Layer index (terrain renders early in 3D pass, use negative index)
+> // TEMP: Using positive index to render ON TOP for debugging visibility
+> static constexpr int32_t TERRAIN_LAYER_INDEX = 10000;
+
+With index=10000:
+- `visitLayerGroupsReversed` iterates highest→lowest, so the
+  terrain layer group is drawn FIRST in the opaque pass and the
+  user style's `background` (index 0) is drawn LAST.
+- For 2D drawables in Metal,
+  `LayerTweaker::multiplyWithProjectionMatrix` subtracts
+  `(1 + currentLayer) * numSublayers * depthEpsilon` from
+  `projMatrix[14]`, pulling their clip-space depth slightly toward
+  the near plane. Background with `currentLayer=2` ends up with a
+  depth value smaller than the terrain mesh's perspective depth.
+- Background therefore PASSES the LessEqual test against terrain's
+  already-written depth and overwrites it.
+
+With the comment-suggested fix (`TERRAIN_LAYER_INDEX = -1`):
+- terrain becomes the LOWEST-indexed layer group.
+- `visitLayerGroupsReversed` iterates background (0) first, then
+  terrain (-1) last.
+- Terrain's opaque pixels overwrite background where the mesh has
+  depth-passing geometry; background remains visible past the
+  silhouette (sky/horizon).
+
+Test with `background-color: red + hillshade + terrain
+exaggeration=20`: dark-red hillshaded mountains visible in
+foreground, bright-red sky visible above the silhouette. Matches
+the rendering we see in the iOS Klättra capture.
+
+Full render-test suite re-run with the fix: 1246 passed, 0 failed,
+0 errored. No regressions.
+
+### Why this matters for the PR
+
+The shipped baselines (`terrain/default` and `terrain/exaggeration`)
+weren't testing this code path because they don't have a
+background layer. But the iOS sample app and any real style with a
+background were depending on the terrain-mesh-overwrites-background
+behaviour we just fixed. Without the fix, terrain would have been
+invisible whenever the user's style had an opaque background, which
+is the common case.

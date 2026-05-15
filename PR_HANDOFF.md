@@ -217,8 +217,17 @@ Expect conflicts at:
 >   elevation produced visible seams at tile boundaries (see
 >   `TERRAIN_PROGRESS.md`). Proper fix needs a per-vertex elevation
 >   attribute populated when the bucket is built; not critical
->   because the depth-tested terrain mesh occludes main-pass fills /
->   lines and the drape pass handles the visible content.
+>   because the depth-tested terrain mesh now occludes main-pass
+>   fills / lines (see TERRAIN_LAYER_INDEX fix below) and the drape
+>   pass handles the visible content.
+> - **TERRAIN_LAYER_INDEX = -1.** Earlier development had it at
+>   10000 with a `TEMP` comment, which made the terrain mesh draw
+>   first in the opaque pass; the Metal-only 2D-layer projection-
+>   matrix Z offset then pulled background depth ahead of the
+>   terrain mesh, hiding it whenever a style had an opaque
+>   background. With `-1` the terrain mesh draws last in the opaque
+>   pass and overwrites background where its depth wins, matching
+>   the iOS sample-app behaviour.
 > - **Fill/line variants fully covered.** Fill: Fill, FillOutline,
 >   FillPattern, FillOutlinePattern all emit drape drawables.
 >   FillOutlineTriangulated (Metal-only niche) is the one exception.
