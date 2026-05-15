@@ -135,7 +135,7 @@ public:
 
     void processChanges();
 
-    bool addRenderTarget(RenderTargetPtr);
+    bool addRenderTarget(RenderTargetPtr, bool atFront = false);
     bool removeRenderTarget(const RenderTargetPtr&);
 
     template <typename Func /* void(RenderTarget&) */>

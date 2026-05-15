@@ -118,8 +118,9 @@ namespace {
 void activateRenderTarget(const RenderTargetPtr& renderTarget_, bool activate, UniqueChangeRequestVec& changes) {
     if (renderTarget_) {
         if (activate) {
-            // The RenderTree has determined this render target should be included in the renderable set for a frame
-            changes.emplace_back(std::make_unique<AddRenderTargetRequest>(renderTarget_));
+            // The RenderTree has determined this render target should be included in the renderable set for a frame.
+            // atFront ensures the hillshade prepare pass runs before any drape RenderTargets that sample its output.
+            changes.emplace_back(std::make_unique<AddRenderTargetRequest>(renderTarget_, /*atFront=*/true));
         } else {
             // The RenderTree is informing us we should not render anything
             changes.emplace_back(std::make_unique<RemoveRenderTargetRequest>(renderTarget_));
@@ -435,6 +436,19 @@ void RenderHillshadeLayer::update(gfx::ShaderRegistry& shaders,
                         ++stats.drawablesAdded;
                     }
                 });
+        }
+
+        // When terrain is active, hillshade is consumed exclusively via the
+        // drape RenderTarget — emitting the main 2D tile drawable as well
+        // would render hillshade as a flat translucent overlay on top of
+        // the extruded terrain mesh (terrain renders LAST in the opaque
+        // pass, but hillshade is translucent and renders after that),
+        // hiding the 3D effect. Skip the main drawable in that case;
+        // the drape drawable above already routed the prepared colour
+        // into the per-DEM-tile drape target.
+        if (activeTerrain) {
+            removeTile(renderPass, tileID);
+            continue;
         }
 
         const auto updateExisting = [&](gfx::Drawable& drawable) {

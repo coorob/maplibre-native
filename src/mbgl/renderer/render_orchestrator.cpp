@@ -1041,10 +1041,20 @@ void RenderOrchestrator::processChanges() {
     }
 }
 
-bool RenderOrchestrator::addRenderTarget(RenderTargetPtr renderTarget) {
+bool RenderOrchestrator::addRenderTarget(RenderTargetPtr renderTarget, bool atFront) {
     auto it = std::find(renderTargets.begin(), renderTargets.end(), renderTarget);
     if (it == renderTargets.end()) {
-        renderTargets.emplace_back(renderTarget);
+        // atFront ensures hillshade-prepare RenderTargets render before
+        // terrain drape RenderTargets that sample from them. Without this,
+        // the drape pass would sample an undefined offscreen colour buffer
+        // on the very first frame after a tile becomes visible (one frame
+        // of black mesh), and single-frame headless renders would produce
+        // entirely black output.
+        if (atFront) {
+            renderTargets.emplace(renderTargets.begin(), std::move(renderTarget));
+        } else {
+            renderTargets.emplace_back(std::move(renderTarget));
+        }
         return true;
     } else {
         return false;

@@ -95,12 +95,13 @@ protected:
  */
 class AddRenderTargetRequest : public ChangeRequest {
 public:
-    AddRenderTargetRequest(RenderTargetPtr renderTarget_);
+    AddRenderTargetRequest(RenderTargetPtr renderTarget_, bool atFront_ = false);
 
     void execute(RenderOrchestrator &) override;
 
 protected:
     RenderTargetPtr renderTarget;
+    bool atFront;
 };
 
 /**
