@@ -155,6 +155,7 @@ list(APPEND INCLUDE_FILES
     ${PROJECT_SOURCE_DIR}/include/mbgl/renderer/layer_group.hpp
     ${PROJECT_SOURCE_DIR}/include/mbgl/renderer/layer_tweaker.hpp
     ${PROJECT_SOURCE_DIR}/include/mbgl/renderer/render_target.hpp
+    ${PROJECT_SOURCE_DIR}/include/mbgl/renderer/render_terrain_drape_cache.hpp
     ${PROJECT_SOURCE_DIR}/include/mbgl/shaders/shader_program_base.hpp
     ${PROJECT_SOURCE_DIR}/include/mbgl/util/suppress_copies.hpp
 )
@@ -204,8 +205,13 @@ list(APPEND SRC_FILES
     ${PROJECT_SOURCE_DIR}/src/mbgl/renderer/layers/raster_layer_tweaker.hpp
     ${PROJECT_SOURCE_DIR}/src/mbgl/renderer/layers/symbol_layer_tweaker.cpp
     ${PROJECT_SOURCE_DIR}/src/mbgl/renderer/layers/symbol_layer_tweaker.hpp
+    ${PROJECT_SOURCE_DIR}/src/mbgl/renderer/layers/terrain_layer_tweaker.cpp
+    ${PROJECT_SOURCE_DIR}/src/mbgl/renderer/layers/terrain_layer_tweaker.hpp
     ${PROJECT_SOURCE_DIR}/src/mbgl/renderer/layers/collision_layer_tweaker.cpp
     ${PROJECT_SOURCE_DIR}/src/mbgl/renderer/layers/collision_layer_tweaker.hpp
+    ${PROJECT_SOURCE_DIR}/src/mbgl/renderer/render_terrain.cpp
+    ${PROJECT_SOURCE_DIR}/src/mbgl/renderer/render_terrain.hpp
+    ${PROJECT_SOURCE_DIR}/src/mbgl/renderer/render_terrain_drape_cache.cpp
     ${PROJECT_SOURCE_DIR}/src/mbgl/shaders/shader_program_base.cpp
 )
 
@@ -304,6 +310,7 @@ list(APPEND INCLUDE_FILES
     ${PROJECT_SOURCE_DIR}/include/mbgl/style/conversion/raster_dem_options.hpp
     ${PROJECT_SOURCE_DIR}/include/mbgl/style/conversion/rotation.hpp
     ${PROJECT_SOURCE_DIR}/include/mbgl/style/conversion/source.hpp
+    ${PROJECT_SOURCE_DIR}/include/mbgl/style/conversion/terrain.hpp
     ${PROJECT_SOURCE_DIR}/include/mbgl/style/conversion/tileset.hpp
     ${PROJECT_SOURCE_DIR}/include/mbgl/style/conversion/transition_options.hpp
     ${PROJECT_SOURCE_DIR}/include/mbgl/style/expression/assertion.hpp
@@ -368,6 +375,8 @@ list(APPEND INCLUDE_FILES
     ${PROJECT_SOURCE_DIR}/include/mbgl/style/rotation.hpp
     ${PROJECT_SOURCE_DIR}/include/mbgl/style/source.hpp
     ${PROJECT_SOURCE_DIR}/include/mbgl/style/sources/custom_geometry_source.hpp
+    ${PROJECT_SOURCE_DIR}/include/mbgl/style/terrain.hpp
+    ${PROJECT_SOURCE_DIR}/include/mbgl/style/terrain_observer.hpp
     ${PROJECT_SOURCE_DIR}/include/mbgl/style/sources/geojson_source.hpp
     ${PROJECT_SOURCE_DIR}/include/mbgl/style/sources/image_source.hpp
     ${PROJECT_SOURCE_DIR}/include/mbgl/style/sources/raster_dem_source.hpp
@@ -679,6 +688,7 @@ list(APPEND SRC_FILES
     ${PROJECT_SOURCE_DIR}/src/mbgl/style/conversion/rotation.cpp
     ${PROJECT_SOURCE_DIR}/src/mbgl/style/conversion/source.cpp
     ${PROJECT_SOURCE_DIR}/src/mbgl/style/conversion/stringify.hpp
+    ${PROJECT_SOURCE_DIR}/src/mbgl/style/conversion/terrain.cpp
     ${PROJECT_SOURCE_DIR}/src/mbgl/style/conversion/tileset.cpp
     ${PROJECT_SOURCE_DIR}/src/mbgl/style/conversion/transition_options.cpp
     ${PROJECT_SOURCE_DIR}/src/mbgl/style/custom_tile_loader.cpp
@@ -809,6 +819,8 @@ list(APPEND SRC_FILES
     ${PROJECT_SOURCE_DIR}/src/mbgl/style/style.cpp
     ${PROJECT_SOURCE_DIR}/src/mbgl/style/style_impl.cpp
     ${PROJECT_SOURCE_DIR}/src/mbgl/style/style_impl.hpp
+    ${PROJECT_SOURCE_DIR}/src/mbgl/style/terrain.cpp
+    ${PROJECT_SOURCE_DIR}/src/mbgl/style/terrain_impl.hpp
     ${PROJECT_SOURCE_DIR}/src/mbgl/style/types.cpp
     ${PROJECT_SOURCE_DIR}/src/mbgl/style/variable_anchor_offset_collection.cpp
     ${PROJECT_SOURCE_DIR}/src/mbgl/style/layers/custom_layer.cpp
@@ -1016,6 +1028,7 @@ if(MLN_WITH_OPENGL)
             ${PROJECT_SOURCE_DIR}/include/mbgl/shaders/gl/symbol_icon.hpp
             ${PROJECT_SOURCE_DIR}/include/mbgl/shaders/gl/symbol_sdf.hpp
             ${PROJECT_SOURCE_DIR}/include/mbgl/shaders/gl/symbol_text_and_icon.hpp
+            ${PROJECT_SOURCE_DIR}/include/mbgl/shaders/gl/terrain.hpp
             ${PROJECT_SOURCE_DIR}/include/mbgl/shaders/gl/wide_vector.hpp
     )
     list(APPEND
@@ -1163,6 +1176,8 @@ if(MLN_WITH_METAL)
             ${PROJECT_SOURCE_DIR}/include/mbgl/shaders/mtl/shader_group.hpp
             ${PROJECT_SOURCE_DIR}/include/mbgl/shaders/mtl/shader_program.hpp
             ${PROJECT_SOURCE_DIR}/include/mbgl/shaders/mtl/symbol.hpp
+            ${PROJECT_SOURCE_DIR}/include/mbgl/shaders/mtl/terrain.hpp
+            ${PROJECT_SOURCE_DIR}/include/mbgl/shaders/terrain_layer_ubo.hpp
             )
     list(APPEND
         SRC_FILES
@@ -1202,6 +1217,7 @@ if(MLN_WITH_METAL)
             ${PROJECT_SOURCE_DIR}/src/mbgl/shaders/mtl/location_indicator.cpp
             ${PROJECT_SOURCE_DIR}/src/mbgl/shaders/mtl/raster.cpp
             ${PROJECT_SOURCE_DIR}/src/mbgl/shaders/mtl/symbol.cpp
+            ${PROJECT_SOURCE_DIR}/src/mbgl/shaders/mtl/terrain.cpp
             ${PROJECT_SOURCE_DIR}/src/mbgl/shaders/mtl/widevector.cpp
             ${PROJECT_SOURCE_DIR}/src/mbgl/style/layers/mtl/custom_layer_render_parameters.cpp
     )
