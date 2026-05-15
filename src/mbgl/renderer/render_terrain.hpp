@@ -222,11 +222,18 @@ private:
     // actual layer routing into them is Phase 2 (see FINISH_TERRAIN.md).
     TerrainDrapeCache drapeCache;
 
-    // Pixel size of each drape target. Matches our DEM tile size so the
-    // texture sampling lines up 1:1 with the elevation grid in the vertex
-    // shader. Hard-coded for now; future work may read this from the DEM
-    // source metadata to support 256-tile terrarium sources too.
-    static constexpr int32_t DRAPE_TARGET_SIZE = 512;
+    // Pixel size of each drape target. 512 (= DEM tile dimension) made
+    // texture-vs-elevation sampling line up 1:1 in the vertex shader, but
+    // looked visibly blurry on flat surfaces (glaciers, lake ice) at close
+    // zoom — the drape's per-pixel basemap fills are larger than screen
+    // pixels there, and there's no way to alias them out without losing
+    // detail. 2048² gives a 16× pixel budget per tile (1 MB → 16 MB GPU
+    // memory per visible DEM tile, ~96 MB total at 6 visible tiles —
+    // comfortable on modern iOS hardware) and restores crisp polygon
+    // edges, label antialiasing, and shadow detail on flat drape
+    // surfaces. The mesh vertex shader's bilinear sampling handles
+    // the 4:1 ratio mismatch with the elevation grid fine.
+    static constexpr int32_t DRAPE_TARGET_SIZE = 2048;
 
     // Mesh resolution (vertices per side). The index buffer uses UInt16,
     // so total vertex count must stay under 65,536 — that's (MESH_SIZE+1)²
