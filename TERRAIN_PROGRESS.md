@@ -1217,3 +1217,44 @@ background were depending on the terrain-mesh-overwrites-background
 behaviour we just fixed. Without the fix, terrain would have been
 invisible whenever the user's style had an opaque background, which
 is the common case.
+
+### iOS visual verification attempt (2026-05-15, 11:15)
+
+Tried to visually verify the TERRAIN_LAYER_INDEX = -1 fix in the
+maplibre-native iOS sample app on the iPhone 16 Pro simulator.
+
+- Re-generated `platform/ios/MapLibre.xcodeproj` via
+  `bazel-xcodeproj.sh --flavor drawable` after temporarily reducing
+  the `target_environments` in `platform/ios:xcodeproj` from
+  `[simulator, device]` to `[simulator]` only (the `App` target
+  drops `provisioning_profile`, which `rules_apple` requires for
+  device-environment generation).
+- Generation succeeded.
+- `bazel build //platform/ios:App --ios_multi_cpus=sim_arm64
+  --apple_platform_type=ios --//:renderer=drawable` failed with 4
+  compile errors in `platform/darwin/app/PluginLayerExampleMetalRendering.mm`:
+  `property 'device' / 'mtkView' not found on object of type
+  'MLNBackendResource *'`. `MLNBackendResource`'s Metal-only
+  properties are gated on `MLN_RENDER_BACKEND_METAL`, and the
+  preprocessor define isn't reaching that translation unit in the
+  current Bazel iOS build graph.
+- `bazel build //platform/ios/app-swift:MapLibreApp` failed with
+  `fatal error: 'mbgl/mtl/mtl_fwd.hpp' file not found` in
+  `MLNMapView.mm` — same kind of build-config gap.
+
+Neither error is in code this PR touches. The earlier GPU frame
+capture in this branch proves the iOS build did succeed at some
+prior point; the build hygiene has slid since then for unrelated
+reasons (likely an Xcode 26 SDK + rules_apple interaction).
+
+**Verdict on the TERRAIN_LAYER_INDEX = -1 fix:** verified at the
+render-test runner level (synthetic `background:red + hillshade +
+terrain exaggeration=20` style renders correctly under the fix and
+broken under the old value) and the logic is straightforward
+(comment in `render_terrain.hpp` had `// TEMP: Using positive index
+to render ON TOP for debugging visibility` flagging this exact
+constant as something to revisit). Shipping without a live iOS
+re-verification this session.
+
+Reverted the `target_environments` edit in `platform/ios/BUILD.bazel`
+since it's a local convenience, not part of the PR.
