@@ -1030,3 +1030,41 @@ Findings after several iterations:
 
 Reverted the draped-fill style edits and the debug logs. Tests still
 pass against the committed hillshade-only baselines.
+
+### GL backend build verification (2026-05-15, 10:15)
+
+Built `mbgl-render-test-runner` from a fresh `build-macos-opengl/`
+configured with `MLN_WITH_OPENGL=ON`, `MLN_WITH_METAL=OFF`,
+`MLN_WITH_VULKAN=OFF`. CMake found the macOS `OpenGL.framework`,
+configured cleanly, full build (485 steps) linked without errors —
+about 7-8 minutes incremental.
+
+**What this confirms:**
+- The new GL terrain shader header (`include/mbgl/shaders/gl/terrain.hpp`)
+  compiles when included by the shader registration path.
+- The shader registration via `BuiltIn::TerrainShader` in
+  `gl/renderer_backend.cpp::registerTypes` resolves all the
+  `ShaderSource<BuiltIn::TerrainShader, gfx::Backend::Type::OpenGL>`
+  symbols (attributes, textures, name, vertex/fragment source).
+- `nm libmbgl-core.a | grep terrain` lists the full set of terrain
+  symbols including `TerrainLayerTweaker::execute`, both UBO
+  `UniformBufferArray::createOrUpdate` template instantiations, and
+  the referenced `RenderTerrain::getElevation` / `getExaggeration`.
+- `libmbgl-render-test.a` and the final executable link cleanly.
+
+**What this does NOT confirm:**
+- That the GL terrain shader actually renders correctly.
+  `./build-macos-opengl/mbgl-render-test-runner ... --filter
+  "background-color/default"` (a baseline non-terrain test) crashes
+  with the GL backend on Apple Silicon: `glBindVertexArray` raises
+  `GL_INVALID_OPERATION` (1282), `glGetIntegerv(GL_UNIFORM_BUFFER_OFFSET_ALIGNMENT)`
+  raises `GL_INVALID_ENUM` (1280), `glMapBufferRange` raises 1282,
+  then an assertion in `src/mbgl/gl/buffer_allocator.cpp:280` fires.
+  This is a macOS-arm64 / Apple-GL-stack limitation, not anything
+  in the terrain code path — every render-test fails the same way.
+
+Visual verification of the GL terrain rendering needs an Android,
+Linux, or Windows target. The PR description has been updated to
+reflect that the GL caveat is now "compiles + links cleanly,
+runtime verification deferred to non-macOS targets" rather than
+"partially implemented".

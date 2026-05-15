@@ -182,11 +182,22 @@ Expect conflicts at:
 >
 > ## Known limitations
 >
-> - **GL backend partially implemented.** GLSL terrain shader and
->   shader registration are in place. Visual verification on a GL
->   target (Android / Linux / macOS native) still needed —
->   MapLibre Native iOS is Metal-only so the GL shader can't be
->   exercised from the iOS sample app.
+> - **GL backend: code compiles + links, visual verification deferred
+>   to non-macOS targets.** GLSL terrain shader, shader registration,
+>   and `BuiltIn::TerrainShader` symbol resolution all build cleanly
+>   under `MLN_WITH_OPENGL=ON` / `MLN_WITH_METAL=OFF` on macOS. The
+>   `libmbgl-core.a` from that build contains every terrain symbol
+>   (TerrainLayerTweaker, TerrainDrawableUBO/TerrainEvaluatedPropsUBO
+>   UniformBufferArray::createOrUpdate instantiations,
+>   RenderTerrain::getElevation/getExaggeration references).
+>   The resulting `mbgl-render-test-runner` cannot be exercised at
+>   runtime on macOS-arm64 because Apple's deprecated OpenGL stack on
+>   M-series chips is missing modern GL features the renderer needs —
+>   `GL_UNIFORM_BUFFER_OFFSET_ALIGNMENT` returns `GL_INVALID_ENUM`,
+>   `glMapBufferRange` errors, then an assertion in
+>   `gl/buffer_allocator.cpp` fires — and this affects every render
+>   test, not just terrain. Visual verification of the GL terrain
+>   path therefore needs an Android, Linux, or Windows target.
 > - **Fill drape verified working via Xcode Metal frame capture.**
 >   The drape RenderTarget texture readback shows the expected cream
 >   background, water lake fills, and line features; the terrain mesh
