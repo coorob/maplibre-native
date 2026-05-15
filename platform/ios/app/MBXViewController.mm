@@ -2440,14 +2440,16 @@ CLLocationCoordinate2D randomWorldCoordinate(void) {
                         @"source": @"terrain-dem",
                         @"minzoom": @5,
                         @"paint": @{
-                            // Push exaggeration + custom dark shadow / warm
-                            // highlight to match the dramatic relief look of
-                            // the traska.app web 3D view.
+                            // Softer ramp than before: near-black shadows
+                            // amplified the per-tile DEM seam artifacts.
+                            // Warm brown shadow + cream highlight reads as
+                            // terrain depth without making tile boundaries
+                            // jump out as dark bands.
                             @"hillshade-exaggeration": @[@"interpolate", @[@"linear"], @[@"zoom"],
-                                                          @5, @0.7, @10, @1.0, @14, @1.0],
-                            @"hillshade-shadow-color": @"#1a1611",
-                            @"hillshade-highlight-color": @"#fff8e6",
-                            @"hillshade-accent-color": @"#5e4a2e",
+                                                          @5, @0.45, @10, @0.65, @14, @0.8],
+                            @"hillshade-shadow-color": @"#594532",
+                            @"hillshade-highlight-color": @"#fff5e0",
+                            @"hillshade-accent-color": @"#806040",
                         },
                     };
                     // Insert AFTER all opaque basemap fills/lines but BEFORE
