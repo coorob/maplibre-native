@@ -90,6 +90,9 @@ f444e8b   Add render-test scaffolds for terrain (default + exaggeration)
 
 # Phase 5: symbol elevation
 2db2590   Phase 5: per-tile symbol elevation via getElevation()
+
+# Reviewer-facing architecture documentation
+67cb86f   Add docs/terrain-architecture.md as a reviewer-facing reference
 ```
 
 ## Commits to SKIP
