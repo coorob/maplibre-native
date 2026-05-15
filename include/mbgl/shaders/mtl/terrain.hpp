@@ -179,20 +179,30 @@ half4 fragment fragmentMain(FragmentStage in [[stage_in]],
     // Note: Y-coordinate is flipped (1.0 - y) to match OpenGL convention
     float4 mapColor = mapTexture.sample(mapSampler, float2(in.uv.x, 1.0 - in.uv.y));
 
-    // Smooth per-vertex normal interpolated across the triangle, then
-    // re-normalised here because the linear interpolator doesn't preserve
-    // unit length. The earlier `dfdx`/`dfdy` approach gave flat shading
-    // per triangle and produced visible mesh faceting on slopes.
+    // Soft diffuse from the per-vertex normal. The diffuse term is
+    // intentionally clamped to a narrow [0.85, 1.0] range so that any
+    // residual per-vertex noise in the DEM-derived normal produces at
+    // most a 15% brightness variation. A wider range (e.g. the
+    // [0.5, 1.0] you'd get from a "physical" diffuse * intensity=0.5)
+    // amplifies pixel-level DEM noise into visibly shifting shadows
+    // when the camera moves, especially on flatter terrain where the
+    // gradient is dominated by source noise rather than real slope.
     float3 normal = normalize(in.normal);
     float3 lightDir = normalize(props.light_position_intensity.xyz);
-    float lightIntensity = props.light_position_intensity.w;
-    float ambient = 1.0 - lightIntensity;
-    float diffuse = ambient + lightIntensity * max(dot(normal, lightDir), 0.0);
+    float diffuse = mix(0.85, 1.0, max(dot(normal, lightDir), 0.0));
 
     if (mapColor.a > 0.01) {
         float3 lit = mapColor.rgb * diffuse * props.light_color_pad.rgb;
         return half4(half3(lit), half(mapColor.a));
     }
+
+    // Fallback colour gradient for the no-drape case. Uses the original
+    // physical-style diffuse so the gradient is more legible there;
+    // the soft diffuse above is only applied to draped content where
+    // the noise is most visible.
+    float lightIntensity = props.light_position_intensity.w;
+    float ambient = 1.0 - lightIntensity;
+    diffuse = ambient + lightIntensity * max(dot(normal, lightDir), 0.0);
 
     // Fallback: elevation-based color gradient for debugging
     float elevation = in.elevation;

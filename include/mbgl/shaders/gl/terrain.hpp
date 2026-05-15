@@ -116,20 +116,25 @@ void main() {
     // y-down tile coords.
     vec4 mapColor = texture(u_map_texture, vec2(v_uv.x, 1.0 - v_uv.y));
 
-    // Smooth per-vertex normal interpolated across the triangle, then
-    // re-normalised here because linear interpolation doesn't preserve
-    // unit length.
+    // Soft diffuse clamped to a narrow range so DEM-noise normal
+    // variance doesn't translate into visibly shifting shadows on
+    // camera motion. See Metal shader comment for the rationale.
     vec3 normal = normalize(v_normal);
     vec3 lightDir = normalize(u_light_position_intensity.xyz);
-    float lightIntensity = u_light_position_intensity.w;
-    float ambient = 1.0 - lightIntensity;
-    float diffuse = ambient + lightIntensity * max(dot(normal, lightDir), 0.0);
+    float diffuse = mix(0.85, 1.0, max(dot(normal, lightDir), 0.0));
 
     if (mapColor.a > 0.01) {
         vec3 lit = mapColor.rgb * diffuse * u_light_color_pad.rgb;
         fragColor = vec4(lit, mapColor.a);
         return;
     }
+
+    // Fallback for no-drape case keeps the original physical-style
+    // diffuse since the elevation-colour gradient benefits from more
+    // contrast there.
+    float lightIntensity = u_light_position_intensity.w;
+    float ambient = 1.0 - lightIntensity;
+    diffuse = ambient + lightIntensity * max(dot(normal, lightDir), 0.0);
 
     // Fallback: elevation-based colour gradient when the drape is empty.
     float normalizedElevation = clamp((v_elevation - 500.0) / 3500.0, 0.0, 1.0);
