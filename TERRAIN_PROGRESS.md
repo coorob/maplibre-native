@@ -674,6 +674,30 @@ Likely next steps for whoever picks this up:
    quad and visibly works upstream. The structural similarity might
    reveal a missing call.
 
+### Phase 5 symbol elevation (2026-05-15, morning)
+
+Commit `2db2590` lifts symbol drawables off z=0 to the per-tile centre
+elevation when terrain is active. Three small changes:
+
+1. `PaintParameters` gains a `const RenderTerrain* activeTerrain`.
+2. `RendererImpl` sets it after the orchestrator's update.
+3. `SymbolLayerTweaker` calls `activeTerrain->getElevation(tileID,
+   0.5, 0.5)` and translates the symbol matrix's Z column by
+   `elevation * pixelsPerMeter` (same scale fix the terrain mesh uses).
+
+Tried extending the same per-tile elevation to fill and line tweakers
+too. **That produced visible discontinuities at tile boundaries** —
+two adjacent tiles sampled different centre elevations, so connected
+polygons / lines got a vertical step between them. Reverted both
+back to z=0 for connected geometry. Per-symbol elevation works fine
+because symbols are point features (no inter-tile connectivity).
+
+For proper terrain-aware fill / line rendering we'd need per-vertex
+elevation: a vertex attribute populated when the bucket is built,
+sampled at each vertex's actual position. That's a bucket-layout
+change and deferred for now — main-pass fill / line at z=0 is fine
+because the terrain mesh occludes them via depth anyway.
+
 ### Overnight push 2 (2026-05-15, ~01:00)
 
 Continued working after the first overnight session reached a natural
