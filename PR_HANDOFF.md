@@ -221,6 +221,11 @@ Expect conflicts at:
 >   as a 2D overlay — exaggeration changes the terrain mesh elevation
 >   but not the hillshade layer's pixels. A future test with a draped
 >   layer (fill/line) would show the difference.
+> - **Full render-test suite passes.** Ran the entire macOS Metal
+>   manifest after the branch's drape-routing and `activeTerrain`
+>   plumbing landed — 1246 passed, 0 failed, 0 errored (plus 25
+>   passed-but-ignored and 83 ignored from the pre-existing ignore
+>   list). Confirms the layer changes don't regress unrelated tests.
 >
 > Total ≈1700 lines added across ~25 commits, mostly Phase 2 layer
 > routing. Happy to split into smaller PRs if maintainers prefer.

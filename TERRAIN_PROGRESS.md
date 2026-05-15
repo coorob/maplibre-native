@@ -948,3 +948,27 @@ doesn't follow the terrain mesh — the exaggeration setting changes
 the terrain-mesh elevation but not the hillshade output. A future
 test scenario with a draped layer (fill or line) would surface the
 difference.
+
+### Full render-test regression run (2026-05-15, ~09:10)
+
+After capturing the terrain baselines, ran the full suite to verify
+that the `activeTerrain` pointer threaded through `PaintParameters`
+and the drape-routing branches in every drape-capable layer don't
+regress unrelated tests.
+
+```
+./build-macos/mbgl-render-test-runner \
+    --manifestPath=metrics/macos-xcode11-release-style.json
+```
+
+Result:
+- 1246 passed (92.0%)
+- 25 passed but were ignored (1.8%) — pre-existing ignore-list
+  entries whose underlying upstream bugs have since been fixed;
+  not introduced by this branch.
+- 83 ignored (6.1%)
+- **0 failed, 0 errored**.
+
+Including the two new terrain tests, which pass against their newly-
+captured baselines. So the layer plumbing changes are confirmed
+non-regressing on the macOS Metal backend.
