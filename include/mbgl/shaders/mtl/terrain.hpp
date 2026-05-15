@@ -129,12 +129,15 @@ FragmentStage vertex vertexMain(thread const VertexStage vertx [[stage_in]],
     // non-linear RGB-blend noise.
     float elevationMeters = sampleElevationBilinear(demTexture, demSampler, uv);
 
-    // Per-vertex smooth normal. Sample at a wider step than the immediate
-    // 4-neighbours so the gradient averages over local variation and the
-    // hillshade comes out softer rather than highlighting every DEM-pixel
-    // step. Same bilinear-on-decoded helper avoids the encoding noise.
+    // Per-vertex smooth normal. The gradient is sampled over an 8-texel
+    // step so each vertex averages elevation variation over a wide enough
+    // area that adjacent vertices' normals stay correlated even when the
+    // DEM has small local noise. A narrower step (4 texels) left visible
+    // per-pixel bumps in flat areas after the camera moved into regions
+    // with high-frequency DEM noise; 8 texels smooths those out without
+    // visibly softening real slopes.
     const float2 texSize = float2(demTexture.get_width(), demTexture.get_height());
-    const float stepTexels = 4.0;
+    const float stepTexels = 8.0;
     const float2 texelStep = float2(stepTexels, stepTexels) / texSize;
     float elevXP = sampleElevationBilinear(demTexture, demSampler, uv + float2(texelStep.x, 0.0));
     float elevXN = sampleElevationBilinear(demTexture, demSampler, uv - float2(texelStep.x, 0.0));
@@ -146,12 +149,11 @@ FragmentStage vertex vertexMain(thread const VertexStage vertx [[stage_in]],
     float dE_dx = (elevXP - elevXN) * 0.5 * props.exaggeration;
     float dE_dy = (elevYP - elevYN) * 0.5 * props.exaggeration;
 
-    // Normal. The Z constant trades off shading dramatic-ness vs.
-    // flatness: too small → harsh shadows on every slope, too large →
-    // looks flat-shaded. 100 looks roughly right at zoom 10-12 (the
-    // default Klättra view), where 4 texels of the 256-px DEM tile is
-    // ~150 m of ground distance and typical mountain slopes are 20-45°.
-    float3 normal = normalize(float3(-dE_dx, -dE_dy, 100.0));
+    // Normal. Z is the horizontal world-space distance the gradient is
+    // measured over; with an 8-texel step on a 256-px tile that's
+    // roughly 1/16 of a tile, ~600 m at zoom 12 — 200 keeps the slope
+    // shading similar to the previous 4-texel/Z=100 balance.
+    float3 normal = normalize(float3(-dE_dx, -dE_dy, 200.0));
 
     // Create 3D position with elevation as Z coordinate
     float4 position = drawable.matrix * float4(pos.x, pos.y, elevation, 1.0);

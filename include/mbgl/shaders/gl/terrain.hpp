@@ -66,10 +66,11 @@ void main() {
     // Bilinear-on-decoded centre elevation (avoids RGB-blend noise).
     float elevationMeters = sampleElevationBilinear(u_dem_texture, uv);
 
-    // Per-vertex smooth normal at a 4-texel step (averages local variation
-    // for softer hillshade), using the same bilinear-on-decoded helper.
+    // Per-vertex smooth normal at an 8-texel step — wide enough that
+    // adjacent vertices' normals stay correlated under high-frequency
+    // DEM noise. A narrower step left per-pixel bumps in flat areas.
     vec2 texSize = vec2(textureSize(u_dem_texture, 0));
-    float stepTexels = 4.0;
+    float stepTexels = 8.0;
     vec2 texelStep = vec2(stepTexels, stepTexels) / texSize;
     float elevXP = sampleElevationBilinear(u_dem_texture, uv + vec2(texelStep.x, 0.0));
     float elevXN = sampleElevationBilinear(u_dem_texture, uv - vec2(texelStep.x, 0.0));
@@ -79,9 +80,9 @@ void main() {
     float elevation = elevationMeters * u_exaggeration;
     float dE_dx = (elevXP - elevXN) * 0.5 * u_exaggeration;
     float dE_dy = (elevYP - elevYN) * 0.5 * u_exaggeration;
-    // Z trades off shading dramatic-ness vs. flatness — see Metal shader
-    // comment for the rationale; 100 looks roughly right at zoom 10-12.
-    vec3 normal = normalize(vec3(-dE_dx, -dE_dy, 100.0));
+    // Z matches the 8-texel horizontal step — see Metal shader for the
+    // rationale; 200 keeps slope shading similar to the previous balance.
+    vec3 normal = normalize(vec3(-dE_dx, -dE_dy, 200.0));
 
     gl_Position = u_matrix * vec4(pos.x, pos.y, elevation, 1.0);
     v_uv = uv;
