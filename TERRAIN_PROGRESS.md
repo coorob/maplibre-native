@@ -972,3 +972,61 @@ Result:
 Including the two new terrain tests, which pass against their newly-
 captured baselines. So the layer plumbing changes are confirmed
 non-regressing on the macOS Metal backend.
+
+### Exaggeration test design investigation (2026-05-15, 10:00)
+
+Tried to make the exaggeration baseline visibly differ from default
+by adding a draped fill polygon over the north half of the view.
+Findings after several iterations:
+
+1. **Exaggeration plumbing works.** Confirmed via temp `Log::Info` in
+   `TerrainLayerTweaker::execute` — the value flows: style.json →
+   `style::Terrain::Impl::exaggeration` → `RenderTerrain::getExaggeration`
+   → `TerrainEvaluatedPropsUBO.exaggeration` → Metal shader
+   `props.exaggeration`. The `mbgl-render-test-runner` saw
+   `tweaker exaggeration=1.000000` for default and `=10.000000`,
+   `=100.000000` for exaggeration variants.
+
+2. **Drape path fires.** Confirmed via temp log in
+   `RenderFillLayer::emitDrapeVariant` — `activeTerrain=yes,
+   shaderGroup=yes` for both Fill and FillOutline variants, on every
+   drape target. Drape drawables are produced.
+
+3. **The rendered polygon is perfectly flat regardless of
+   exaggeration.** Tested at 256×256/pitch 60° and 512×512/pitch 75°,
+   exaggeration 1, 3, 5, 10, 100. All produce byte-identical pixels.
+   The cyan polygon's south edge is a straight horizontal line at the
+   polygon's latitude — no terrain-following deformation visible.
+
+4. **Why the test setup can't show exaggeration's effect:**
+   - Fills emit drawables in BOTH main pass (always) AND drape pass
+     (when terrain is active). Two parallel paths.
+   - Main-pass fill renders the polygon at z=0 as a flat 2D shape.
+   - Drape pass paints it into the per-DEM-tile drape RenderTarget,
+     which the terrain mesh samples.
+   - For the draped version to be visible, the terrain mesh must
+     occlude the main-pass version (depth-tested opaque). In the
+     Klättra iOS capture this happens — terrain mesh is the visible
+     surface and main fills are hidden behind it.
+   - In this test, the DEM tile coverage is approximately
+     `(-113.4 to -113.13, 35.88 to 36.03)`. The polygon extends to
+     latitude 36.10 — past the DEM coverage. Where there's no DEM
+     coverage there's no terrain mesh to occlude the main-pass fill.
+   - With pitch 60°, the polygon's projected area on screen is mostly
+     in the "past the horizon" region where DEM coverage doesn't
+     reach. Result: the visible polygon is dominated by the main-pass
+     fill, which doesn't depend on exaggeration.
+
+   To make a render-test that surfaces exaggeration sensitivity:
+   - Bound the polygon entirely inside DEM coverage, AND
+   - Pick a view angle/zoom where the polygon's edges fall over
+     terrain mesh that the camera looks at along an angle (so a few
+     metres of vertical shift cross a pixel boundary on screen).
+
+   This is design work outside the immediate scope; deferred. The
+   current hillshade-only baselines still catch the "terrain rendering
+   crashes / produces wrong colour / wrong projection" classes of
+   regression, just not "exaggeration value silently changed."
+
+Reverted the draped-fill style edits and the debug logs. Tests still
+pass against the committed hillshade-only baselines.
