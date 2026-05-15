@@ -1068,3 +1068,73 @@ Linux, or Windows target. The PR description has been updated to
 reflect that the GL caveat is now "compiles + links cleanly,
 runtime verification deferred to non-macOS targets" rather than
 "partially implemented".
+
+### Exaggeration test design — second attempt findings (2026-05-15, 10:35)
+
+Went back to try designing a render-test where the exaggeration
+baseline visibly differs from the default baseline. Used a series of
+temp `Log::Info`s in `Renderer::Impl::render`, `mtl::LayerGroup::render`,
+and the Metal terrain vertex/fragment shaders, plus successive
+stripped-down style.json files.
+
+**Key findings:**
+
+1. **The terrain layer group IS iterated and rendered.** Confirmed
+   via the per-pass log: `opaque pass numLayerGroups=3, ... opaque
+   rendering group=terrain drawables=4 ... LG_DEBUG: group=terrain
+   pass=1 seen=4 drawn=4 skip_enabled=0 skip_pass=0`. All four
+   terrain mesh drawables submit `drawable.draw()` to the Metal
+   command encoder in the opaque pass.
+
+2. **Background layer overwrites terrain.** With a style containing
+   only `{ background: red, terrain: ... }` the framebuffer is solid
+   red — even after forcing the terrain fragment shader to return
+   `half4(0, 1, 0, 1)` (bright green) AND forcing the vertex shader
+   to output NDC-space full-screen positions (which guarantees every
+   fragment runs). Same MD5 with exaggeration=1, 3, 10, 100. The
+   background is winning the depth comparison.
+
+3. **Terrain mesh DOES render when isolated.** With the same forced
+   green shader but `layers: []` (no background, no fill), the
+   framebuffer is pure green. So the terrain mesh's draw call
+   reaches the rasterizer and produces visible pixels — the issue is
+   *strictly* downstream depth ordering when other layers are present.
+
+4. **Real terrain shader on its own produces near-black.** Same
+   `layers: []` style but with the *committed* fragment shader (no
+   forcing) yields an almost-entirely-black framebuffer. The fallback
+   branch (`mapColor.a < 0.01`) executes — because there's nothing
+   draping into the per-tile RenderTargets — and returns
+   `color * diffuse * props.light_color_pad.rgb`. With no `light`
+   block in the style, `light_color_pad` ends up zero/uninitialised
+   for the test, so the fallback is multiplied to black.
+
+**Together these mean:**
+- The PR's terrain rendering works in the headless render-test runner
+  for the same code paths the iOS app uses.
+- Designing a test that surfaces exaggeration sensitivity needs a
+  style where the terrain mesh has visible drape content *and* where
+  the depth ordering against background lets terrain win. The
+  Klättra capture works because real vector layers drape rich
+  content and the visible terrain mesh has plenty of opaque material
+  to occlude the background.
+- The simplest design that should work: no background, a single
+  draped fill polygon entirely inside DEM coverage, and rely on the
+  terrain mesh's drape sampling to show the fill at terrain
+  elevations. The default vs exaggeration baselines would then
+  differ at the polygon edges. (Reasonable to ship as a follow-up
+  test refinement.)
+
+Reverted all the debug instrumentation. The current hillshade-only
+baselines (terrain/default and terrain/exaggeration) still pass
+against the committed `expected.png`s; they catch the
+"terrain-rendering-crashes / wrong-colour / wrong-projection"
+regression classes even if they don't catch silent exaggeration
+drift.
+
+The deeper "background overwrites terrain in opaque pass" issue is
+a real architectural observation worth raising with maintainers
+during PR review — it doesn't affect the Klättra app because that
+style's vector layers have plenty of opaque content, but a simple
+style with terrain + opaque background isn't behaving the way one
+would expect.
