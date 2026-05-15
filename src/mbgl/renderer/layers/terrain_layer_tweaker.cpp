@@ -31,7 +31,17 @@ void TerrainLayerTweaker::execute(LayerGroupBase& layerGroup, const PaintParamet
 #endif
 
     const float exaggeration = terrain->getExaggeration();
-    const float elevationOffset = 0.0f;
+    // Lift the entire mesh ~300 metres above sea level. The 2D basemap
+    // (background fill, water, landcover fills, lines) renders at z=0
+    // in the main framebuffer pass, and the terrain mesh's lowest
+    // valleys land near z=0 too — they fight for the same depth and
+    // the basemap bleeds through the floor of the mesh, reading as
+    // mountains half-submerged in a flat "ocean" of basemap colour.
+    // The offset is in unscaled metres; the same per-tile pixelsPerMeter
+    // matrix below multiplies it through to clip-space. 300 m clears
+    // most coastal / lake-shore basemap fills without distorting the
+    // perceived elevation of mid-altitude features at typical zoom.
+    const float elevationOffset = 500.0f;
 
     // Reuse fill-extrusion's interpretation of the global style light's
     // colour and intensity, but always compute the light position as if

@@ -64,7 +64,10 @@ void main() {
 
     // Bilinear-on-decoded centre elevation (avoids RGB-blend noise).
     float elevationMeters = sampleElevationBilinear(u_dem_texture, uv);
-    float elevation = elevationMeters * u_exaggeration;
+    // elevation_offset (in metres) lifts the mesh above z=0 so 2D
+    // basemap layers (which render at z=0 in the main pass) don't
+    // bleed through the lowest valleys.
+    float elevation = elevationMeters * u_exaggeration + u_elevation_offset;
 
     gl_Position = u_matrix * vec4(pos.x, pos.y, elevation, 1.0);
     v_uv = uv;

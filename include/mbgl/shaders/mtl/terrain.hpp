@@ -127,7 +127,15 @@ FragmentStage vertex vertexMain(thread const VertexStage vertx [[stage_in]],
     // *decoded* values so vertices between DEM texels don't pick up the
     // non-linear RGB-blend noise.
     float elevationMeters = sampleElevationBilinear(demTexture, demSampler, uv);
-    float elevation = elevationMeters * props.exaggeration;
+    // elevation_offset (in metres) lifts the entire mesh uniformly. The
+    // 2D basemap layers (background, fills, lines, symbols) render at
+    // z=0 in the main pass and the terrain mesh's lowest valleys land
+    // around there too — they fight for the same depth and the basemap
+    // bleeds through the floor of the mesh, reading as the mountains
+    // being half-submerged in a flat "ocean" of basemap colour. Lifting
+    // the whole mesh by a few hundred metres pulls the lowest valleys
+    // above the basemap z=0 plane and the mesh sits cleanly on top.
+    float elevation = elevationMeters * props.exaggeration + props.elevation_offset;
 
     // Create 3D position with elevation as Z coordinate
     float4 position = drawable.matrix * float4(pos.x, pos.y, elevation, 1.0);
