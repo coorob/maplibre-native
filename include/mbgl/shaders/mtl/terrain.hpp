@@ -129,15 +129,16 @@ FragmentStage vertex vertexMain(thread const VertexStage vertx [[stage_in]],
     // non-linear RGB-blend noise.
     float elevationMeters = sampleElevationBilinear(demTexture, demSampler, uv);
 
-    // Per-vertex smooth normal. The gradient is sampled over an 8-texel
-    // step so each vertex averages elevation variation over a wide enough
-    // area that adjacent vertices' normals stay correlated even when the
-    // DEM has small local noise. A narrower step (4 texels) left visible
-    // per-pixel bumps in flat areas after the camera moved into regions
-    // with high-frequency DEM noise; 8 texels smooths those out without
-    // visibly softening real slopes.
+    // Per-vertex smooth normal. The gradient is sampled over a 16-texel
+    // step so each vertex averages elevation variation over a wide
+    // enough neighborhood that adjacent vertices' normals stay
+    // correlated even when the DEM has pixel-level noise. Narrower
+    // steps (4 and 8 texels) left visible per-pixel/per-vertex bumps in
+    // flat areas at closer zoom — adjacent vertices end up with
+    // measurably different gradients when their sample windows only
+    // overlap by a few texels.
     const float2 texSize = float2(demTexture.get_width(), demTexture.get_height());
-    const float stepTexels = 8.0;
+    const float stepTexels = 16.0;
     const float2 texelStep = float2(stepTexels, stepTexels) / texSize;
     float elevXP = sampleElevationBilinear(demTexture, demSampler, uv + float2(texelStep.x, 0.0));
     float elevXN = sampleElevationBilinear(demTexture, demSampler, uv - float2(texelStep.x, 0.0));
@@ -149,11 +150,11 @@ FragmentStage vertex vertexMain(thread const VertexStage vertx [[stage_in]],
     float dE_dx = (elevXP - elevXN) * 0.5 * props.exaggeration;
     float dE_dy = (elevYP - elevYN) * 0.5 * props.exaggeration;
 
-    // Normal. Z is the horizontal world-space distance the gradient is
-    // measured over; with an 8-texel step on a 256-px tile that's
-    // roughly 1/16 of a tile, ~600 m at zoom 12 — 200 keeps the slope
-    // shading similar to the previous 4-texel/Z=100 balance.
-    float3 normal = normalize(float3(-dE_dx, -dE_dy, 200.0));
+    // Normal. Z scales with the horizontal step the gradient is
+    // measured over. 16-texel step on a 256-px tile is ~1/8 of a tile,
+    // ~1.2 km at zoom 12; Z=400 keeps the slope-shading mapping roughly
+    // in the same range as the previous narrower-step values.
+    float3 normal = normalize(float3(-dE_dx, -dE_dy, 400.0));
 
     // Create 3D position with elevation as Z coordinate
     float4 position = drawable.matrix * float4(pos.x, pos.y, elevation, 1.0);
