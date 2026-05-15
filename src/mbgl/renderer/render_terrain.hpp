@@ -228,8 +228,13 @@ private:
     // source metadata to support 256-tile terrarium sources too.
     static constexpr int32_t DRAPE_TARGET_SIZE = 512;
 
-    // Mesh resolution (vertices per side)
-    static constexpr size_t MESH_SIZE = 128;
+    // Mesh resolution (vertices per side). The index buffer uses UInt16,
+    // so total vertex count must stay under 65,536 — that's (MESH_SIZE+1)²
+    // and caps MESH_SIZE at 254. Increasing from the previous 128
+    // (16,641 vertices) to 192 (37,249 vertices) ~2.25× the triangle
+    // count, which is enough to eliminate the visible tessellation
+    // faceting on close-up slopes without changing the index type.
+    static constexpr size_t MESH_SIZE = 192;
 
     // Cached DEM source
     RenderSource* demSource = nullptr;
