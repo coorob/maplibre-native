@@ -87,12 +87,16 @@ bedfb37   Phase 2 line: extend drape routing to LineGradient
 
 # Render tests
 f444e8b   Add render-test scaffolds for terrain (default + exaggeration)
+9f5eff1   Terrain render-tests: capture baselines
 
 # Phase 5: symbol elevation
 2db2590   Phase 5: per-tile symbol elevation via getElevation()
 
 # Reviewer-facing architecture documentation
 67cb86f   Add docs/terrain-architecture.md as a reviewer-facing reference
+
+# CMake wiring (so non-Bazel builds find the new terrain files)
+2145ded   CMake: wire terrain source files into mbgl-core
 ```
 
 ## Commits to SKIP
@@ -125,12 +129,19 @@ git checkout -b terrain-drape-metal upstream/main
 # Apply Jesse's series first (if not already in upstream main)
 git cherry-pick d1704c2..6e687eb  # adjust range as needed
 
-# Apply our commits (use the list above)
+# Apply our commits (use the list above). NOTE: this is the early
+# pre-Phase-5 batch — append the later commits (24efce5 GL backend,
+# 468df43 Fill drape emitDrapeVariant, bedfb37/50b30a3/7ff5c77 line
+# and fill variants, f444e8b render-test scaffolds, 9f5eff1 render-
+# test baselines, 2db2590 Phase 5 symbol elevation, 67cb86f
+# architecture doc, 2145ded CMake wiring) before pushing.
 git cherry-pick 1107449 d453783 5a6ff27 bfa03ef 2ce7ce7 a876439 \
                 2af2def 584d433 8a6d4a0 93d3970 b97a5e9 \
                 a341c6a 1853d53 0a844ad 008a43d \
                 6f8170c 39ca9fc 198cf59 \
-                a3bda61 7626a50 35f15b6 5567141 c85b1a2 30a647e 3a8097a 23e798f de288b0
+                a3bda61 7626a50 35f15b6 5567141 c85b1a2 30a647e 3a8097a 23e798f de288b0 \
+                24efce5 468df43 bedfb37 50b30a3 7ff5c77 \
+                f444e8b 9f5eff1 2db2590 67cb86f 2145ded
 ```
 
 Expect conflicts at:
