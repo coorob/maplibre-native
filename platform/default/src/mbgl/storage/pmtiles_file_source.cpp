@@ -56,6 +56,8 @@ namespace mbgl {
 using namespace rapidjson;
 
 using AsyncCallback = std::function<void(std::unique_ptr<Response::Error>)>;
+using AsyncDirectoryCallback =
+    std::function<void(std::vector<pmtiles::entryv3>, std::unique_ptr<Response::Error>)>;
 using AsyncTileCallback = std::function<void(std::pair<uint64_t, uint32_t>, std::unique_ptr<Response::Error>)>;
 
 class PMTilesFileSource::Impl {
@@ -77,7 +79,16 @@ public:
                 return;
             }
 
-            response.data = std::make_shared<std::string>(metadata_cache.at(url));
+            auto metadata = metadata_cache.find(url);
+            if (metadata == metadata_cache.end()) {
+                response.error = std::make_unique<Response::Error>(
+                    Response::Error::Reason::Other,
+                    std::string("Error fetching PMTiles metadata: metadata cache was not populated"));
+                ref.invoke(&FileSourceRequest::setResponse, response);
+                return;
+            }
+
+            response.data = std::make_shared<std::string>(metadata->second);
             ref.invoke(&FileSourceRequest::setResponse, response);
         });
     }
@@ -147,7 +158,7 @@ public:
                     tileResource.dataRange = std::make_pair(tileAddress.first,
                                                             tileAddress.first + tileAddress.second - 1);
 
-                    tasks[req] = getFileSource()->request(tileResource, [=](const Response& tileResponse) {
+                    tasks[req].push_back(getFileSource()->request(tileResource, [=](const Response& tileResponse) {
                         Response response;
                         response.noContent = true;
 
@@ -155,6 +166,14 @@ public:
                             response.error = std::make_unique<Response::Error>(
                                 tileResponse.error->reason,
                                 std::string("Error fetching PMTiles tile: ") + tileResponse.error->message);
+                            ref.invoke(&FileSourceRequest::setResponse, response);
+                            return;
+                        }
+
+                        if (!tileResponse.data) {
+                            response.error = std::make_unique<Response::Error>(
+                                Response::Error::Reason::Other,
+                                std::string("Error fetching PMTiles tile: empty response data"));
                             ref.invoke(&FileSourceRequest::setResponse, response);
                             return;
                         }
@@ -182,7 +201,7 @@ public:
 
                         ref.invoke(&FileSourceRequest::setResponse, response);
                         return;
-                    });
+                    }));
                 });
         });
     }
@@ -207,6 +226,11 @@ public:
         return clientOptions.clone();
     }
 
+    // Release the whole sub-request chain for this logical request together,
+    // so nothing is freed while a sibling sub-request is still executing.
+    // Invoked from FileSourceRequest::onCancel (also on teardown).
+    void cancel(AsyncRequest* req) { tasks.erase(req); }
+
 private:
     mutable std::mutex resourceOptionsMutex;
     mutable std::mutex clientOptionsMutex;
@@ -218,7 +242,14 @@ private:
     std::map<std::string, std::string> metadata_cache;
     std::map<std::string, std::map<std::string, std::vector<pmtiles::entryv3>>> directory_cache;
     std::map<std::string, std::vector<std::string>> directory_cache_control;
-    std::map<AsyncRequest*, std::unique_ptr<AsyncRequest>> tasks;
+    // One logical request chains several sub-requests (header -> directory ->
+    // tile). They must all stay alive for the lifetime of the logical request.
+    // Previously this was a single slot per `req` that each hop OVERWROTE, which
+    // destroyed the still-executing sub-request from inside its own completion
+    // callback -- a use-after-free that crashed on the PMTilesFileSource worker
+    // thread during map teardown/transitions. Hold the chain in a vector and
+    // only clear it in cancel()/destruction so nothing is freed mid-callback.
+    std::map<AsyncRequest*, std::vector<std::unique_ptr<AsyncRequest>>> tasks;
 
     std::shared_ptr<FileSource> getFileSource() {
         if (!fileSource) {
@@ -229,9 +260,10 @@ private:
         return fileSource;
     }
 
-    void getHeader(const std::string& url, AsyncRequest* req, AsyncCallback callback) {
+    void getHeader(std::string url, AsyncRequest* req, AsyncCallback callback) {
         if (header_cache.contains(url)) {
             callback(std::unique_ptr<Response::Error>());
+            return;
         }
 
         Resource resource(Resource::Kind::Source, url);
@@ -240,7 +272,7 @@ private:
         resource.dataRange = std::make_pair<uint64_t, uint64_t>(pmtilesHeaderOffset,
                                                                 pmtilesHeaderOffset + pmtilesHeaderLength - 1);
 
-        tasks[req] = getFileSource()->request(
+        tasks[req].push_back(getFileSource()->request(
             resource, [=, this](const Response& response) { // NOLINT(clang-analyzer-cplusplus.NewDeleteLeaks)
                 if (response.error) {
                     std::string message = std::string("Error fetching PMTiles header: ") + response.error->message;
@@ -257,6 +289,13 @@ private:
 
                     callback(std::make_unique<Response::Error>(response.error->reason, message));
 
+                    return;
+                }
+
+                if (!response.data || response.data->size() < pmtilesHeaderLength) {
+                    callback(std::make_unique<Response::Error>(
+                        Response::Error::Reason::Other,
+                        std::string("Error fetching PMTiles header: empty or incomplete response data")));
                     return;
                 }
 
@@ -277,12 +316,13 @@ private:
                     callback(std::make_unique<Response::Error>(
                         Response::Error::Reason::Other, std::string("Error parsing PMTiles header: ") + e.what()));
                 }
-            });
+            }));
     }
 
-    void getMetadata(std::string& url, AsyncRequest* req, AsyncCallback callback) {
+    void getMetadata(std::string url, AsyncRequest* req, AsyncCallback callback) {
         if (metadata_cache.contains(url)) {
             callback(std::unique_ptr<Response::Error>());
+            return;
         }
 
         getHeader(
@@ -401,12 +441,19 @@ private:
                     resource.dataRange = std::make_pair(header.json_metadata_offset,
                                                         header.json_metadata_offset + header.json_metadata_bytes - 1);
 
-                    tasks[req] = getFileSource()->request(resource, [=](const Response& responseMetadata) {
+                    tasks[req].push_back(getFileSource()->request(resource, [=](const Response& responseMetadata) {
                         if (responseMetadata.error) {
                             callback(std::make_unique<Response::Error>(
                                 responseMetadata.error->reason,
                                 std::string("Error fetching PMTiles metadata: ") + responseMetadata.error->message));
 
+                            return;
+                        }
+
+                        if (!responseMetadata.data) {
+                            callback(std::make_unique<Response::Error>(
+                                Response::Error::Reason::Other,
+                                std::string("Error fetching PMTiles metadata: empty response data")));
                             return;
                         }
 
@@ -417,7 +464,7 @@ private:
                         }
 
                         parse_callback(data);
-                    });
+                    }));
 
                     return;
                 }
@@ -429,7 +476,7 @@ private:
     void storeDirectory(const std::string& url,
                         uint64_t directoryOffset,
                         uint64_t directoryLength,
-                        const std::string& directoryData) {
+                        std::vector<pmtiles::entryv3> directory) {
         if (!directory_cache.contains(url)) {
             directory_cache.emplace(url, std::map<std::string, std::vector<pmtiles::entryv3>>());
             directory_cache_control.emplace(url, std::vector<std::string>());
@@ -437,7 +484,7 @@ private:
 
         std::string directory_cache_key = url + "|" + std::to_string(directoryOffset) + "|" +
                                           std::to_string(directoryLength);
-        directory_cache.at(url).emplace(directory_cache_key, pmtiles::deserialize_directory(directoryData));
+        directory_cache.at(url).emplace(directory_cache_key, std::move(directory));
         directory_cache_control.at(url).emplace_back(directory_cache_key);
 
         if (directory_cache_control.at(url).size() > MAX_DIRECTORY_CACHE_ENTRIES) {
@@ -446,11 +493,11 @@ private:
         }
     }
 
-    void getDirectory(const std::string& url,
+    void getDirectory(std::string url,
                       AsyncRequest* req,
                       uint64_t directoryOffset,
                       uint32_t directoryLength,
-                      AsyncCallback callback) {
+                      AsyncDirectoryCallback callback) {
         std::string directory_cache_key = url + "|" + std::to_string(directoryOffset) + "|" +
                                           std::to_string(directoryLength);
 
@@ -467,13 +514,13 @@ private:
                 }
             }
 
-            callback(std::unique_ptr<Response::Error>());
+            callback(directory_cache.at(url).at(directory_cache_key), std::unique_ptr<Response::Error>());
             return;
         }
 
         getHeader(url, req, [=, this](std::unique_ptr<Response::Error> error) {
             if (error) {
-                callback(std::move(error));
+                callback({}, std::move(error));
                 return;
             }
 
@@ -483,12 +530,21 @@ private:
             resource.loadingMethod = Resource::LoadingMethod::Network;
             resource.dataRange = std::make_pair(directoryOffset, directoryOffset + directoryLength - 1);
 
-            tasks[req] = getFileSource()->request(resource, [=, this](const Response& response) {
+            tasks[req].push_back(getFileSource()->request(resource, [=, this](const Response& response) {
                 if (response.error) {
-                    callback(std::make_unique<Response::Error>(
-                        response.error->reason,
-                        std::string("Error fetching PMTiles directory: ") + response.error->message));
+                    callback({},
+                             std::make_unique<Response::Error>(
+                                 response.error->reason,
+                                 std::string("Error fetching PMTiles directory: ") + response.error->message));
 
+                    return;
+                }
+
+                if (!response.data) {
+                    callback({},
+                             std::make_unique<Response::Error>(
+                                 Response::Error::Reason::Other,
+                                 std::string("Error fetching PMTiles directory: empty response data")));
                     return;
                 }
 
@@ -499,19 +555,22 @@ private:
                         directoryData = util::decompress(directoryData);
                     }
 
-                    storeDirectory(url, directoryOffset, directoryLength, directoryData);
+                    auto directory = pmtiles::deserialize_directory(directoryData);
+                    auto callbackDirectory = directory;
+                    storeDirectory(url, directoryOffset, directoryLength, std::move(directory));
 
-                    callback(std::unique_ptr<Response::Error>());
+                    callback(std::move(callbackDirectory), std::unique_ptr<Response::Error>());
                 } catch (const std::exception& e) {
-                    callback(std::make_unique<Response::Error>(
-                        Response::Error::Reason::Other,
-                        std::string(std::string("Error parsing PMTiles directory: ") + e.what())));
+                    callback({},
+                             std::make_unique<Response::Error>(
+                                 Response::Error::Reason::Other,
+                                 std::string(std::string("Error parsing PMTiles directory: ") + e.what())));
                 }
-            });
+            }));
         });
     }
 
-    void getTileAddress(const std::string& url,
+    void getTileAddress(std::string url,
                         AsyncRequest* req,
                         uint64_t tileID,
                         uint64_t directoryOffset,
@@ -532,15 +591,14 @@ private:
             req,
             directoryOffset,
             directoryLength,
-            [=, this](std::unique_ptr<Response::Error> error) { // NOLINT(clang-analyzer-cplusplus.NewDeleteLeaks)
+            [=, this](std::vector<pmtiles::entryv3> directory,
+                      std::unique_ptr<Response::Error> error) { // NOLINT(clang-analyzer-cplusplus.NewDeleteLeaks)
                 if (error) {
                     callback(std::make_pair(0, 0), std::move(error));
                     return;
                 }
 
                 pmtiles::headerv3 header = header_cache.at(url);
-                std::vector<pmtiles::entryv3> directory = directory_cache.at(url).at(
-                    url + "|" + std::to_string(directoryOffset) + "|" + std::to_string(directoryLength));
 
                 pmtiles::entryv3 entry = pmtiles::find_tile(directory, tileID);
 
@@ -582,6 +640,8 @@ PMTilesFileSource::PMTilesFileSource(const ResourceOptions& resourceOptions, con
 
 std::unique_ptr<AsyncRequest> PMTilesFileSource::request(const Resource& resource, FileSource::Callback callback) {
     auto req = std::make_unique<FileSourceRequest>(std::move(callback));
+
+    req->onCancel([actorRef = thread->actor(), req = req.get()]() { actorRef.invoke(&Impl::cancel, req); });
 
     // assume if there is a tile request, that the pmtiles file has been validated
     if (resource.kind == Resource::Tile) {
