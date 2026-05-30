@@ -27,9 +27,14 @@ const gfx::UniqueVertexBufferResource& VertexAttribute::getBuffer(gfx::VertexAtt
                 attrib.setBuffer(std::move(buffer));
                 attrib.setRawData({});
                 attrib_.setDirty(false);
-            } else {
-                assert(false);
             }
+            // else: attribute exists but has no shared data and no raw
+            // data. Return the (null) buffer; the caller in
+            // `UploadPass::buildAttributeBindings` now handles this with
+            // a placeholder binding instead of asserting. Previously hit
+            // during fast camera pans when a drape drawable's source
+            // bucket got reparsed and emptied its paint-property
+            // vertex vectors.
         }
     }
     return attrib_.getBuffer();

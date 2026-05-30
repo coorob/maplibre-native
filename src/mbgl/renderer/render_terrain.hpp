@@ -7,6 +7,7 @@
 #include <mbgl/gfx/vertex_buffer.hpp>
 #include <mbgl/gfx/index_buffer.hpp>
 #include <mbgl/renderer/render_terrain_drape_cache.hpp>
+#include <mbgl/renderer/layer_tweaker.hpp>
 
 #include <memory>
 #include <map>
@@ -14,6 +15,7 @@
 #include <optional>
 #include <vector>
 #include <cstdint>
+#include <cstdlib>
 #include <unordered_map>
 
 namespace mbgl {
@@ -129,6 +131,85 @@ public:
         return drapeCache.get(tileID);
     }
 
+    // Per-drawable DEM binding. With parent-fallback DEM sampling, a tile
+    // whose own DEM is still streaming can sample the closest available
+    // ancestor's texture via a UV sub-rect remap (mirroring gl-js's
+    // `_demMatrixCache` in `src/render/terrain.ts:291-305`). The binding
+    // captures the texture pointer and remap so the drawable can rebuild
+    // when either changes — typically when the exact DEM arrives and
+    // takes over from a parent fallback.
+    struct DEMBinding {
+        std::shared_ptr<gfx::Texture2D> texture;
+        OverscaledTileID sourceID; // tile whose DEM is bound (may be ancestor)
+        std::array<float, 2> demTL{{0.0f, 0.0f}};
+        float demScale = 1.0f;
+        bool drapeReady = false;
+        bool usedEmptyDEM = false;
+    };
+
+    /**
+     * @brief Look up the DEM binding (texture + UV remap) for a drawable.
+     *
+     * The drawable is keyed by its IDEAL OverscaledTileID — the same id
+     * that was passed to `drawable->setTileID()` when it was built. The
+     * returned binding's `demTL` / `demScale` give the UV sub-rect for
+     * sampling the bound DEM texture: identity (`{0,0}, 1`) when the
+     * exact tile's data is loaded; a sub-rect when a parent is filling
+     * in. Returns nullptr if no binding exists (tile dropped from cover
+     * mid-frame, or no DEM data anywhere in the parent chain).
+     */
+    const DEMBinding* getDEMBinding(const OverscaledTileID& idealID) const {
+        auto it = currentBindings.find(idealID);
+        return it == currentBindings.end() ? nullptr : &it->second;
+    }
+
+    /**
+     * @brief Whether the drape pass fully covers a source tile.
+     *
+     * Main-pass suppression is safe only when an ideal terrain drape target
+     * is at the same zoom as the source tile or an ancestor of it. A coarse
+     * source tile (for example z4 OpenFreeMap landcover) can overlap a
+     * handful of z12 terrain drape targets while still covering a much larger
+     * screen area.
+     * Treating that partial overlap as "covered" drops the whole z4 main-pass
+     * drawable and leaves plain background wherever no terrain target exists.
+     *
+     * Phase-2 drape-capable layers consult this to decide whether to skip the
+     * main 2D pass for a given tile. Skip when the drape pass can cover the
+     * entire source tile; fall through to the main pass for partial/coarse
+     * overlaps so non-terrain areas stay populated instead of becoming the
+     * beige clear colour.
+     */
+    bool hasElevationCoverage(const OverscaledTileID& sourceTileID) const {
+        if (drapeCache.size() == 0) return false;
+        // Debug/visual experiment: at high pitch, low-zoom vector/raster
+        // source tiles that only partially overlap fine DEM drape targets can
+        // remain in the main pass as flat translucent polygons over the
+        // terrain. Force-skipping any source tile that overlaps a completed
+        // drape target lets us isolate that duplicate-main-pass failure mode.
+        const bool skipPartialMainPass =
+            std::getenv("KLATTRA_TERRAIN_SKIP_PARTIAL_MAIN_PASS") != nullptr;
+        // If main-pass suppression waits for the drape target's first
+        // completed render, a 2D source tile can be emitted flat while the
+        // terrain target is warming up and then remain visible after camera
+        // motion settles. This experiment treats an allocated drape target as
+        // coverage immediately.
+        const bool skipPendingMainPass =
+            std::getenv("KLATTRA_TERRAIN_SKIP_PENDING_MAIN_PASS") != nullptr;
+        bool covered = false;
+        drapeCache.visitAll([&](const OverscaledTileID& drapeID, const TerrainDrapeTargetPtr& target) {
+            if (covered) return;
+            if (!target ||
+                (!skipPendingMainPass && !target->hasCompletedRender()) ||
+                target->numDrawables() == 0 ||
+                !LayerTweaker::tilesOverlap(sourceTileID, drapeID)) {
+                return;
+            }
+            if (skipPartialMainPass || drapeID.canonical.z <= sourceTileID.canonical.z) covered = true;
+        });
+        return covered;
+    }
+
     /**
      * @brief Visit every (tileID, RenderTarget) currently in the drape cache.
      *
@@ -196,6 +277,12 @@ private:
      */
     void activateLayerGroup(bool activate, UniqueChangeRequestVec& changes);
 
+    /**
+     * @brief Remove terrain drawables and drape targets when the DEM source
+     * has no renderable cover for the current camera.
+     */
+    void clearRenderState(UniqueChangeRequestVec& changes);
+
     // Terrain mesh (shared across all tiles)
     std::optional<TerrainMesh> mesh;
 
@@ -205,8 +292,23 @@ private:
     // Terrain layer tweaker for UBO updates
     std::unique_ptr<TerrainLayerTweaker> tweaker;
 
-    // Track which tiles have terrain drawables
-    std::unordered_map<OverscaledTileID, bool> tilesWithDrawables;
+    // Existing drawables keyed by the IDEAL tile (the cover slot) — NOT
+    // by the source DEM tile. With parent-fallback in play, a single z=10
+    // parent DEM can back 16 z=12 ideal drawables, each with its own
+    // sub-rect UV remap and matrix. Previously the code keyed by the
+    // shared parent, which collapsed all 16 ideals into one z=10-density
+    // mesh and produced visibly smoothed mountains during loading.
+    std::unordered_map<OverscaledTileID, DEMBinding> currentBindings;
+
+    // Cached 1×1 RGBA texture encoding Mapbox-RGB elevation 0. Used as the
+    // DEM input for terrain drawables whose tile is in the cover set but
+    // doesn't yet have parsed DEM data (still loading, no archive coverage,
+    // or parse failed). Mirrors `_emptyDemTexture` in maplibre-gl-js's
+    // `src/render/terrain.ts`. Without this fallback, the loop in
+    // `update()` would `continue;` past such tiles and leave holes in the
+    // terrain mesh — visible as the flat 2D basemap bleeding through where
+    // the mesh should be.
+    std::shared_ptr<gfx::Texture2D> emptyDEMTexture;
 
     // Cached DEM image data, keyed by the overscaled tile ID. Holds a
     // shared_ptr to the underlying image so CPU-side elevation lookups
@@ -214,15 +316,23 @@ private:
     // mid-frame. Refreshed each update() to match the current cover set.
     std::unordered_map<OverscaledTileID, std::shared_ptr<const PremultipliedImage>> demImagesByTile;
 
-    // Per-tile drape RenderTargets. When terrain is active, the 2D layers
-    // for each visible tile render into one of these offscreen textures
-    // instead of straight to the framebuffer; the terrain shader then
-    // samples the matching target as the surface colour of the displaced
-    // mesh. Phase 1 just allocates and lifecycle-manages the targets; the
-    // actual layer routing into them is Phase 2 (see FINISH_TERRAIN.md).
+    // GPU DEM texture cache keyed by the actual DEM tile's overscaled ID.
+    // Persisted across frames so a child drawable doing parent-fallback
+    // can borrow a parent's texture without re-uploading it. Pruned each
+    // frame to entries that are still reachable from a tile in the cover
+    // (either directly or as an ancestor of one).
+    std::unordered_map<OverscaledTileID, std::shared_ptr<gfx::Texture2D>> demTexturesByTile;
+
+    // Per-ideal-tile drape RenderTargets. When terrain is active, the 2D
+    // layers for each visible terrain cover slot render into one of these
+    // offscreen textures instead of straight to the framebuffer; the terrain
+    // shader then samples the matching target as the surface colour of the
+    // displaced mesh. DEM textures may still use parent fallback, but drape
+    // targets stay keyed to the drawable's ideal tile so close views do not
+    // inherit coarse parent map colour.
     TerrainDrapeCache drapeCache;
 
-    // Pixel size of each drape target. 512 (= DEM tile dimension) made
+    // Maximum pixel size of each close-zoom drape target. 512 (= DEM tile dimension) made
     // texture-vs-elevation sampling line up 1:1 in the vertex shader, but
     // looked visibly blurry on flat surfaces (glaciers, lake ice) at close
     // zoom — the drape's per-pixel basemap fills are larger than screen
@@ -232,15 +342,35 @@ private:
     // comfortable on modern iOS hardware) and restores crisp polygon
     // edges, label antialiasing, and shadow detail on flat drape
     // surfaces. The mesh vertex shader's bilinear sampling handles
-    // the 4:1 ratio mismatch with the elevation grid fine.
+    // the 4:1 ratio mismatch with the elevation grid fine. Lower zooms
+    // allocate smaller targets in RenderTerrain::update because terrain
+    // cover padding can make many z8/z10 drape targets visible at once.
     static constexpr int32_t DRAPE_TARGET_SIZE = 2048;
 
     // Mesh resolution (vertices per side). The index buffer uses UInt16,
-    // so total vertex count must stay under 65,536 — that's (MESH_SIZE+1)²
-    // and caps MESH_SIZE at 254 (255² = 65,025 vertices, 129,032 triangles
-    // per tile). This is the maximum density we can run without switching
-    // to UInt32 indices.
-    static constexpr size_t MESH_SIZE = 254;
+    // so total vertex count must stay under 65,536. With perimeter skirts
+    // added by `generateMesh()` to hide basemap bleed-through at tile
+    // edges, the budget is:
+    //   (MESH_SIZE+1)²  main grid vertices
+    // + 4*(MESH_SIZE+1) skirt vertices (one strip per edge)
+    // = 65,532 at MESH_SIZE=253 — 3 vertices below the UInt16 ceiling.
+    // (The previous mesh-only design fit MESH_SIZE=254 = 65,025 verts.)
+    // Switching to UInt32 indices would let us push higher, but 253×253
+    // is already overkill for the 514×514 DEM the texture vertex shader
+    // samples — every mesh cell oversamples the DEM bilinearly.
+    static constexpr size_t MESH_SIZE = 253;
+
+    // Vertical drop (metres of absolute elevation) from each tile-edge
+    // skirt vertex to its "below the mesh" anchor. Picked to clear the
+    // basemap's flat z=0 plane even when the mesh edge sits on a 2 km
+    // peak with exaggeration=2 (worst case in the Klättra coverage):
+    //     2000 m × 2 = 4000 m mesh elevation
+    // → 4000 m − 5000 m skirt drop = −1000 m, comfortably below z=0.
+    // The drape texture is sampled at the edge's UV so the skirt face
+    // visually continues the basemap content downward — the camera no
+    // longer sees a hard "mesh ends, basemap starts" seam where it
+    // looks past the tile boundary or steeply across the mesh edge.
+    static constexpr float SKIRT_DROP_METERS = 5000.0f;
 
     // Cached DEM source
     RenderSource* demSource = nullptr;
@@ -265,6 +395,12 @@ private:
     std::shared_ptr<gfx::Texture2D> createDEMTexture(gfx::Context& context, const DEMData& demData);
 
     /**
+     * @brief Lazy-create the 1×1 empty DEM texture used when a tile in
+     * cover has no real DEM data yet.
+     */
+    std::shared_ptr<gfx::Texture2D> getOrCreateEmptyDEMTexture(gfx::Context& context);
+
+    /**
      * @brief Create a terrain drawable for a specific tile
      * @param context Graphics context
      * @param shaders Shader registry
@@ -274,8 +410,8 @@ private:
      */
     std::unique_ptr<gfx::Drawable> createDrawableForTile(gfx::Context& context,
                                                           gfx::ShaderRegistry& shaders,
-                                                          const OverscaledTileID& tileID,
-                                                          std::shared_ptr<gfx::Texture2D> demTexture);
+                                                          const OverscaledTileID& idealID,
+                                                          const DEMBinding& binding);
 };
 
 } // namespace mbgl

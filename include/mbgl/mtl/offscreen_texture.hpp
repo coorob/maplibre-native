@@ -17,6 +17,8 @@ public:
 
     PremultipliedImage readStillImage() override;
     const gfx::Texture2DPtr& getTexture() override;
+    void setMipmapped(bool enabled) override;
+    void generateMipmaps() override;
 };
 
 } // namespace mtl

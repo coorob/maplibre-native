@@ -22,6 +22,7 @@
 #import "MBXFrameTimeGraphView.h"
 #import "MLNMapView_Experimental.h"
 #import <objc/runtime.h>
+#import <sys/stat.h>
 
 // Plug In Examples
 #import "PluginLayerExample.h"
@@ -242,6 +243,11 @@ CLLocationCoordinate2D randomWorldCoordinate(void) {
 @property (nonatomic) NSMutableArray<UIWindow *> *helperWindows;
 @property (nonatomic) NSMutableArray<UIView *> *contentInsetsOverlays;
 @property (nonatomic, copy) void (^locationBlock)(void);
+@property (nonatomic) BOOL isAdjustingCameraForTerrain;
+@property (nonatomic) NSTimer *klattraCaptureTriggerTimer;
+@property (nonatomic) NSTimeInterval klattraLastCaptureTriggerMTime;
+@property (nonatomic) BOOL klattraCameraPlaybackRunning;
+@property (nonatomic) NSInteger klattraCameraPlaybackStep;
 @end
 
 @interface MLNMapView (MBXViewController)
@@ -261,6 +267,169 @@ CLLocationCoordinate2D randomWorldCoordinate(void) {
     NSLock* _loadLock;
 
     MBXTileLodMode _tileLodMode;
+}
+
+static double MBXKlattraClamp(double value, double minimum, double maximum) {
+    return MAX(minimum, MIN(maximum, value));
+}
+
+static double MBXKlattraMix(double a, double b, double t) {
+    return a + (b - a) * MBXKlattraClamp(t, 0.0, 1.0);
+}
+
+static double MBXKlattraTraskaTerrainExaggeration(double zoom, double pitch) {
+    // Mirrors Traska web's `terrainExaggerationForCamera()` in TrailMap.jsx:
+    // distant/oblique cameras carry a bit more relief, while close/top-down
+    // cameras calm down for label and trail readability.
+    const double distanceRelief = MBXKlattraMix(1.62, 1.12, (zoom - 6.0) / 9.0);
+    const double pitchRelief = MBXKlattraMix(-0.04, 0.18, pitch / 65.0);
+    const double exaggeration = MBXKlattraClamp(distanceRelief + pitchRelief, 1.05, 1.68);
+    return round(exaggeration * 100.0) / 100.0;
+}
+
+static double MBXKlattraTerrainExaggeration(NSDictionary<NSString *, NSString *> *environment,
+                                            double zoom,
+                                            double pitch) {
+    NSString *terrainExaggerationEnv = environment[@"KLATTRA_TERRAIN_EXAGGERATION"];
+    if (terrainExaggerationEnv.length) {
+        return MBXKlattraClamp(terrainExaggerationEnv.doubleValue, 1.0, 2.35);
+    }
+    return MBXKlattraTraskaTerrainExaggeration(zoom, pitch);
+}
+
+static double MBXKlattraEnvironmentDouble(NSDictionary<NSString *, NSString *> *environment,
+                                          NSString *key,
+                                          double fallback,
+                                          double minimum,
+                                          double maximum) {
+    NSString *value = environment[key];
+    if (!value.length) return fallback;
+    return MBXKlattraClamp(value.doubleValue, minimum, maximum);
+}
+
+static NSSet<NSString *> *MBXKlattraCommaSeparatedSet(NSString *value) {
+    if (!value.length) return [NSSet set];
+
+    NSMutableSet<NSString *> *result = [NSMutableSet set];
+    NSCharacterSet *trim = [NSCharacterSet whitespaceAndNewlineCharacterSet];
+    for (NSString *part in [value componentsSeparatedByString:@","]) {
+        NSString *item = [part stringByTrimmingCharactersInSet:trim];
+        if (item.length) [result addObject:item];
+    }
+    return result;
+}
+
+static NSMutableDictionary *MBXKlattraMutableChildDictionary(NSMutableDictionary *dictionary,
+                                                             NSString *key) {
+    NSMutableDictionary *child = dictionary[key];
+    if (![child isKindOfClass:[NSMutableDictionary class]]) {
+        child = [NSMutableDictionary dictionary];
+        dictionary[key] = child;
+    }
+    return child;
+}
+
+static void MBXKlattraSetLayerVisibility(NSMutableDictionary *layer, NSString *visibility) {
+    MBXKlattraMutableChildDictionary(layer, @"layout")[@"visibility"] = visibility;
+}
+
+static NSString *MBXKlattraProvenanceColor(NSUInteger index) {
+    static NSArray<NSString *> *colors;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        colors = @[
+            @"#ff1744", @"#00e5ff", @"#76ff03", @"#ffea00",
+            @"#d500f9", @"#ff9100", @"#00bfa5", @"#2979ff",
+            @"#c51162", @"#64dd17", @"#ffd600", @"#aa00ff",
+            @"#00c853", @"#ff6d00", @"#304ffe", @"#aeea00",
+        ];
+    });
+    return colors[index % colors.count];
+}
+
+static NSArray *MBXKlattraZoomOpacity(NSArray<NSNumber *> *stops) {
+    NSMutableArray *expression = [NSMutableArray arrayWithObjects:@"interpolate", @[@"linear"], @[@"zoom"], nil];
+    [expression addObjectsFromArray:stops];
+    return expression;
+}
+
+static NSArray *MBXKlattraZoomStops(NSArray *stops) {
+    NSMutableArray *expression = [NSMutableArray arrayWithObjects:@"interpolate", @[@"linear"], @[@"zoom"], nil];
+    [expression addObjectsFromArray:stops];
+    return expression;
+}
+
+static void MBXKlattraApplyTerrainStyleLOD(NSMutableArray *layers,
+                                           NSDictionary<NSString *, NSString *> *environment) {
+    NSString *mode = environment[@"KLATTRA_TERRAIN_STYLE_LOD"];
+    if (!mode.length) {
+        mode = @"soft";
+    }
+    if ([mode isEqualToString:@"0"] || [mode isEqualToString:@"off"] || [mode isEqualToString:@"none"]) {
+        NSLog(@"[Klättra] terrain style LOD disabled");
+        return;
+    }
+
+    NSDictionary<NSString *, NSArray *> *softFillOpacity = @{
+        // The exact bad-frame capture showed the sampled drape texture already
+        // contained dense white glacier/snow polygons. Bring those back only
+        // when the user is close enough for the shapes to read as geography.
+        @"land-glaciar": MBXKlattraZoomOpacity(@[@8, @0.0, @10.5, @0.0, @12.0, @0.16, @13.2, @0.58, @14.0, @0.92]),
+        // Wetlands/protected-area fills are useful, but in pitched terrain
+        // they become high-frequency grey/green noise at mid zoom.
+        @"sankmark": MBXKlattraZoomOpacity(@[@8, @0.0, @11.0, @0.04, @12.5, @0.14, @14.0, @0.30]),
+        @"skyddad-natur": MBXKlattraZoomOpacity(@[@8, @0.0, @11.5, @0.0, @13.0, @0.05, @14.0, @0.12]),
+        @"skog-barr": MBXKlattraZoomOpacity(@[@8, @0.42, @10.5, @0.62, @12.5, @0.92]),
+        @"skog-lov": MBXKlattraZoomOpacity(@[@8, @0.42, @10.5, @0.62, @12.5, @0.92]),
+        @"skog-fjallbjork": MBXKlattraZoomOpacity(@[@8, @0.42, @10.5, @0.62, @12.5, @0.92]),
+    };
+    NSDictionary<NSString *, NSArray *> *softFillColor = @{
+        // Low-zoom pitched views alias badly when the topo "open land" polygons
+        // contrast hard against the background. Blend the broad land family into
+        // one base terrain tone at distance, then restore the topo colors close in.
+        @"land-open": MBXKlattraZoomStops(@[@8, @"#E8DDBE", @11.0, @"#EADFC2", @13.0, @"#EFE3C2"]),
+        @"land-aker": MBXKlattraZoomStops(@[@8, @"#E8DDBE", @11.0, @"#EADFC2", @13.0, @"#F2E0A8"]),
+        @"land-kalfjall": MBXKlattraZoomStops(@[@8, @"#E8DDBE", @11.0, @"#E3D6B7", @13.0, @"#DCCEB0"]),
+        @"land-glaciar": MBXKlattraZoomStops(@[@8, @"#E8DDBE", @11.0, @"#E8DDBE", @13.0, @"#DFEAF0"]),
+    };
+    NSSet<NSString *> *strictHiddenLayers =
+        [NSSet setWithObjects:@"land-glaciar", @"sankmark", @"skyddad-natur", nil];
+
+    NSMutableArray<NSString *> *applied = [NSMutableArray array];
+    const BOOL strict = [mode isEqualToString:@"strict"] || [mode isEqualToString:@"hide"];
+    for (NSMutableDictionary *layer in layers) {
+        if (![layer isKindOfClass:[NSMutableDictionary class]]) continue;
+        NSString *layerID = layer[@"id"];
+        if (!layerID.length) continue;
+        NSString *type = layer[@"type"];
+
+        if ([type isEqualToString:@"background"]) {
+            NSMutableDictionary *paint = MBXKlattraMutableChildDictionary(layer, @"paint");
+            paint[@"background-color"] = MBXKlattraZoomStops(@[@8, @"#E8DDBE", @11.0, @"#EDE2C7", @13.0, @"#F4EAD0"]);
+            [applied addObject:[layerID stringByAppendingString:@":base"]];
+            continue;
+        }
+
+        if (strict && [strictHiddenLayers containsObject:layerID]) {
+            MBXKlattraSetLayerVisibility(layer, @"none");
+            [applied addObject:[layerID stringByAppendingString:@":hidden"]];
+            continue;
+        }
+
+        NSArray *color = softFillColor[layerID];
+        NSArray *opacity = softFillOpacity[layerID];
+        if (color || opacity) {
+            NSMutableDictionary *paint = MBXKlattraMutableChildDictionary(layer, @"paint");
+            if (color) paint[@"fill-color"] = color;
+            if (opacity) paint[@"fill-opacity"] = opacity;
+            paint[@"fill-antialias"] = @(NO);
+            [applied addObject:[layerID stringByAppendingString:@":soft"]];
+        }
+    }
+
+    NSLog(@"[Klättra] terrain style LOD mode=%@ applied=%@",
+          mode,
+          [applied componentsJoinedByString:@","]);
 }
 
 // MARK: - Setup & Teardown
@@ -284,11 +453,166 @@ CLLocationCoordinate2D randomWorldCoordinate(void) {
 
 }
 
+- (void)startKlattraCaptureTriggerIfNeededWithEnvironment:(NSDictionary<NSString *, NSString *> *)environment {
+    NSString *triggerPath = environment[@"KLATTRA_CAPTURE_TRIGGER_FILE"];
+    if (!triggerPath.length || self.klattraCaptureTriggerTimer) {
+        return;
+    }
+
+    __weak typeof(self) weakSelf = self;
+    self.klattraCaptureTriggerTimer = [NSTimer scheduledTimerWithTimeInterval:0.25 repeats:YES block:^(NSTimer *timer) {
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (!strongSelf) {
+            [timer invalidate];
+            return;
+        }
+
+        struct stat info {};
+        if (::stat(triggerPath.fileSystemRepresentation, &info) != 0) {
+            return;
+        }
+
+        const NSTimeInterval mtime =
+            static_cast<NSTimeInterval>(info.st_mtimespec.tv_sec) +
+            static_cast<NSTimeInterval>(info.st_mtimespec.tv_nsec) / 1000000000.0;
+        if (mtime <= strongSelf.klattraLastCaptureTriggerMTime) {
+            return;
+        }
+
+        strongSelf.klattraLastCaptureTriggerMTime = mtime;
+        MLNMapCamera *currentCamera = strongSelf.mapView.camera;
+        MLNMapCamera *tickledCamera =
+            [MLNMapCamera cameraLookingAtCenterCoordinate:currentCamera.centerCoordinate
+                                           acrossDistance:currentCamera.viewingDistance
+                                                    pitch:currentCamera.pitch
+                                                  heading:currentCamera.heading + 0.03];
+
+        NSLog(@"[Klättra CAPTURE_TRIGGER] file=%@ mtime=%.6f camera-tickle=1 lat=%.6f lon=%.6f distance=%.0f pitch=%.2f heading=%.2f",
+              triggerPath,
+              mtime,
+              currentCamera.centerCoordinate.latitude,
+              currentCamera.centerCoordinate.longitude,
+              currentCamera.viewingDistance,
+              currentCamera.pitch,
+              currentCamera.heading);
+
+        [strongSelf.mapView setCamera:tickledCamera withDuration:0 animationTimingFunction:nil completionHandler:^{
+            __strong typeof(weakSelf) innerSelf = weakSelf;
+            if (innerSelf) {
+                [innerSelf.mapView setCamera:currentCamera withDuration:0 animationTimingFunction:nil completionHandler:nil];
+            }
+        }];
+    }];
+}
+
+- (NSArray<NSDictionary<NSString *, id> *> *)klattraCameraPlaybackStepsWithEnvironment:(NSDictionary<NSString *, NSString *> *)environment {
+    const double baseLat = MBXKlattraEnvironmentDouble(environment, @"KLATTRA_CAMERA_LAT", self.mapView.camera.centerCoordinate.latitude, -90.0, 90.0);
+    const double baseLon = MBXKlattraEnvironmentDouble(environment, @"KLATTRA_CAMERA_LON", self.mapView.camera.centerCoordinate.longitude, -180.0, 180.0);
+    const double baseDistance = MBXKlattraEnvironmentDouble(environment, @"KLATTRA_CAMERA_DISTANCE", self.mapView.camera.viewingDistance, 2500.0, 120000.0);
+    const double basePitch = MBXKlattraEnvironmentDouble(environment, @"KLATTRA_CAMERA_PITCH", self.mapView.camera.pitch, 0.0, 60.0);
+    const double baseHeading = MBXKlattraEnvironmentDouble(environment, @"KLATTRA_CAMERA_HEADING", self.mapView.camera.heading, 0.0, 360.0);
+    const double stepDuration = MBXKlattraEnvironmentDouble(environment, @"KLATTRA_CAMERA_PLAYBACK_STEP_SEC", 1.15, 0.05, 8.0);
+
+    const double midDistance = MBXKlattraClamp(baseDistance * 0.72, 6500.0, 28000.0);
+    const double closeDistance = MBXKlattraClamp(baseDistance * 0.46, 5200.0, 18000.0);
+    const double wideDistance = MBXKlattraClamp(baseDistance * 1.45, 13000.0, 60000.0);
+    const double latStep = 0.034;
+    const double lonStep = 0.060;
+
+    return @[
+        @{@"name": @"settle-base", @"lat": @(baseLat), @"lon": @(baseLon), @"distance": @(baseDistance), @"pitch": @(basePitch), @"heading": @(baseHeading), @"duration": @(0.35)},
+        @{@"name": @"zoom-in", @"lat": @(baseLat), @"lon": @(baseLon), @"distance": @(midDistance), @"pitch": @(basePitch), @"heading": @(baseHeading), @"duration": @(stepDuration)},
+        @{@"name": @"pan-north-east", @"lat": @(baseLat + latStep), @"lon": @(baseLon + lonStep), @"distance": @(midDistance), @"pitch": @(basePitch), @"heading": @(baseHeading), @"duration": @(stepDuration)},
+        @{@"name": @"zoom-close", @"lat": @(baseLat + latStep), @"lon": @(baseLon + lonStep), @"distance": @(closeDistance), @"pitch": @(basePitch), @"heading": @(baseHeading + 8.0), @"duration": @(stepDuration)},
+        @{@"name": @"pan-south-west", @"lat": @(baseLat - latStep), @"lon": @(baseLon - lonStep), @"distance": @(closeDistance), @"pitch": @(basePitch), @"heading": @(baseHeading + 8.0), @"duration": @(stepDuration)},
+        @{@"name": @"zoom-wide", @"lat": @(baseLat - latStep), @"lon": @(baseLon - lonStep), @"distance": @(wideDistance), @"pitch": @(basePitch), @"heading": @(baseHeading - 10.0), @"duration": @(stepDuration)},
+        @{@"name": @"wide-cross-tile", @"lat": @(baseLat + latStep * 1.4), @"lon": @(baseLon - lonStep * 1.2), @"distance": @(wideDistance), @"pitch": @(basePitch), @"heading": @(baseHeading - 10.0), @"duration": @(stepDuration)},
+        @{@"name": @"return-mid", @"lat": @(baseLat), @"lon": @(baseLon), @"distance": @(midDistance), @"pitch": @(basePitch), @"heading": @(baseHeading), @"duration": @(stepDuration)},
+    ];
+}
+
+- (void)runKlattraCameraPlaybackStep {
+    NSDictionary<NSString *, NSString *> *environment = NSProcessInfo.processInfo.environment;
+    NSArray<NSDictionary<NSString *, id> *> *steps = [self klattraCameraPlaybackStepsWithEnvironment:environment];
+    if (!steps.count) {
+        self.klattraCameraPlaybackRunning = NO;
+        return;
+    }
+
+    const NSInteger loops = (NSInteger)MBXKlattraEnvironmentDouble(environment, @"KLATTRA_CAMERA_PLAYBACK_LOOPS", 3.0, 0.0, 1000.0);
+    const NSInteger loopIndex = self.klattraCameraPlaybackStep / (NSInteger)steps.count;
+    if (loops > 0 && loopIndex >= loops) {
+        NSLog(@"[Klättra CAMERA_PLAYBACK] finished loops=%ld steps=%lu", (long)loops, (unsigned long)steps.count);
+        self.klattraCameraPlaybackRunning = NO;
+        return;
+    }
+
+    const NSInteger stepIndex = self.klattraCameraPlaybackStep % (NSInteger)steps.count;
+    NSDictionary<NSString *, id> *step = steps[stepIndex];
+    NSString *name = step[@"name"] ?: @"";
+    const double lat = [step[@"lat"] doubleValue];
+    const double lon = [step[@"lon"] doubleValue];
+    const double distance = [step[@"distance"] doubleValue];
+    const double pitch = [step[@"pitch"] doubleValue];
+    const double heading = [step[@"heading"] doubleValue];
+    const double duration = [step[@"duration"] doubleValue];
+
+    MLNMapCamera *camera =
+        [MLNMapCamera cameraLookingAtCenterCoordinate:CLLocationCoordinate2DMake(lat, lon)
+                                       acrossDistance:distance
+                                                pitch:pitch
+                                              heading:heading];
+
+    NSLog(@"[Klättra CAMERA_PLAYBACK] loop=%ld step=%ld/%lu name=%@ lat=%.6f lon=%.6f distance=%.0f pitch=%.1f heading=%.1f duration=%.2f",
+          (long)loopIndex,
+          (long)(stepIndex + 1),
+          (unsigned long)steps.count,
+          name,
+          lat,
+          lon,
+          distance,
+          pitch,
+          heading,
+          duration);
+
+    __weak typeof(self) weakSelf = self;
+    [self.mapView setCamera:camera withDuration:duration animationTimingFunction:nil completionHandler:^{
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (!strongSelf) return;
+        [strongSelf updateKlattraTerrainExaggerationForMapView:strongSelf.mapView];
+        [strongSelf updateKlattraContourOpacityForMapView:strongSelf.mapView];
+        strongSelf.klattraCameraPlaybackStep += 1;
+        const double pause = MBXKlattraEnvironmentDouble(environment, @"KLATTRA_CAMERA_PLAYBACK_PAUSE_SEC", 0.28, 0.0, 5.0);
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(pause * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            [strongSelf runKlattraCameraPlaybackStep];
+        });
+    }];
+}
+
+- (void)startKlattraCameraPlaybackIfNeededWithEnvironment:(NSDictionary<NSString *, NSString *> *)environment {
+    if (![environment[@"KLATTRA_CAMERA_PLAYBACK"] boolValue] || self.klattraCameraPlaybackRunning) {
+        return;
+    }
+
+    self.klattraCameraPlaybackRunning = YES;
+    self.klattraCameraPlaybackStep = 0;
+    const double delay = MBXKlattraEnvironmentDouble(environment, @"KLATTRA_CAMERA_PLAYBACK_DELAY_SEC", 2.0, 0.0, 30.0);
+    NSLog(@"[Klättra CAMERA_PLAYBACK] scheduled delay=%.2f", delay);
+
+    __weak typeof(self) weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (!strongSelf) return;
+        [strongSelf runKlattraCameraPlaybackStep];
+    });
+}
+
 - (void)viewDidLoad
 {
     [super viewDidLoad];
 
     [self addPluginLayers];
+    self.mapView.delegate = self;
 
     // Keep track of current map state and debug preferences,
     // saving and restoring when the application's state changes.
@@ -299,9 +623,19 @@ CLLocationCoordinate2D randomWorldCoordinate(void) {
         NSLog(@"%@:%ld %@", fileName, line, message);
     };
 
-    if (!self.currentState) {
+    NSDictionary<NSString *, NSString *> *environment = NSProcessInfo.processInfo.environment;
+    [self startKlattraCaptureTriggerIfNeededWithEnvironment:environment];
+
+    BOOL forceKlattraCamera = [environment[@"KLATTRA_FORCE_CAMERA"] boolValue] ||
+        environment[@"KLATTRA_CAMERA_LAT"].length ||
+        environment[@"KLATTRA_CAMERA_LON"].length ||
+        environment[@"KLATTRA_CAMERA_DISTANCE"].length ||
+        environment[@"KLATTRA_CAMERA_PITCH"].length ||
+        environment[@"KLATTRA_CAMERA_HEADING"].length;
+
+    if (!self.currentState || forceKlattraCamera) {
         // Create a new state with the below default values
-        self.currentState = [[MBXState alloc] init];
+        if (!self.currentState) self.currentState = [[MBXState alloc] init];
 
         // Klättra: skip the user-location ornament by default so no
         // location-permission dialog blocks the map on first launch.
@@ -315,17 +649,22 @@ CLLocationCoordinate2D randomWorldCoordinate(void) {
         self.frameTimeGraphEnabled = NO;
         self.mapView.pitchEnabled = YES;
 //        [self.mapView setCenterCoordinate:C zoomLevel:10 direction:0 animated:NO];
-        // Klättra default: Kebnekaise massif (Sweden's highest peak, 2100 m).
-        // Picked for testing — most dramatic 3D terrain in our DEM coverage.
-        // Camera tuned to mirror the traska.app web 3D view: close-in,
-        // strongly pitched, looking south-west across the massif so the
-        // east-facing slopes catch the directional hillshade and the
-        // glaciated bowls (Storglaciären, Rabots) read clearly.
-        MLNMapCamera *camera = [MLNMapCamera cameraLookingAtCenterCoordinate:CLLocationCoordinate2DMake(67.9026, 18.4954)
-                                                              acrossDistance:5000
-                                                                       pitch:72
-                                                                     heading:215];
+        // Klättra default: pitched Kebnekaise terrain view for manual artifact
+        // hunting. This starts from the strongest visual-matrix case instead
+        // of the flat low-zoom repro camera.
+        CLLocationDegrees cameraLatitude = environment[@"KLATTRA_CAMERA_LAT"].length ? environment[@"KLATTRA_CAMERA_LAT"].doubleValue : 67.9026;
+        CLLocationDegrees cameraLongitude = environment[@"KLATTRA_CAMERA_LON"].length ? environment[@"KLATTRA_CAMERA_LON"].doubleValue : 18.4954;
+        CLLocationDistance cameraDistance = environment[@"KLATTRA_CAMERA_DISTANCE"].length ? environment[@"KLATTRA_CAMERA_DISTANCE"].doubleValue : 90000;
+        CGFloat cameraPitch = environment[@"KLATTRA_CAMERA_PITCH"].length ? environment[@"KLATTRA_CAMERA_PITCH"].doubleValue : 55;
+        CLLocationDirection cameraHeading = environment[@"KLATTRA_CAMERA_HEADING"].length ? environment[@"KLATTRA_CAMERA_HEADING"].doubleValue : 215;
+        MLNMapCamera *camera = [MLNMapCamera cameraLookingAtCenterCoordinate:CLLocationCoordinate2DMake(cameraLatitude, cameraLongitude)
+                                                              acrossDistance:cameraDistance
+                                                                       pitch:cameraPitch
+                                                                     heading:cameraHeading];
         [self.mapView setCamera:camera withDuration:0 animationTimingFunction:nil completionHandler:nil];
+        // The initial setCamera doesn't fire `regionDidChangeWithReason:`,
+        // so apply the terrain-altitude clamp explicitly here.
+        [self enforceTerrainCameraClampOn:self.mapView];
     } else {
         // Revert to the previously saved state
         [self restoreMapState:nil];
@@ -343,6 +682,7 @@ CLLocationCoordinate2D randomWorldCoordinate(void) {
 
     self.mapView.experimental_enableFrameRateMeasurement = YES;
     self.hudLabel.titleLabel.font = [UIFont monospacedDigitSystemFontOfSize:10 weight:UIFontWeightRegular];
+
 
     // Add fall-through single tap gesture recognizer. This will be called when
     // the map view's tap recognizers fail.
@@ -395,6 +735,7 @@ CLLocationCoordinate2D randomWorldCoordinate(void) {
 
 - (void)dealloc
 {
+    [self.klattraCaptureTriggerTimer invalidate];
     [[NSNotificationCenter defaultCenter] removeObserver:self];
 }
 
@@ -2399,13 +2740,16 @@ CLLocationCoordinate2D randomWorldCoordinate(void) {
     NSURL *targetURL = self.styleURLs[self.styleIndex];
     NSString *targetName = self.styleNames[self.styleIndex];
 
-    // Klättra hack: the published Sweden 3D style on Supabase has terrain
-    // enabled but no hillshade layer, so the topo basemap drapes onto the
-    // mesh as a flat skin. The web app injects a hillshade layer at runtime
-    // via map.addLayer(...) — iOS lacks MLNHillshadeStyleLayer bindings, so
-    // we fetch the style JSON, splice in a hillshade layer (matching the
-    // web's exaggeration ramp), and load via styleJSON.
+    // Klättra hack: fetch the published Sweden 3D style, apply the same
+    // camera-dependent terrain exaggeration as Traska, and load via
+    // styleJSON. A draped hillshade layer used to be injected here, but
+    // that made low-zoom hillshade pixels part of the terrain drape
+    // targets and produced the persistent grey/white block artifacts.
+    // The durable path is DEM-derived relief in the final terrain shader;
+    // KLATTRA_USE_DRAPED_HILLSHADE=1 remains as an A/B comparison switch.
     if ([targetName hasPrefix:@"Klättra"]) {
+        const double patchCameraZoom = self.mapView.zoomLevel;
+        const CGFloat patchCameraPitch = self.mapView.camera.pitch;
         NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithURL:targetURL
             completionHandler:^(NSData *data, __unused NSURLResponse *response, NSError *error) {
                 if (error || !data) {
@@ -2428,30 +2772,93 @@ CLLocationCoordinate2D randomWorldCoordinate(void) {
                     });
                     return;
                 }
+                NSDictionary<NSString *, NSString *> *environment = NSProcessInfo.processInfo.environment;
+                double terrainExaggeration = MBXKlattraTerrainExaggeration(environment,
+                                                                           patchCameraZoom,
+                                                                           patchCameraPitch);
+                NSString *hillshadeScaleEnv = environment[@"KLATTRA_HILLSHADE_SCALE"];
+                // Native currently uses the classic MapLibre hillshade shader,
+                // while Traska web uses `hillshade-method: combined` with an
+                // illumination altitude. A small boost lands closer to the web
+                // relief without falling back to the noisier z13 DEM source.
+                double hillshadeScale = 1.35;
+                if (hillshadeScaleEnv.length) {
+                    hillshadeScale = hillshadeScaleEnv.doubleValue;
+                }
+                hillshadeScale = MIN(2.0, MAX(0.0, hillshadeScale));
+                NSLog(@"[Klättra] hillshade-scale-env=%@ effective=%.2f",
+                      hillshadeScaleEnv.length ? hillshadeScaleEnv : @"<unset>",
+                      hillshadeScale);
+                BOOL useDrapedHillshade = [environment[@"KLATTRA_USE_DRAPED_HILLSHADE"] boolValue];
+                BOOL disableHillshade = !useDrapedHillshade ||
+                    [environment[@"KLATTRA_DISABLE_HILLSHADE"] boolValue] ||
+                    hillshadeScale <= 0.0;
                 NSMutableArray *layers = style[@"layers"];
+                NSMutableDictionary *sources = style[@"sources"];
+                NSArray *swedenTopoBounds = @[@10.35, @55.0, @24.7, @69.3];
+                for (NSString *sourceID in @[@"topo", @"traska-poi"]) {
+                    NSMutableDictionary *source = sources[sourceID];
+                    if ([source isKindOfClass:[NSMutableDictionary class]] && !source[@"bounds"]) {
+                        source[@"bounds"] = swedenTopoBounds;
+                    }
+                }
+                NSMutableDictionary *terrainSource = sources[@"terrain-dem"];
+                NSString *hillshadeSourceID = @"terrain-dem";
+                NSInteger hillshadeDEMMaxzoom = environment[@"KLATTRA_HILLSHADE_DEM_MAXZOOM"].length
+                    ? environment[@"KLATTRA_HILLSHADE_DEM_MAXZOOM"].integerValue
+                    : 11;
+                if ([terrainSource isKindOfClass:[NSMutableDictionary class]]) {
+                    terrainSource[@"minzoom"] = @8;
+                    terrainSource[@"maxzoom"] = @13;
+                    terrainSource[@"bounds"] = swedenTopoBounds;
+                    if (!disableHillshade &&
+                        [sources isKindOfClass:[NSMutableDictionary class]] &&
+                        ![environment[@"KLATTRA_HILLSHADE_USE_TERRAIN_SOURCE"] boolValue]) {
+                        NSMutableDictionary *hillshadeSource = [terrainSource mutableCopy];
+                        hillshadeSource[@"maxzoom"] = @(MAX(8, MIN(13, hillshadeDEMMaxzoom)));
+                        sources[@"hillshade-dem"] = hillshadeSource;
+                        hillshadeSourceID = @"hillshade-dem";
+                    }
+                }
                 BOOL alreadyHasHillshade = NO;
                 for (NSDictionary *layer in layers) {
                     if ([layer[@"type"] isEqualToString:@"hillshade"]) { alreadyHasHillshade = YES; break; }
                 }
-                if (!alreadyHasHillshade && style[@"sources"][@"terrain-dem"]) {
-                    NSDictionary *hillshade = @{
+                if (disableHillshade) {
+                    NSIndexSet *hillshadeLayerIndexes = [layers indexesOfObjectsPassingTest:^BOOL(id layer, NSUInteger idx, BOOL *stop) {
+                        (void)idx;
+                        (void)stop;
+                        return [layer isKindOfClass:[NSDictionary class]] &&
+                            [layer[@"type"] isEqualToString:@"hillshade"];
+                    }];
+                    if (hillshadeLayerIndexes.count) {
+                        [layers removeObjectsAtIndexes:hillshadeLayerIndexes];
+                    }
+                    if ([sources isKindOfClass:[NSMutableDictionary class]]) {
+                        [sources removeObjectForKey:@"hillshade-dem"];
+                    }
+                    hillshadeSourceID = @"<disabled>";
+                    alreadyHasHillshade = NO;
+                }
+                if (!disableHillshade && !alreadyHasHillshade && sources[hillshadeSourceID]) {
+                    NSMutableDictionary *hillshade = [@{
                         @"id": @"hillshade",
                         @"type": @"hillshade",
-                        @"source": @"terrain-dem",
+                        @"source": hillshadeSourceID,
                         @"minzoom": @5,
-                        @"paint": @{
-                            // Softer ramp than before: near-black shadows
-                            // amplified the per-tile DEM seam artifacts.
-                            // Warm brown shadow + cream highlight reads as
-                            // terrain depth without making tile boundaries
-                            // jump out as dark bands.
+                        @"paint": [@{
+                            // Match Traska web's terrain relief ramp.
                             @"hillshade-exaggeration": @[@"interpolate", @[@"linear"], @[@"zoom"],
-                                                          @5, @0.45, @10, @0.65, @14, @0.8],
-                            @"hillshade-shadow-color": @"#594532",
-                            @"hillshade-highlight-color": @"#fff5e0",
-                            @"hillshade-accent-color": @"#806040",
-                        },
-                    };
+                                                          @5, @(0.16 * hillshadeScale),
+                                                          @10, @(0.26 * hillshadeScale),
+                                                          @14, @(0.34 * hillshadeScale)],
+                            @"hillshade-illumination-direction": @335,
+                            @"hillshade-illumination-anchor": @"viewport",
+                            @"hillshade-shadow-color": @"#38483f",
+                            @"hillshade-highlight-color": @"#fff4d8",
+                            @"hillshade-accent-color": @"#536357",
+                        } mutableCopy],
+                    } mutableCopy];
                     // Insert AFTER all opaque basemap fills/lines but BEFORE
                     // symbols (icons + text labels). Putting hillshade right
                     // after the background gets it instantly covered by every
@@ -2463,11 +2870,31 @@ CLLocationCoordinate2D randomWorldCoordinate(void) {
                     }
                     [layers insertObject:hillshade atIndex:insertIdx];
                 }
-                // Also bump terrain exaggeration so the mesh extrusion is
-                // unmistakable from the dramatic Kebnekaise camera angle.
+                // Keep terrain exaggeration in the same visual range as
+                // Traska web. Forcing 2.5 was useful while proving the mesh
+                // existed, but it exaggerates low-zoom coverage differences.
                 NSMutableDictionary *terrain = style[@"terrain"];
                 if ([terrain isKindOfClass:[NSMutableDictionary class]]) {
-                    terrain[@"exaggeration"] = @2.5;
+                    terrain[@"exaggeration"] = @(terrainExaggeration);
+                }
+                {
+                    BOOL allowLightOverride = [environment[@"KLATTRA_ALLOW_TERRAIN_LIGHT_OVERRIDE"] boolValue];
+                    NSString *lightStrengthEnv = allowLightOverride ? environment[@"KLATTRA_TERRAIN_LIGHT_STRENGTH"] : nil;
+                    double terrainLightStrength = lightStrengthEnv.length ? lightStrengthEnv.doubleValue : 0.08;
+                    if (allowLightOverride && [environment[@"KLATTRA_TERRAIN_SHADER_LIGHT"] isEqualToString:@"0"]) {
+                        terrainLightStrength = 0.0;
+                    }
+                    terrainLightStrength = MIN(1.5, MAX(0.0, terrainLightStrength));
+                    NSLog(@"[Klättra] terrain light override allow=%d env=%@ applied=%.2f",
+                          allowLightOverride,
+                          lightStrengthEnv ?: @"<none>",
+                          terrainLightStrength);
+                    style[@"light"] = [@{
+                        @"anchor": @"map",
+                        @"position": @[@1.15, @335, @48],
+                        @"color": @"#fff4d8",
+                        @"intensity": @(terrainLightStrength),
+                    } mutableCopy];
                 }
 
                 // (Earlier version dropped land-glaciar / ofm-landcover-ice /
@@ -2479,51 +2906,150 @@ CLLocationCoordinate2D randomWorldCoordinate(void) {
                 // before the symbol layers, i.e. above all fills) to
                 // composite shading on top of the white snow instead.)
 
-                // Hide the OpenFreeMap landcover/water fills when terrain is
-                // active. OFM's global landcover polygons are coarser than
-                // the Sweden topo source's equivalents (land-glaciar,
-                // ofm-water etc) — when both render into the drape texture,
-                // OFM's coarse polygons appear as low-resolution flat
-                // overlays that read as "the mesh is sunken in a low-res
-                // ocean with high-res islands sticking up". Keep the OFM
-                // place-name symbols (city/town labels) since those still
-                // add context the topo source doesn't have.
-                for (NSMutableDictionary *layer in layers) {
-                    if (![layer isKindOfClass:[NSMutableDictionary class]]) continue;
-                    if (![layer[@"source"] isEqualToString:@"openfreemap"]) continue;
-                    if ([layer[@"type"] isEqualToString:@"symbol"]) continue;
-                    NSMutableDictionary *layout = layer[@"layout"];
-                    if (![layout isKindOfClass:[NSMutableDictionary class]]) {
-                        layout = [NSMutableDictionary dictionary];
-                        layer[@"layout"] = layout;
+                // Keep OpenFreeMap labels for context, but do not drape its
+                // coarse non-symbol layers onto the terrain. Those generic
+                // global fills/lines overlap the Sweden topo source and show
+                // up as grey polygonal "shards" while panning close to steep
+                // terrain. Traska's own topo layers carry the actual hiking
+                // map detail we want to evaluate here.
+                BOOL showOpenFreeMapDrape = [environment[@"KLATTRA_SHOW_OPENFREEMAP_DRAPE"] boolValue];
+                if (!showOpenFreeMapDrape) {
+                    for (NSMutableDictionary *layer in layers) {
+                        if (![layer isKindOfClass:[NSMutableDictionary class]]) continue;
+                        if (![layer[@"source"] isEqualToString:@"openfreemap"]) continue;
+                        if ([layer[@"type"] isEqualToString:@"symbol"]) continue;
+                        MBXKlattraSetLayerVisibility(layer, @"none");
                     }
-                    layout[@"visibility"] = @"none";
                 }
 
-                // Hide topographic contour lines when terrain is active.
-                // Contours convey elevation on a flat 2D map; on the
-                // extruded mesh the hillshade + 3D extrusion already do
-                // that job. Draped contours show as wavy rib patterns
-                // that read as artifacts (especially across snow polygons),
-                // not useful elevation cues.
-                NSSet<NSString *> *contourLayerIDs = [NSSet setWithArray:@[
-                    @"hojdkurva-10m",
-                    @"hojdkurva-index",
-                ]];
+                MBXKlattraApplyTerrainStyleLOD(layers, environment);
+
+                NSSet<NSString *> *hiddenLayerIDs =
+                    MBXKlattraCommaSeparatedSet(environment[@"KLATTRA_HIDE_STYLE_LAYERS"]);
+                NSSet<NSString *> *showOnlyLayerIDs =
+                    MBXKlattraCommaSeparatedSet(environment[@"KLATTRA_SHOW_ONLY_STYLE_LAYERS"]);
+                if (hiddenLayerIDs.count) {
+                    NSMutableArray<NSString *> *applied = [NSMutableArray array];
+                    for (NSMutableDictionary *layer in layers) {
+                        if (![layer isKindOfClass:[NSMutableDictionary class]]) continue;
+                        NSString *layerID = layer[@"id"];
+                        if (![hiddenLayerIDs containsObject:layerID]) continue;
+                        MBXKlattraSetLayerVisibility(layer, @"none");
+                        [applied addObject:layerID];
+                    }
+                    NSLog(@"[Klättra] hidden style layers via env: %@",
+                          [applied componentsJoinedByString:@","]);
+                }
+                if (showOnlyLayerIDs.count) {
+                    NSMutableArray<NSString *> *kept = [NSMutableArray array];
+                    for (NSMutableDictionary *layer in layers) {
+                        if (![layer isKindOfClass:[NSMutableDictionary class]]) continue;
+                        NSString *layerID = layer[@"id"];
+                        NSString *type = layer[@"type"];
+                        if ([type isEqualToString:@"symbol"] || [type isEqualToString:@"background"]) continue;
+                        if ([showOnlyLayerIDs containsObject:layerID]) {
+                            MBXKlattraSetLayerVisibility(layer, @"visible");
+                            [kept addObject:layerID];
+                        } else {
+                            MBXKlattraSetLayerVisibility(layer, @"none");
+                        }
+                    }
+                    NSLog(@"[Klättra] show-only style layers via env: %@",
+                          [kept componentsJoinedByString:@","]);
+                }
+
+                // Contour-parity experiment: keep Traska's contour layers
+                // alive, but start them softly. `updateKlattraContourOpacity`
+                // adjusts them from the active zoom/pitch once the style loads.
+                NSDictionary<NSString *, NSNumber *> *initialContourOpacity = @{
+                    @"hojdkurva-10m": @0.14,
+                    @"hojdkurva-index": @0.2,
+                };
                 for (NSMutableDictionary *layer in layers) {
                     if (![layer isKindOfClass:[NSMutableDictionary class]]) continue;
-                    if (![contourLayerIDs containsObject:layer[@"id"]]) continue;
-                    NSMutableDictionary *layout = layer[@"layout"];
-                    if (![layout isKindOfClass:[NSMutableDictionary class]]) {
-                        layout = [NSMutableDictionary dictionary];
-                        layer[@"layout"] = layout;
-                    }
-                    layout[@"visibility"] = @"none";
+                    NSString *layerID = layer[@"id"];
+                    if ([hiddenLayerIDs containsObject:layerID]) continue;
+                    if (showOnlyLayerIDs.count && ![showOnlyLayerIDs containsObject:layerID]) continue;
+                    NSNumber *opacity = initialContourOpacity[layerID];
+                    if (!opacity) continue;
+                    MBXKlattraSetLayerVisibility(layer, @"visible");
+                    NSMutableDictionary *paint = MBXKlattraMutableChildDictionary(layer, @"paint");
+                    paint[@"line-opacity"] = opacity;
                 }
+
+                if ([environment[@"KLATTRA_PROVENANCE_STYLE_LAYERS"] boolValue]) {
+                    NSUInteger colorIndex = 0;
+                    for (NSMutableDictionary *layer in layers) {
+                        if (![layer isKindOfClass:[NSMutableDictionary class]]) continue;
+                        NSString *layerID = layer[@"id"];
+                        NSString *type = layer[@"type"];
+                        if ([type isEqualToString:@"symbol"] || [type isEqualToString:@"background"]) continue;
+
+                        NSString *color = MBXKlattraProvenanceColor(colorIndex++);
+                        NSMutableDictionary *paint = MBXKlattraMutableChildDictionary(layer, @"paint");
+                        if ([type isEqualToString:@"fill"]) {
+                            paint[@"fill-color"] = color;
+                            paint[@"fill-outline-color"] = color;
+                            paint[@"fill-opacity"] = @0.92;
+                        } else if ([type isEqualToString:@"line"]) {
+                            paint[@"line-color"] = color;
+                            paint[@"line-opacity"] = @0.96;
+                        } else if ([type isEqualToString:@"hillshade"]) {
+                            paint[@"hillshade-shadow-color"] = color;
+                            paint[@"hillshade-highlight-color"] = color;
+                            paint[@"hillshade-accent-color"] = color;
+                        } else if ([type isEqualToString:@"raster"]) {
+                            paint[@"raster-opacity"] = @0.9;
+                        }
+
+                        NSString *visibility = layer[@"layout"][@"visibility"] ?: @"visible";
+                        NSLog(@"[Klättra PROVENANCE] layer=%@ type=%@ source=%@ source-layer=%@ color=%@ visibility=%@",
+                              layerID,
+                              type,
+                              layer[@"source"] ?: @"",
+                              layer[@"source-layer"] ?: @"",
+                              color,
+                              visibility);
+                    }
+                }
+
+                double finalTerrainLightStrength = 0.08;
+                if ([environment[@"KLATTRA_ALLOW_TERRAIN_LIGHT_OVERRIDE"] boolValue]) {
+                    NSString *finalLightEnv = environment[@"KLATTRA_TERRAIN_LIGHT_STRENGTH"];
+                    if (finalLightEnv.length) {
+                        finalTerrainLightStrength = finalLightEnv.doubleValue;
+                    }
+                    if ([environment[@"KLATTRA_TERRAIN_SHADER_LIGHT"] isEqualToString:@"0"]) {
+                        finalTerrainLightStrength = 0.0;
+                    }
+                }
+                finalTerrainLightStrength = MIN(1.5, MAX(0.0, finalTerrainLightStrength));
+                style[@"light"] = [@{
+                    @"anchor": @"map",
+                    @"position": @[@1.15, @335, @48],
+                    @"color": @"#fff4d8",
+                    @"intensity": @(finalTerrainLightStrength),
+                } mutableCopy];
+                NSLog(@"[Klättra] final terrain light applied=%.2f allow=%d",
+                      finalTerrainLightStrength,
+                      [environment[@"KLATTRA_ALLOW_TERRAIN_LIGHT_OVERRIDE"] boolValue]);
+
                 NSData *patched = [NSJSONSerialization dataWithJSONObject:style options:0 error:nil];
                 NSString *jsonString = [[NSString alloc] initWithData:patched encoding:NSUTF8StringEncoding];
-                NSLog(@"[Klättra] patched terrain=%@ hillshade-injected=%d layers=%lu",
-                      style[@"terrain"], !alreadyHasHillshade, (unsigned long)layers.count);
+                NSLog(@"[Klättra] patched terrain=%@ terrain-exaggeration=%.2f parity-zoom=%.2f parity-pitch=%.1f light=%@ hillshade-scale=%.2f hillshade-source=%@ hillshade-dem-maxzoom=%ld draped-hillshade=%d hillshade-disabled=%d hillshade-injected=%d ofm-drape=%d layers=%lu",
+                      style[@"terrain"],
+                      terrainExaggeration,
+                      patchCameraZoom,
+                      patchCameraPitch,
+                      style[@"light"],
+                      hillshadeScale,
+                      hillshadeSourceID,
+                      (long)hillshadeDEMMaxzoom,
+                      useDrapedHillshade,
+                      disableHillshade,
+                      !disableHillshade && !alreadyHasHillshade,
+                      showOpenFreeMapDrape,
+                      (unsigned long)layers.count);
                 dispatch_async(dispatch_get_main_queue(), ^{
                     self.mapView.styleJSON = jsonString;
                 });
@@ -2587,6 +3113,119 @@ CLLocationCoordinate2D randomWorldCoordinate(void) {
 }
 
 // MARK: - MLNMapViewDelegate
+
+// Camera-mesh collision clamp for the Klättra 3D-terrain style.
+//
+// MapLibre Native's camera is positioned by (target, pitch, viewing
+// distance). At steep pitch + close zoom, the camera's altitude
+// (= viewingDistance × cos(pitch)) can fall BELOW the terrain mesh's
+// peak elevation — the near plane ends up *inside* the mesh, and
+// the framebuffer behind the clip shows through as flat background
+// at the bottom of the screen (what the user reported as "I see
+// inside the 3D object").
+//
+// The proper fix is a library-level terrain-aware camera that
+// queries DEM elevation at the camera's projected ground position
+// and constrains altitude per frame (the way Cesium / Mapbox GL JS
+// do it). That requires exposing `RenderTerrain::getElevation` to
+// the iOS layer and adding a Transform hook — substantial work,
+// out of scope for now.
+//
+// As a contained demo, this delegate observes camera changes and
+// applies a hard-coded minimum altitude that's safely above
+// Kebnekaise's 2 100 m peak. When the user pans/pitches the camera
+// such that altitude < `kMinCameraAltitude`, we recompute pitch so
+// the altitude lands on the clamp. The same trick used for proof-
+// of-concept terrain collisions in flight-sim and game-engine
+// camera systems. Real coverage-aware version belongs in the
+// library; tracked as a follow-up.
+static const CLLocationDistance kMinCameraAltitude = 2500.0; // metres — clears Kebnekaise + ~400 m clearance
+static const CLLocationDirection kMinPitchClamp     = 0.0;
+static const CLLocationDirection kMaxPitchClamp     = 60.0;  // matches Map's PITCH_MAX
+
+- (void)mapView:(MLNMapView *)mapView regionDidChangeAnimated:(BOOL)animated {
+    [self enforceTerrainCameraClampOn:mapView];
+    [self updateKlattraTerrainExaggerationForMapView:mapView];
+    [self updateKlattraContourOpacityForMapView:mapView];
+}
+
+- (void)mapView:(MLNMapView *)mapView regionIsChangingWithReason:(MLNCameraChangeReason)reason {
+    // Apply mid-gesture too so the user feels the camera "rest" against
+    // the terrain instead of letting them dive into it and snap back.
+    [self enforceTerrainCameraClampOn:mapView];
+    [self updateKlattraContourOpacityForMapView:mapView];
+}
+
+- (void)enforceTerrainCameraClampOn:(MLNMapView *)mapView {
+    if (self.isAdjustingCameraForTerrain) return;
+
+    MLNMapCamera *cam = mapView.camera;
+    const CLLocationDistance altitude       = cam.altitude;
+    const CLLocationDistance viewingDistance = cam.viewingDistance;
+    if (altitude >= kMinCameraAltitude) return;
+    if (viewingDistance <= kMinCameraAltitude) return; // can't lower pitch enough; user must zoom out
+
+    // altitude = viewingDistance × cos(pitch) → pitch = acos(altitude_target / viewingDistance)
+    const CGFloat targetPitchRad = acos(kMinCameraAltitude / viewingDistance);
+    const CGFloat targetPitchDeg = MIN(kMaxPitchClamp,
+                                       MAX(kMinPitchClamp, targetPitchRad * 180.0 / M_PI));
+    if (fabs(targetPitchDeg - cam.pitch) < 0.5) return; // already close enough
+
+    self.isAdjustingCameraForTerrain = YES;
+    MLNMapCamera *clamped = [cam copy];
+    clamped.pitch = targetPitchDeg;
+    [mapView setCamera:clamped withDuration:0 animationTimingFunction:nil completionHandler:nil];
+    self.isAdjustingCameraForTerrain = NO;
+}
+
+- (CGFloat)klattraContourOpacityForZoom:(double)zoom pitch:(CGFloat)pitch indexContour:(BOOL)indexContour {
+    const double zoomStart = indexContour ? 9.4 : 8.4;
+    const double zoomFull = indexContour ? 13.4 : 12.4;
+    const CGFloat maxOpacity = indexContour ? 0.34 : 0.26;
+    const double zoomT = MIN(1.0, MAX(0.0, (zoom - zoomStart) / (zoomFull - zoomStart)));
+    const CGFloat pitchT = MIN(1.0, MAX(0.0, pitch / 70.0));
+    const CGFloat pitchDamping = 1.0 - (0.35 * pitchT);
+    NSString *contourScaleEnv = NSProcessInfo.processInfo.environment[@"KLATTRA_CONTOUR_SCALE"];
+    const CGFloat contourScale = contourScaleEnv.length ? MIN(1.5, MAX(0.0, contourScaleEnv.doubleValue)) : 1.0;
+    return maxOpacity * zoomT * pitchDamping * contourScale;
+}
+
+- (void)updateKlattraTerrainExaggerationForMapView:(MLNMapView *)mapView {
+    MLNTerrain *terrain = mapView.style.terrain;
+    if (!terrain) return;
+
+    NSDictionary<NSString *, NSString *> *environment = NSProcessInfo.processInfo.environment;
+    const double exaggeration = MBXKlattraTerrainExaggeration(environment, mapView.zoomLevel, mapView.camera.pitch);
+    if (fabs(terrain.exaggeration - exaggeration) < 0.01) return;
+
+    NSString *sourceIdentifier = terrain.sourceIdentifier.length ? terrain.sourceIdentifier : @"terrain-dem";
+    mapView.style.terrain = [[MLNTerrain alloc] initWithSourceIdentifier:sourceIdentifier
+                                                            exaggeration:(float)exaggeration];
+}
+
+- (void)updateKlattraContourOpacityForMapView:(MLNMapView *)mapView {
+    MLNLineStyleLayer *minorContours = (MLNLineStyleLayer *)[mapView.style layerWithIdentifier:@"hojdkurva-10m"];
+    MLNLineStyleLayer *indexContours = (MLNLineStyleLayer *)[mapView.style layerWithIdentifier:@"hojdkurva-index"];
+    if (![minorContours isKindOfClass:[MLNLineStyleLayer class]] &&
+        ![indexContours isKindOfClass:[MLNLineStyleLayer class]]) {
+        return;
+    }
+
+    const double zoom = mapView.zoomLevel;
+    const CGFloat pitch = mapView.camera.pitch;
+    if ([minorContours isKindOfClass:[MLNLineStyleLayer class]]) {
+        if (minorContours.visible) {
+            minorContours.lineOpacity = [NSExpression expressionForConstantValue:
+                                         @([self klattraContourOpacityForZoom:zoom pitch:pitch indexContour:NO])];
+        }
+    }
+    if ([indexContours isKindOfClass:[MLNLineStyleLayer class]]) {
+        if (indexContours.visible) {
+            indexContours.lineOpacity = [NSExpression expressionForConstantValue:
+                                         @([self klattraContourOpacityForZoom:zoom pitch:pitch indexContour:YES])];
+        }
+    }
+}
 
 - (void)mapView:(MLNMapView *)mapView sourceDidChange:(MLNSource *)source
 {
@@ -2890,6 +3529,9 @@ CLLocationCoordinate2D randomWorldCoordinate(void) {
     // that a device with an English-language locale is already effectively
     // using locale-based country labels.
     _localizingLabels = [[self bestLanguageForUser] isEqualToString:@"en"];
+    [self updateKlattraTerrainExaggerationForMapView:mapView];
+    [self updateKlattraContourOpacityForMapView:mapView];
+    [self startKlattraCameraPlaybackIfNeededWithEnvironment:NSProcessInfo.processInfo.environment];
 }
 
 - (BOOL)mapView:(MLNMapView *)mapView shouldChangeFromCamera:(MLNMapCamera *)oldCamera toCamera:(MLNMapCamera *)newCamera {
@@ -2928,6 +3570,13 @@ CLLocationCoordinate2D randomWorldCoordinate(void) {
     if (reason != MLNCameraChangeReasonProgrammatic) {
         self.randomWalk = NO;
     }
+
+    // Apply the camera-altitude clamp here too, since this delegate
+    // method suppresses `-mapView:regionDidChangeAnimated:` when both
+    // are implemented (per MLNMapViewDelegate.h docs).
+    [self enforceTerrainCameraClampOn:mapView];
+    [self updateKlattraTerrainExaggerationForMapView:mapView];
+    [self updateKlattraContourOpacityForMapView:mapView];
 
     [self updateHUD];
     [self updateHelperMapViews];

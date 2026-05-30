@@ -68,5 +68,7 @@
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
 	<key>CADisableMinimumFrameDurationOnPhone</key><true/>
+	<key>MetalCaptureEnabled</key>
+	<true/>
 </dict>
 </plist>

@@ -30,6 +30,7 @@
 #include <mbgl/shaders/line_layer_ubo.hpp>
 #include <mbgl/shaders/shader_program_base.hpp>
 
+#include <cstdlib>
 #include <unordered_set>
 
 namespace mbgl {
@@ -38,6 +39,20 @@ using namespace style;
 using namespace shaders;
 
 namespace {
+
+bool klattraLogDrapeStale() {
+    return std::getenv("KLATTRA_LOG_DRAPE_STALE") != nullptr;
+}
+
+bool klattraDisableLineDrape() {
+    static const bool disabled = std::getenv("KLATTRA_DISABLE_LINE_DRAPE") != nullptr;
+    return disabled;
+}
+
+std::string klattraDrapeIDString(const OverscaledTileID& id) {
+    return "z" + std::to_string(static_cast<int>(id.canonical.z)) + "/" +
+           std::to_string(id.canonical.x) + "/" + std::to_string(id.canonical.y);
+}
 
 inline const LineLayer::Impl& impl_cast(const Immutable<style::Layer::Impl>& impl) {
     assert(impl->getTypeInfo() == LineLayer::Impl::staticTypeInfo());
@@ -279,6 +294,21 @@ void RenderLineLayer::update(gfx::ShaderRegistry& shaders,
         return false;
     });
 
+    // When terrain is active, main-pass line drawables for tiles with DEM
+    // coverage would render flat at z=0 and bleed through past the terrain
+    // mesh edges. Drop those — the drape variant emitted inside the per-tile
+    // loop still paints them onto the terrain mesh. Keep main-pass drawables
+    // for tiles without DEM coverage so the layer doesn't vanish at zooms
+    // below the DEM source's range. See `render_fill_layer.cpp` for the
+    // matching rationale and the gl-js `LAYERS_TO_TEXTURES` precedent in
+    // `src/webgl/render_to_texture.ts`.
+    if (activeTerrain) {
+        stats.drawablesRemoved += tileLayerGroup->removeDrawablesIf([&](gfx::Drawable& drawable) {
+            const auto& tileID = drawable.getTileID();
+            return tileID && activeTerrain->hasElevationCoverage(*tileID);
+        });
+    }
+
     // Mirror the same cover-set cleanup for every drape group this layer
     // owns inside the terrain drape cache, and drop drapeLayerTweakers
     // entries whose drape target has been evicted.
@@ -290,11 +320,31 @@ void RenderLineLayer::update(gfx::ShaderRegistry& shaders,
                 liveDrapeIDs.insert(drapeID);
                 if (auto* drapeGroup = static_cast<TileLayerGroup*>(
                         drapeTarget->getLayerGroup(layerIndex).get())) {
-                    stats.drawablesRemoved += drapeGroup->removeDrawablesIf(
+                    std::size_t removedNotInCover = 0;
+                    std::size_t removedNoOverlap = 0;
+                    const auto removed = drapeGroup->removeDrawablesIf(
                         [&](gfx::Drawable& drawable) {
                             const auto& dID = drawable.getTileID();
-                            return dID && !hasRenderTile(*dID);
+                            if (!dID) return false;
+                            if (!hasRenderTile(*dID)) {
+                                removedNotInCover++;
+                                return true;
+                            }
+                            if (!LayerTweaker::tilesOverlap(*dID, drapeID)) {
+                                removedNoOverlap++;
+                                return true;
+                            }
+                            return false;
                         });
+                    stats.drawablesRemoved += removed;
+                    if (removed && klattraLogDrapeStale()) {
+                        Log::Info(Event::Render,
+                                  "[Klättra DRAPE_STALE] layer=" + getID() +
+                                      " kind=line drape=" + klattraDrapeIDString(drapeID) +
+                                      " removed=" + std::to_string(removed) +
+                                      " not-in-cover=" + std::to_string(removedNotInCover) +
+                                      " no-overlap=" + std::to_string(removedNoOverlap));
+                    }
                 }
             });
         for (auto it = drapeLayerTweakers.begin(); it != drapeLayerTweakers.end();) {
@@ -370,6 +420,18 @@ void RenderLineLayer::update(gfx::ShaderRegistry& shaders,
         if (prevBucketID != util::SimpleIdentity::Empty && prevBucketID != bucket.getID()) {
             // This tile was previously set up from a different bucket, drop and re-create any drawables for it.
             removeTile(renderPass, tileID);
+            // Also drop drape-pass drawables for this tile (see
+            // render_fill_layer.cpp comment).
+            if (activeTerrain) {
+                activeTerrain->visitDrapeTargets(
+                    [&](const OverscaledTileID&, TerrainDrapeTargetPtr& drapeTarget) {
+                        if (!drapeTarget) return;
+                        if (auto* drapeGroup = static_cast<TileLayerGroup*>(
+                                drapeTarget->getLayerGroup(layerIndex).get())) {
+                            stats.drawablesRemoved += drapeGroup->removeDrawables(renderPass, tileID).size();
+                        }
+                    });
+            }
         }
         setRenderTileBucketID(tileID, bucket.getID());
 
@@ -385,6 +447,13 @@ void RenderLineLayer::update(gfx::ShaderRegistry& shaders,
         }
 
         const auto addDrawable = [&](std::unique_ptr<gfx::Drawable>&& drawable, LineLayerTweaker::LineType type) {
+            if (activeTerrain && activeTerrain->hasElevationCoverage(tileID)) {
+                // Skip main-pass — drape variant carries this layer onto
+                // the terrain mesh. See cleanup-on-terrain block above.
+                // When this tile has no DEM coverage, fall through to the
+                // main-pass emit so the layer doesn't vanish.
+                return;
+            }
             drawable->setTileID(tileID);
             drawable->setType(mbgl::underlying_type(type));
             drawable->setLayerTweaker(layerTweaker);
@@ -424,7 +493,7 @@ void RenderLineLayer::update(gfx::ShaderRegistry& shaders,
                                                 const gfx::ShaderGroupPtr& shaderGroup,
                                                 const std::string& nameSuffix,
                                                 const std::function<void(gfx::DrawableBuilder&)>& configureExtras = {}) {
-            if (!activeTerrain || !shaderGroup) return;
+            if (!activeTerrain || !shaderGroup || klattraDisableLineDrape()) return;
             activeTerrain->visitDrapeTargets(
                 [&](const OverscaledTileID& drapeID, TerrainDrapeTargetPtr& drapeTarget) {
                     if (!drapeTarget || !LayerTweaker::tilesOverlap(tileID, drapeID)) return;

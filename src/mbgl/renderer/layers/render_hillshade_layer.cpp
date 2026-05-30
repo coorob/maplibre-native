@@ -25,6 +25,7 @@
 #include <mbgl/gfx/shader_group.hpp>
 #include <mbgl/gfx/shader_registry.hpp>
 
+#include <cstdlib>
 #include <unordered_set>
 
 namespace mbgl {
@@ -37,6 +38,25 @@ namespace {
 inline const HillshadeLayer::Impl& impl_cast(const Immutable<style::Layer::Impl>& impl) {
     assert(impl->getTypeInfo() == HillshadeLayer::Impl::staticTypeInfo());
     return static_cast<const HillshadeLayer::Impl&>(*impl);
+}
+
+bool klattraLogDrapeStale() {
+    return std::getenv("KLATTRA_LOG_DRAPE_STALE") != nullptr;
+}
+
+bool klattraDisableHillshadeDrape() {
+    static const bool disabled = std::getenv("KLATTRA_DISABLE_HILLSHADE_DRAPE") != nullptr;
+    return disabled;
+}
+
+bool klattraHillshadeDrapeSameZoomOnly() {
+    static const bool enabled = std::getenv("KLATTRA_HILLSHADE_DRAPE_SAME_ZOOM") != nullptr;
+    return enabled;
+}
+
+std::string klattraDrapeIDString(const OverscaledTileID& id) {
+    return "z" + std::to_string(static_cast<int>(id.canonical.z)) + "/" +
+           std::to_string(id.canonical.x) + "/" + std::to_string(id.canonical.y);
 }
 
 } // namespace
@@ -200,6 +220,19 @@ void RenderHillshadeLayer::update(gfx::ShaderRegistry& shaders,
     stats.drawablesRemoved += tileLayerGroup->removeDrawablesIf(
         [&](gfx::Drawable& drawable) { return drawable.getTileID() && !hasRenderTile(*drawable.getTileID()); });
 
+    // When terrain is active, drop main-pass hillshade drawables for tiles
+    // with DEM coverage — they would render at z=0 and bleed past the
+    // terrain mesh edges. The drape variants below paint hillshade onto
+    // the mesh for those tiles. Tiles without DEM coverage keep their
+    // main-pass drawables so hillshade doesn't vanish at zooms below the
+    // DEM range. See `render_fill_layer.cpp` for the matching rationale.
+    if (activeTerrain) {
+        stats.drawablesRemoved += tileLayerGroup->removeDrawablesIf([&](gfx::Drawable& drawable) {
+            const auto& tileID = drawable.getTileID();
+            return tileID && activeTerrain->hasElevationCoverage(*tileID);
+        });
+    }
+
     // Mirror the cover-set cleanup for drape groups and prune stale drape
     // tweakers — same pattern as RenderRasterLayer / RenderFillLayer /
     // RenderLineLayer.
@@ -211,11 +244,31 @@ void RenderHillshadeLayer::update(gfx::ShaderRegistry& shaders,
                 liveDrapeIDs.insert(drapeID);
                 if (auto* drapeGroup = static_cast<TileLayerGroup*>(
                         drapeTarget->getLayerGroup(layerIndex).get())) {
-                    stats.drawablesRemoved += drapeGroup->removeDrawablesIf(
+                    std::size_t removedNotInCover = 0;
+                    std::size_t removedNoOverlap = 0;
+                    const auto removed = drapeGroup->removeDrawablesIf(
                         [&](gfx::Drawable& drawable) {
                             const auto& dID = drawable.getTileID();
-                            return dID && !hasRenderTile(*dID);
+                            if (!dID) return false;
+                            if (!hasRenderTile(*dID)) {
+                                removedNotInCover++;
+                                return true;
+                            }
+                            if (!LayerTweaker::tilesOverlap(*dID, drapeID)) {
+                                removedNoOverlap++;
+                                return true;
+                            }
+                            return false;
                         });
+                    stats.drawablesRemoved += removed;
+                    if (removed && klattraLogDrapeStale()) {
+                        Log::Info(Event::Render,
+                                  "[Klättra DRAPE_STALE] layer=" + getID() +
+                                      " kind=hillshade drape=" + klattraDrapeIDString(drapeID) +
+                                      " removed=" + std::to_string(removed) +
+                                      " not-in-cover=" + std::to_string(removedNotInCover) +
+                                      " no-overlap=" + std::to_string(removedNoOverlap));
+                    }
                 }
             });
         for (auto it = drapeLayerTweakers.begin(); it != drapeLayerTweakers.end();) {
@@ -274,6 +327,18 @@ void RenderHillshadeLayer::update(gfx::ShaderRegistry& shaders,
         if (prevBucketID != util::SimpleIdentity::Empty && prevBucketID != bucket.getID()) {
             // This tile was previously set up from a different bucket, drop and re-create any drawables for it.
             removeTile(renderPass, tileID);
+            // Also drop drape-pass drawables for this tile (see
+            // render_fill_layer.cpp comment).
+            if (activeTerrain) {
+                activeTerrain->visitDrapeTargets(
+                    [&](const OverscaledTileID&, TerrainDrapeTargetPtr& drapeTarget) {
+                        if (!drapeTarget) return;
+                        if (auto* drapeGroup = static_cast<TileLayerGroup*>(
+                                drapeTarget->getLayerGroup(layerIndex).get())) {
+                            stats.drawablesRemoved += drapeGroup->removeDrawables(renderPass, tileID).size();
+                        }
+                    });
+            }
         }
         setRenderTileBucketID(tileID, bucket.getID());
 
@@ -285,6 +350,7 @@ void RenderHillshadeLayer::update(gfx::ShaderRegistry& shaders,
             if (!renderTarget) {
                 continue;
             }
+            renderTarget->setDebugName("hillshade-prep " + klattraDrapeIDString(tileID));
             bucket.renderTarget = renderTarget;
             bucket.renderTargetPrepared = true;
             addRenderTarget(renderTarget, changes);
@@ -391,10 +457,34 @@ void RenderHillshadeLayer::update(gfx::ShaderRegistry& shaders,
         // picks up its drawable even when the source tile drawable below is
         // updated in place. Done before the updateTile call because the
         // updateExisting lambda may std::move(indices).
-        if (activeTerrain && bucket.renderTarget) {
+        if (activeTerrain && bucket.renderTarget &&
+            !bucket.renderTarget->hasCompletedRender() &&
+            klattraLogDrapeStale()) {
+            Log::Info(Event::Render,
+                      "[Klättra DRAPE_STALE] layer=" + getID() +
+                          " kind=hillshade-source-not-ready tile=" + klattraDrapeIDString(tileID) +
+                          " target=" + bucket.renderTarget->getDebugName() +
+                          " action=skip-drape-route");
+        }
+        if (activeTerrain && klattraDisableHillshadeDrape()) {
+            if (klattraLogDrapeStale()) {
+                Log::Info(Event::Render,
+                          "[Klättra DRAPE_STALE] layer=" + getID() +
+                              " kind=hillshade-drape-disabled tile=" + klattraDrapeIDString(tileID));
+            }
+        } else if (activeTerrain && bucket.renderTarget && bucket.renderTarget->hasCompletedRender()) {
             activeTerrain->visitDrapeTargets(
                 [&](const OverscaledTileID& drapeID, TerrainDrapeTargetPtr& drapeTarget) {
                     if (!drapeTarget || !LayerTweaker::tilesOverlap(tileID, drapeID)) return;
+                    if (klattraHillshadeDrapeSameZoomOnly() && tileID.canonical.z != drapeID.canonical.z) {
+                        if (klattraLogDrapeStale()) {
+                            Log::Info(Event::Render,
+                                      "[Klättra DRAPE_STALE] layer=" + getID() +
+                                          " kind=hillshade-crosszoom-skip tile=" + klattraDrapeIDString(tileID) +
+                                          " drape=" + klattraDrapeIDString(drapeID));
+                        }
+                        return;
+                    }
 
                     auto& tw = drapeLayerTweakers[drapeID];
                     if (!tw) {
@@ -438,15 +528,18 @@ void RenderHillshadeLayer::update(gfx::ShaderRegistry& shaders,
                 });
         }
 
-        // When terrain is active, hillshade is consumed exclusively via the
-        // drape RenderTarget — emitting the main 2D tile drawable as well
-        // would render hillshade as a flat translucent overlay on top of
-        // the extruded terrain mesh (terrain renders LAST in the opaque
-        // pass, but hillshade is translucent and renders after that),
-        // hiding the 3D effect. Skip the main drawable in that case;
-        // the drape drawable above already routed the prepared colour
-        // into the per-DEM-tile drape target.
-        if (activeTerrain) {
+        // When terrain is active and this tile has DEM coverage, hillshade
+        // is consumed exclusively via the drape RenderTarget — emitting
+        // the main 2D tile drawable as well would render hillshade as a
+        // flat translucent overlay on top of the extruded terrain mesh
+        // (terrain renders LAST in the opaque pass, but hillshade is
+        // translucent and renders after that), hiding the 3D effect. Skip
+        // the main drawable in that case; the drape drawable above already
+        // routed the prepared colour into the per-DEM-tile drape target.
+        //
+        // When this tile has no DEM coverage, fall through to the main-pass
+        // emit so hillshade still renders flat.
+        if (activeTerrain && activeTerrain->hasElevationCoverage(tileID)) {
             removeTile(renderPass, tileID);
             continue;
         }
@@ -485,6 +578,14 @@ void RenderHillshadeLayer::update(gfx::ShaderRegistry& shaders,
         hillshadeBuilder->flush(context);
 
         for (auto& drawable : hillshadeBuilder->clearDrawables()) {
+            if (activeTerrain && activeTerrain->hasElevationCoverage(tileID)) {
+                // Skip main-pass — terrain mesh drapes hillshade via the
+                // drape-pass variant emitted below. See cleanup-on-terrain
+                // block above. Drawable falls out of scope here and is
+                // destroyed. When this tile has no DEM coverage, fall
+                // through to the main-pass emit so hillshade still renders.
+                continue;
+            }
             drawable->setTileID(tileID);
             drawable->setLayerTweaker(layerTweaker);
 

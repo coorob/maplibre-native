@@ -160,8 +160,24 @@ gfx::AttributeBindingArray UploadPass::buildAttributeBindings(
 
         // If the attribute references data shared with a bucket, get the corresponding buffer.
         if (const auto& buffer_ = getBuffer(effectiveAttr.getSharedRawData(), usage, !lastUpdate)) {
-            assert(effectiveAttr.getSharedStride() * effectiveAttr.getSharedVertexOffset() <
-                   effectiveAttr.getSharedRawData()->getRawSize() * effectiveAttr.getSharedRawData()->getRawCount());
+            // Defensive: previously `assert`. Fires during fast camera
+            // pans when a drape drawable's source bucket has been
+            // partially repopulated and the offset math underruns the
+            // (already-resized) vector. Log and clamp instead.
+            const auto offsetBytes = effectiveAttr.getSharedStride() * effectiveAttr.getSharedVertexOffset();
+            const auto totalBytes = effectiveAttr.getSharedRawData()->getRawSize() *
+                                    effectiveAttr.getSharedRawData()->getRawCount();
+            if (!(offsetBytes < totalBytes)) {
+                Log::Warning(Event::Render,
+                             "Drape attribute offset out of range; binding with default to avoid crash");
+                bindings[index] = {
+                    /*.attribute = */ {defaultAttr.getDataType(), /*offset=*/0},
+                    /*.vertexStride = */ static_cast<uint32_t>(VertexAttribute::getStrideOf(defaultAttr.getDataType())),
+                    /*.vertexBufferResource = */ nullptr,
+                    /*.vertexOffset = */ 0,
+                };
+                return;
+            }
 
             bindings[index] = {
                 /*.attribute = */ {effectiveAttr.getSharedType(), effectiveAttr.getSharedOffset()},
@@ -172,7 +188,21 @@ gfx::AttributeBindingArray UploadPass::buildAttributeBindings(
             return;
         }
 
-        assert(effectiveAttr.getStride() > 0);
+        // Defensive: stride=0 means the override attribute is malformed
+        // (e.g., a drape drawable whose source bucket got reparsed mid-
+        // frame and left a paint-property attribute slot configured but
+        // unpopulated). Don't crash; emit a placeholder binding so the
+        // drawable renders with the shader's default for this attribute.
+        if (effectiveAttr.getStride() == 0) {
+            Log::Warning(Event::Render, "Terrain/drape attribute has 0 stride; skipping with default binding");
+            bindings[index] = {
+                /*.attribute = */ {defaultAttr.getDataType(), /*offset=*/0},
+                /*.vertexStride = */ static_cast<uint32_t>(VertexAttribute::getStrideOf(defaultAttr.getDataType())),
+                /*.vertexBufferResource = */ nullptr,
+                /*.vertexOffset = */ 0,
+            };
+            return;
+        }
 
         // Otherwise, turn the data managed by the attribute into a buffer.
         if (const auto& buffer_ = VertexAttribute::getBuffer(
@@ -186,7 +216,19 @@ gfx::AttributeBindingArray UploadPass::buildAttributeBindings(
             return;
         }
 
-        assert(false);
+        // Same defensive fallback: per-attribute buffer creation failed.
+        // Bind a placeholder with no buffer so the drawable renders with
+        // the shader's default value for this attribute rather than
+        // aborting. Most common cause is a drape drawable referencing a
+        // shared vertex vector that was emptied by an upstream tile
+        // reparse before the upload pass ran.
+        Log::Warning(Event::Render, "Terrain/drape attribute has no buffer; skipping with default binding");
+        bindings[index] = {
+            /*.attribute = */ {defaultAttr.getDataType(), /*offset=*/0},
+            /*.vertexStride = */ static_cast<uint32_t>(VertexAttribute::getStrideOf(defaultAttr.getDataType())),
+            /*.vertexBufferResource = */ nullptr,
+            /*.vertexOffset = */ 0,
+        };
     };
     // This version is called when the attribute is available, but isn't being used by the shader
     const auto missingAttr = [&](const size_t, auto& missingAttr) -> void {

@@ -30,6 +30,8 @@
 #include <mbgl/mtl/renderer_backend.hpp>
 #include <Metal/MTLCaptureManager.hpp>
 #include <Metal/MTLCaptureScope.hpp>
+#include <Foundation/NSURL.hpp>
+#include <cstdlib>
 /// Enable programmatic Metal frame captures for specific frame numbers.
 /// Requries iOS 13
 constexpr auto EnableMetalCapture = 0;
@@ -125,12 +127,29 @@ void Renderer::Impl::render(const RenderTree& renderTree, const std::shared_ptr<
             if (commandCaptureScope) {
                 const auto captureManager = NS::RetainPtr(MTL::CaptureManager::sharedCaptureManager());
                 if (frameCount == CaptureFrameStart) {
-                    constexpr auto captureDest = MTL::CaptureDestination::CaptureDestinationDeveloperTools;
+                    // Save to a .gputrace document inside the app's Documents
+                    // directory. We pull this out via `xcrun simctl get_app_container`
+                    // and open in Xcode for offline inspection — works without
+                    // attaching a debugger.
+                    constexpr auto captureDest = MTL::CaptureDestination::CaptureDestinationGPUTraceDocument;
                     if (captureManager && !captureManager->isCapturing() &&
                         captureManager->supportsDestination(captureDest)) {
                         if (auto captureDesc = NS::TransferPtr(MTL::CaptureDescriptor::alloc()->init())) {
                             captureDesc->setCaptureObject(mtlDevice.get());
                             captureDesc->setDestination(captureDest);
+                            // Save to $HOME/Documents/klattra-frame-<frame>.gputrace.
+                            // On iOS simulator, HOME is the app container; we pull
+                            // the trace out via `xcrun simctl get_app_container`
+                            // after the app exits.
+                            if (const char* home = std::getenv("HOME")) {
+                                const std::string path = std::string(home) + "/Documents/klattra-frame-" +
+                                                         util::toString(frameCount) + ".gputrace";
+                                auto pathStr = NS::String::string(path.c_str(), NS::UTF8StringEncoding);
+                                if (auto outURL = NS::URL::fileURLWithPath(pathStr)) {
+                                    captureDesc->setOutputURL(outURL);
+                                    Log::Warning(Event::Render, std::string("Capture output: ") + path);
+                                }
+                            }
                             NS::Error* errorPtr = nullptr;
                             if (captureManager->startCapture(captureDesc.get(), &errorPtr)) {
                                 Log::Warning(Event::Render, "Capture Started");

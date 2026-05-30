@@ -33,6 +33,12 @@ void RasterDEMSource::setTilesetOverrides(Tileset& tileset) {
         if (std::optional<Tileset::DEMEncoding> encoding = options.value().encoding) {
             tileset.encoding = encoding.value();
         }
+        if (std::optional<uint8_t> minzoom = options.value().minzoom) {
+            tileset.zoomRange.min = minzoom.value();
+        }
+        if (std::optional<uint8_t> maxzoom = options.value().maxzoom) {
+            tileset.zoomRange.max = maxzoom.value();
+        }
     }
 }
 

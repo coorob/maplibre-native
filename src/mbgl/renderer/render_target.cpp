@@ -7,8 +7,266 @@
 #include <mbgl/renderer/layer_tweaker.hpp>
 #include <mbgl/renderer/paint_parameters.hpp>
 #include <mbgl/renderer/render_tree.hpp>
+#include <mbgl/util/image.hpp>
+#include <mbgl/util/io.hpp>
+
+#include <algorithm>
+#include <cctype>
+#include <cstdint>
+#include <cstdlib>
+#include <cerrno>
+#include <chrono>
+#include <iomanip>
+#include <limits>
+#include <sstream>
+#include <stdexcept>
+#include <sys/stat.h>
 
 namespace mbgl {
+
+namespace {
+
+bool klattraLogDrapeTrace() {
+    static const bool enabled = std::getenv("KLATTRA_LOG_DRAPE_TRACE") != nullptr;
+    return enabled;
+}
+
+std::string klattraColorString(const Color& color) {
+    return std::to_string(color.r) + "," + std::to_string(color.g) + "," +
+           std::to_string(color.b) + "," + std::to_string(color.a);
+}
+
+int klattraEnvInt(const char* name, const int fallback) {
+    const char* value = std::getenv(name);
+    if (!value) {
+        return fallback;
+    }
+    char* end = nullptr;
+    const long parsed = std::strtol(value, &end, 10);
+    return end != value ? static_cast<int>(parsed) : fallback;
+}
+
+bool klattraTargetMatchesFilter(const std::string& debugName, const char* filter) {
+    if (!filter || !*filter) {
+        return false;
+    }
+
+    const std::string value(filter);
+    if (value == "1" || value == "all") {
+        return !debugName.empty();
+    }
+    if (value == "drape" || value == "terrain") {
+        return debugName.find("terrain-drape") != std::string::npos;
+    }
+    if (value == "hillshade") {
+        return debugName.find("hillshade-prep") != std::string::npos;
+    }
+
+    return debugName.find(value) != std::string::npos;
+}
+
+std::string klattraRenderTargetDumpDir() {
+    if (const char* explicitDir = std::getenv("KLATTRA_DUMP_DIR")) {
+        if (*explicitDir) {
+            return explicitDir;
+        }
+    }
+
+    std::string base = std::getenv("TMPDIR") ? std::getenv("TMPDIR") : "/tmp";
+    while (!base.empty() && base.back() == '/') {
+        base.pop_back();
+    }
+    return base + "/klattra_render_targets";
+}
+
+bool klattraEnsureDir(const std::string& path) {
+    if (::mkdir(path.c_str(), 0755) == 0 || errno == EEXIST) {
+        return true;
+    }
+    return false;
+}
+
+bool klattraDumpTriggerActive(const char* path) {
+    if (!path || !*path) {
+        return true;
+    }
+
+    static std::string lastPath;
+    static std::int64_t lastSec = 0;
+    static std::int64_t lastNsec = 0;
+    static auto armedUntil = std::chrono::steady_clock::time_point{};
+
+    const auto now = std::chrono::steady_clock::now();
+    struct stat info {};
+    if (::stat(path, &info) != 0) {
+        return now < armedUntil;
+    }
+
+#if defined(__APPLE__)
+    const std::int64_t sec = static_cast<std::int64_t>(info.st_mtimespec.tv_sec);
+    const std::int64_t nsec = static_cast<std::int64_t>(info.st_mtimespec.tv_nsec);
+#else
+    const std::int64_t sec = static_cast<std::int64_t>(info.st_mtim.tv_sec);
+    const std::int64_t nsec = static_cast<std::int64_t>(info.st_mtim.tv_nsec);
+#endif
+
+    if (lastPath != path || sec > lastSec || (sec == lastSec && nsec > lastNsec)) {
+        lastPath = path;
+        lastSec = sec;
+        lastNsec = nsec;
+        const int windowMs = std::max(1, klattraEnvInt("KLATTRA_DUMP_TRIGGER_WINDOW_MS", 2000));
+        armedUntil = now + std::chrono::milliseconds(windowMs);
+        Log::Info(Event::Render,
+                  "[KLATTRA TARGET_PIXELS] arm-trigger file=" + std::string(path) +
+                      " window_ms=" + std::to_string(windowMs));
+    }
+
+    return now < armedUntil;
+}
+
+std::string klattraSafeFilename(std::string value) {
+    std::replace_if(value.begin(), value.end(), [](const char c) {
+        return !(std::isalnum(static_cast<unsigned char>(c)) || c == '-' || c == '_' || c == '.');
+    }, '_');
+    return value;
+}
+
+std::string klattraPercent(const uint64_t count, const uint64_t total) {
+    std::ostringstream stream;
+    stream << std::fixed << std::setprecision(2)
+           << (total ? (100.0 * static_cast<double>(count) / static_cast<double>(total)) : 0.0);
+    return stream.str();
+}
+
+void klattraMaybeInspectTarget(gfx::OffscreenTexture& texture,
+                               const std::string& debugName,
+                               const uint64_t completedRenderCount) {
+    const char* dumpFilter = std::getenv("KLATTRA_DUMP_RENDER_TARGETS");
+    const char* statsFilter = std::getenv("KLATTRA_LOG_TARGET_PIXELS");
+    const bool shouldDump = klattraTargetMatchesFilter(debugName, dumpFilter);
+    const bool shouldLogStats = shouldDump || klattraTargetMatchesFilter(debugName, statsFilter);
+    if (!shouldLogStats) {
+        return;
+    }
+
+    if (!klattraDumpTriggerActive(std::getenv("KLATTRA_DUMP_TRIGGER_FILE"))) {
+        return;
+    }
+
+    const int delayMs = klattraEnvInt("KLATTRA_DUMP_RENDER_TARGET_DELAY_MS", 0);
+    if (delayMs > 0) {
+        static const auto start = std::chrono::steady_clock::now();
+        const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                   std::chrono::steady_clock::now() - start)
+                                   .count();
+        if (elapsedMs < delayMs) {
+            return;
+        }
+    }
+
+    const bool repeat = std::getenv("KLATTRA_DUMP_RENDER_TARGETS_REPEAT") != nullptr ||
+                        std::getenv("KLATTRA_LOG_TARGET_PIXELS_REPEAT") != nullptr;
+    if (!repeat && completedRenderCount > 2) {
+        return;
+    }
+
+    static uint64_t inspectedTargets = 0;
+    const uint64_t maxTargets = std::max(0, klattraEnvInt("KLATTRA_DUMP_RENDER_TARGET_MAX", 80));
+    if (inspectedTargets >= maxTargets) {
+        return;
+    }
+    const uint64_t sequence = ++inspectedTargets;
+
+    PremultipliedImage image;
+    try {
+        image = texture.readStillImage();
+    } catch (const std::exception& e) {
+        Log::Warning(Event::Render,
+                     "[KLATTRA TARGET_PIXELS] read-failed target=" + debugName +
+                         " completed=" + std::to_string(completedRenderCount) +
+                         " error=" + e.what());
+        return;
+    }
+
+    const uint64_t total = static_cast<uint64_t>(image.size.width) * image.size.height;
+    uint64_t sumR = 0;
+    uint64_t sumG = 0;
+    uint64_t sumB = 0;
+    uint64_t sumA = 0;
+    uint64_t alphaZero = 0;
+    uint64_t rgbWithAlphaZero = 0;
+    uint64_t bright = 0;
+    uint64_t dark = 0;
+    uint64_t greyish = 0;
+
+    const uint8_t* data = image.data.get();
+    for (uint64_t i = 0; i < total; ++i) {
+        const uint8_t r = data[i * 4 + 0];
+        const uint8_t g = data[i * 4 + 1];
+        const uint8_t b = data[i * 4 + 2];
+        const uint8_t a = data[i * 4 + 3];
+        sumR += r;
+        sumG += g;
+        sumB += b;
+        sumA += a;
+        if (a <= 1) {
+            alphaZero++;
+            if (std::max({r, g, b}) > 8) {
+                rgbWithAlphaZero++;
+            }
+        }
+        if (r > 235 && g > 235 && b > 235) {
+            bright++;
+        }
+        if (r < 70 && g < 70 && b < 70) {
+            dark++;
+        }
+        if (std::max({r, g, b}) - std::min({r, g, b}) < 12 && r > 85 && r < 205) {
+            greyish++;
+        }
+    }
+
+    std::string pngPath;
+    if (shouldDump) {
+        const std::string dir = klattraRenderTargetDumpDir();
+        if (klattraEnsureDir(dir)) {
+            std::ostringstream name;
+            name << dir << "/" << std::setw(4) << std::setfill('0') << sequence << "_"
+                 << klattraSafeFilename(debugName) << "_c" << completedRenderCount << ".png";
+            pngPath = name.str();
+            try {
+                util::write_file(pngPath, encodePNG(image));
+            } catch (const std::exception& e) {
+                Log::Warning(Event::Render,
+                             "[KLATTRA TARGET_PIXELS] dump-failed target=" + debugName +
+                                 " path=" + pngPath +
+                                 " error=" + e.what());
+                pngPath.clear();
+            }
+        } else {
+            Log::Warning(Event::Render,
+                         "[KLATTRA TARGET_PIXELS] mkdir-failed dir=" + dir +
+                             " errno=" + std::to_string(errno));
+        }
+    }
+
+    Log::Info(Event::Render,
+              "[KLATTRA TARGET_PIXELS] target=" + debugName +
+                  " completed=" + std::to_string(completedRenderCount) +
+                  " size=" + std::to_string(image.size.width) + "x" + std::to_string(image.size.height) +
+                  " avg=" + std::to_string(sumR / std::max<uint64_t>(1, total)) + "," +
+                      std::to_string(sumG / std::max<uint64_t>(1, total)) + "," +
+                      std::to_string(sumB / std::max<uint64_t>(1, total)) + "," +
+                      std::to_string(sumA / std::max<uint64_t>(1, total)) +
+                  " alpha0_pct=" + klattraPercent(alphaZero, total) +
+                  " rgb_with_alpha0_pct=" + klattraPercent(rgbWithAlphaZero, total) +
+                  " bright_pct=" + klattraPercent(bright, total) +
+                  " dark_pct=" + klattraPercent(dark, total) +
+                  " greyish_pct=" + klattraPercent(greyish, total) +
+                  (pngPath.empty() ? "" : " png=" + pngPath));
+}
+
+} // namespace
 
 RenderTarget::RenderTarget(gfx::Context& context_, const Size size, const gfx::TextureChannelDataType type)
     : context(context_) {
@@ -21,17 +279,47 @@ const gfx::Texture2DPtr& RenderTarget::getTexture() {
     return offscreenTexture->getTexture();
 };
 
+void RenderTarget::setMipmapped(bool enabled) {
+    mipmapped = enabled;
+    offscreenTexture->setMipmapped(enabled);
+}
+
+void RenderTarget::inspectDebugPixels() {
+    if (debugName.empty() || completedRenderCount == 0) {
+        return;
+    }
+
+    klattraMaybeInspectTarget(*offscreenTexture, debugName + " sampled", completedRenderCount);
+}
+
 bool RenderTarget::addLayerGroup(LayerGroupBasePtr layerGroup, const bool replace) {
     const auto index = layerGroup->getLayerIndex();
     const auto result = layerGroupsByLayerIndex.insert(std::make_pair(index, LayerGroupBasePtr{}));
+    const auto layerName = layerGroup->getName();
+    const auto drawableCount = layerGroup->getDrawableCount();
     if (result.second) {
         // added
         result.first->second = std::move(layerGroup);
+        if (klattraLogDrapeTrace() && !debugName.empty()) {
+            Log::Info(Event::Render,
+                      "[KLATTRA DRAPE_TRACE] target-add-group target=" + debugName +
+                          " index=" + std::to_string(index) +
+                          " name=" + layerName +
+                          " drawables=" + std::to_string(drawableCount) +
+                          " replace=" + std::to_string(replace));
+        }
         return true;
     } else {
         // not added
         if (replace) {
             result.first->second = std::move(layerGroup);
+            if (klattraLogDrapeTrace() && !debugName.empty()) {
+                Log::Info(Event::Render,
+                          "[KLATTRA DRAPE_TRACE] target-replace-group target=" + debugName +
+                              " index=" + std::to_string(index) +
+                              " name=" + layerName +
+                              " drawables=" + std::to_string(drawableCount));
+            }
             return true;
         } else {
             return false;
@@ -49,8 +337,44 @@ bool RenderTarget::removeLayerGroup(const int32_t layerIndex) {
     }
 }
 
+std::size_t RenderTarget::removeLayerGroupsIf(
+    const std::function<bool(int32_t, const LayerGroupBase&)>& predicate) {
+    std::size_t removed = 0;
+    for (auto it = layerGroupsByLayerIndex.begin(); it != layerGroupsByLayerIndex.end();) {
+        const auto& group = it->second;
+        if (group && predicate(it->first, *group)) {
+            it = layerGroupsByLayerIndex.erase(it);
+            removed++;
+        } else {
+            ++it;
+        }
+    }
+    return removed;
+}
+
 size_t RenderTarget::numLayerGroups() const noexcept {
     return layerGroupsByLayerIndex.size();
+}
+
+size_t RenderTarget::numDrawables() const noexcept {
+    size_t count = 0;
+    for (const auto& [_, layerGroup] : layerGroupsByLayerIndex) {
+        if (layerGroup) {
+            count += layerGroup->getDrawableCount();
+        }
+    }
+    return count;
+}
+
+size_t RenderTarget::numContentLayerGroups() const noexcept {
+    size_t count = 0;
+    for (const auto& [layerIndex, layerGroup] : layerGroupsByLayerIndex) {
+        if (layerIndex == std::numeric_limits<int32_t>::max() || !layerGroup || layerGroup->empty()) {
+            continue;
+        }
+        count++;
+    }
+    return count;
 }
 
 static const LayerGroupBasePtr no_group;
@@ -65,11 +389,34 @@ void RenderTarget::upload(gfx::UploadPass& uploadPass) {
 }
 
 void RenderTarget::render(RenderOrchestrator& orchestrator, const RenderTree& renderTree, PaintParameters& parameters) {
+    if (klattraLogDrapeTrace() && !debugName.empty()) {
+        const auto size = offscreenTexture->getSize();
+        std::size_t drawableCount = 0;
+        visitLayerGroups([&](LayerGroupBase& layerGroup) {
+            drawableCount += layerGroup.getDrawableCount();
+            Log::Info(Event::Render,
+                      "[KLATTRA DRAPE_TRACE] target-group target=" + debugName +
+                          " group=" + layerGroup.getName() +
+                          " index=" + std::to_string(layerGroup.getLayerIndex()) +
+                          " enabled=" + std::to_string(layerGroup.getEnabled()) +
+                          " drawables=" + std::to_string(layerGroup.getDrawableCount()));
+        });
+        Log::Info(Event::Render,
+                  "[KLATTRA DRAPE_TRACE] target-render-begin target=" + debugName +
+                      " ptr=" + std::to_string(reinterpret_cast<uintptr_t>(this)) +
+                      " size=" + std::to_string(size.width) + "x" + std::to_string(size.height) +
+                      " groups=" + std::to_string(numLayerGroups()) +
+                      " drawables=" + std::to_string(drawableCount) +
+                      " completedBefore=" + std::to_string(completedRenderCount) +
+                      " clear=" + klattraColorString(clearColor));
+    }
+
     parameters.renderPass = parameters.encoder->createRenderPass("render target",
                                                                  {.renderable = *offscreenTexture,
                                                                   .clearColor = clearColor,
                                                                   .clearDepth = 1.0f,
                                                                   .clearStencil = {}});
+    context.bindGlobalUniformBuffers(*parameters.renderPass);
 
     // Run layer tweakers to update any dynamic elements
     parameters.currentLayer = 0;
@@ -102,8 +449,21 @@ void RenderTarget::render(RenderOrchestrator& orchestrator, const RenderTree& re
         }
     });
 
+    context.unbindGlobalUniformBuffers(*parameters.renderPass);
     parameters.renderPass.reset();
     parameters.encoder->present(*offscreenTexture);
+    completedRenderCount++;
+
+    if (!debugName.empty()) {
+        klattraMaybeInspectTarget(*offscreenTexture, debugName, completedRenderCount);
+    }
+
+    if (klattraLogDrapeTrace() && !debugName.empty()) {
+        Log::Info(Event::Render,
+                  "[KLATTRA DRAPE_TRACE] target-render-end target=" + debugName +
+                      " ptr=" + std::to_string(reinterpret_cast<uintptr_t>(this)) +
+                      " completedAfter=" + std::to_string(completedRenderCount));
+    }
 }
 
 } // namespace mbgl

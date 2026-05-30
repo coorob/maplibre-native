@@ -5,11 +5,34 @@
 namespace mbgl {
 namespace shaders {
 
+// Per-drawable UBO for the terrain mesh.
+//
+// `dem_tl` + `dem_scale` carry the UV remap that lets a drawable sample a
+// DEM texture belonging to a different tile — typically an ancestor whose
+// data has finished streaming while this tile's own DEM is still in
+// flight. Without parent-fallback DEM sampling, a freshly-paged tile
+// would render flat (empty-DEM fallback) and the user would see the mesh
+// briefly collapse to sea level until the network catches up. With it,
+// the mesh keeps a coarse-but-correct shape and silently sharpens once
+// the exact-zoom DEM arrives.
+//
+// Identity remap is `dem_tl = {0, 0}, dem_scale = 1` — sample the bound
+// texture's full [0,1] UV range. For a child at canonical (cx, cy, cz)
+// borrowing a parent at canonical (px, py, pz) with dz = cz - pz:
+//   dem_scale = 1 / (1 << dz)
+//   dem_tl    = ((cx & ((1<<dz)-1)) * dem_scale,
+//                (cy & ((1<<dz)-1)) * dem_scale)
+// so the child's [0,1]² UV maps to a 1/(1<<dz)² sub-rect of the parent
+// texture. Mirrors `_demMatrixCache` in maplibre-gl-js's
+// `src/render/terrain.ts:291-305`.
 struct alignas(16) TerrainDrawableUBO {
     /*  0 */ std::array<float, 4 * 4> matrix;
-    /* 64 */
+    /* 64 */ std::array<float, 2> dem_tl;
+    /* 72 */ float dem_scale;
+    /* 76 */ float meters_per_tile;
+    /* 80 */
 };
-static_assert(sizeof(TerrainDrawableUBO) == 4 * 16);
+static_assert(sizeof(TerrainDrawableUBO) == 80);
 
 struct alignas(16) TerrainTilePropsUBO {
     /*  0 */ std::array<float, 2> dem_tl;
@@ -27,8 +50,8 @@ static_assert(sizeof(TerrainTilePropsUBO) == 16);
 struct alignas(16) TerrainEvaluatedPropsUBO {
     /*  0 */ float exaggeration;
     /*  4 */ float elevation_offset;
-    /*  8 */ float pad1;
-    /* 12 */ float pad2;
+    /*  8 */ float pad1; // debug colour mode
+    /* 12 */ float pad2; // debug vertex/depth mode
     /* 16 */ std::array<float, 4> light_color_pad;          // rgb = color
     /* 32 */ std::array<float, 4> light_position_intensity; // xyz = direction, w = intensity
     /* 48 */

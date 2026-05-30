@@ -21,6 +21,7 @@
 #include <mbgl/util/math.hpp>
 #include <mbgl/util/std.hpp>
 
+#include <cstdlib>
 #include <unordered_set>
 
 #include <mbgl/gfx/drawable_atlases_tweaker.hpp>
@@ -46,6 +47,20 @@ constexpr auto FillOutlinePatternShaderName = "FillOutlinePatternShader";
 #if MLN_TRIANGULATE_FILL_OUTLINES
 constexpr auto FillOutlineTriangulatedShaderName = "FillOutlineTriangulatedShader";
 #endif
+
+bool klattraLogDrapeStale() {
+    return std::getenv("KLATTRA_LOG_DRAPE_STALE") != nullptr;
+}
+
+bool klattraDisableFillDrape() {
+    static const bool disabled = std::getenv("KLATTRA_DISABLE_FILL_DRAPE") != nullptr;
+    return disabled;
+}
+
+std::string klattraDrapeIDString(const OverscaledTileID& id) {
+    return "z" + std::to_string(static_cast<int>(id.canonical.z)) + "/" +
+           std::to_string(id.canonical.x) + "/" + std::to_string(id.canonical.y);
+}
 
 inline const FillLayer::Impl& impl_cast(const Immutable<style::Layer::Impl>& impl) {
     assert(impl->getTypeInfo() == FillLayer::Impl::staticTypeInfo());
@@ -195,6 +210,26 @@ void RenderFillLayer::update(gfx::ShaderRegistry& shaders,
         return tileID && !hasRenderTile(*tileID);
     });
 
+    // When terrain is active, drop main-pass drawables for tiles that have
+    // DEM coverage — those tiles paint into the per-tile drape RenderTargets
+    // (sampled by the terrain mesh) and rendering them again at z=0 in the
+    // main framebuffer would bleed through past the mesh edges, creating
+    // the "flat 2D basemap underneath the 3D mountain" effect (mirrors
+    // gl-js's `LAYERS_TO_TEXTURES` short-circuit in
+    // `src/webgl/render_to_texture.ts`).
+    //
+    // Tiles WITHOUT DEM coverage (e.g., the camera has zoomed below the DEM
+    // source's tile range, so no drape target exists) keep their main-pass
+    // drawables — otherwise the layer would vanish entirely. This matches
+    // gl-js's behavior in `terrain.ts` where `terrainNoTerrainData` triggers
+    // the flat fallback path per tile.
+    if (activeTerrain) {
+        stats.drawablesRemoved += fillTileLayerGroup->removeDrawablesIf([&](gfx::Drawable& drawable) {
+            const auto& tileID = drawable.getTileID();
+            return tileID && activeTerrain->hasElevationCoverage(*tileID);
+        });
+    }
+
     // Mirror the same cover-set cleanup for every drape group this layer
     // owns inside the terrain drape cache, and drop drapeLayerTweakers
     // entries whose drape target has been evicted. Without this, source
@@ -208,11 +243,31 @@ void RenderFillLayer::update(gfx::ShaderRegistry& shaders,
                 liveDrapeIDs.insert(drapeID);
                 if (auto* drapeGroup = static_cast<TileLayerGroup*>(
                         drapeTarget->getLayerGroup(layerIndex).get())) {
-                    stats.drawablesRemoved += drapeGroup->removeDrawablesIf(
+                    std::size_t removedNotInCover = 0;
+                    std::size_t removedNoOverlap = 0;
+                    const auto removed = drapeGroup->removeDrawablesIf(
                         [&](gfx::Drawable& drawable) {
                             const auto& dID = drawable.getTileID();
-                            return dID && !hasRenderTile(*dID);
+                            if (!dID) return false;
+                            if (!hasRenderTile(*dID)) {
+                                removedNotInCover++;
+                                return true;
+                            }
+                            if (!LayerTweaker::tilesOverlap(*dID, drapeID)) {
+                                removedNoOverlap++;
+                                return true;
+                            }
+                            return false;
                         });
+                    stats.drawablesRemoved += removed;
+                    if (removed && klattraLogDrapeStale()) {
+                        Log::Info(Event::Render,
+                                  "[Klättra DRAPE_STALE] layer=" + getID() +
+                                      " kind=fill drape=" + klattraDrapeIDString(drapeID) +
+                                      " removed=" + std::to_string(removed) +
+                                      " not-in-cover=" + std::to_string(removedNotInCover) +
+                                      " no-overlap=" + std::to_string(removedNoOverlap));
+                    }
                 }
             });
         for (auto it = drapeLayerTweakers.begin(); it != drapeLayerTweakers.end();) {
@@ -243,6 +298,23 @@ void RenderFillLayer::update(gfx::ShaderRegistry& shaders,
         if (prevBucketID != util::SimpleIdentity::Empty && prevBucketID != bucket.getID()) {
             // This tile was previously set up from a different bucket, drop and re-create any drawables for it.
             removeTile(renderPass, tileID);
+            // Also drop any drape-pass drawables for this tile across every
+            // drape target. Without this, the drape drawables still hold a
+            // pointer into the OLD bucket's vertex data, and the upload
+            // pass asserts in `mtl::UploadPass::buildAttributeBindings`
+            // when a later frame walks the drape group. Triggered in
+            // practice by camera pans that swap a tile's bucket while a
+            // drape target is still live.
+            if (activeTerrain) {
+                activeTerrain->visitDrapeTargets(
+                    [&](const OverscaledTileID&, TerrainDrapeTargetPtr& drapeTarget) {
+                        if (!drapeTarget) return;
+                        if (auto* drapeGroup = static_cast<TileLayerGroup*>(
+                                drapeTarget->getLayerGroup(layerIndex).get())) {
+                            stats.drawablesRemoved += drapeGroup->removeDrawables(renderPass, tileID).size();
+                        }
+                    });
+            }
         }
         setRenderTileBucketID(tileID, bucket.getID());
 
@@ -359,6 +431,22 @@ void RenderFillLayer::update(gfx::ShaderRegistry& shaders,
         }
 
         const auto finish = [&](gfx::DrawableBuilder& builder, FillVariant type) {
+            if (activeTerrain && activeTerrain->hasElevationCoverage(tileID)) {
+                // Skip main-pass — flushed drawables would only be drawn at
+                // z=0 in the main framebuffer where the terrain mesh would
+                // ideally occlude them; the drape variant emitted by
+                // `emitDrapeVariant` below is what actually paints this
+                // tile onto the terrain mesh. Flush + discard so the
+                // builder state stays consistent for the next caller.
+                //
+                // When the tile has no DEM coverage (camera zoomed below
+                // the DEM source's range, no drape target for this tile),
+                // fall through to the main-pass emit below so the layer
+                // doesn't vanish.
+                builder.flush(context);
+                (void)builder.clearDrawables();
+                return;
+            }
             builder.flush(context);
 
             for (auto& drawable : builder.clearDrawables()) {
@@ -391,7 +479,7 @@ void RenderFillLayer::update(gfx::ShaderRegistry& shaders,
                                            const std::string& nameSuffix,
                                            const std::function<void(gfx::DrawableBuilder&)>& setSegments,
                                            const std::function<void(gfx::DrawableBuilder&)>& configureExtras = {}) {
-            if (!activeTerrain || !shaderGroup) return;
+            if (!activeTerrain || !shaderGroup || klattraDisableFillDrape()) return;
             activeTerrain->visitDrapeTargets(
                 [&](const OverscaledTileID& drapeID, TerrainDrapeTargetPtr& drapeTarget) {
                     if (!drapeTarget || !LayerTweaker::tilesOverlap(tileID, drapeID)) return;

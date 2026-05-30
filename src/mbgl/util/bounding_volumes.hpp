@@ -61,7 +61,7 @@ private:
     AABB bounds;
     std::array<vec3, 8> points;
     std::array<vec4, 6> planes;
-    std::array<Projection, 12> projections;
+    std::array<Projection, 18> projections;
 };
 
 } // namespace util

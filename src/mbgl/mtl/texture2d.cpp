@@ -8,6 +8,8 @@
 #include <Metal/MTLRenderCommandEncoder.hpp>
 #include <Metal/MTLSampler.hpp>
 
+#include <algorithm>
+
 namespace mbgl {
 namespace mtl {
 
@@ -23,11 +25,16 @@ Texture2D::~Texture2D() {
 
 gfx::Texture2D& Texture2D::setSamplerConfiguration(const SamplerState& samplerState_) noexcept {
     if (samplerState.filter == samplerState_.filter && samplerState.wrapU == samplerState_.wrapU &&
-        samplerState.wrapV == samplerState_.wrapV) {
+        samplerState.wrapV == samplerState_.wrapV && samplerState.maxAnisotropy == samplerState_.maxAnisotropy &&
+        samplerState.mipmapped == samplerState_.mipmapped) {
         return *this;
     }
 
+    const bool mipmappedChanged = samplerState.mipmapped != samplerState_.mipmapped;
     samplerState = samplerState_;
+    if (mipmappedChanged) {
+        textureDirty = true;
+    }
     samplerStateDirty = true;
     return *this;
 }
@@ -58,7 +65,23 @@ gfx::Texture2D& Texture2D::setImage(std::shared_ptr<PremultipliedImage> image_) 
 }
 
 size_t Texture2D::getDataSize() const noexcept {
-    return size.width * size.height * getPixelStride();
+    const auto stride = getPixelStride();
+    if (!samplerState.mipmapped) {
+        return static_cast<size_t>(size.width) * size.height * stride;
+    }
+
+    size_t total = 0;
+    uint16_t width = size.width;
+    uint16_t height = size.height;
+    while (width > 0 && height > 0) {
+        total += static_cast<size_t>(width) * height * stride;
+        if (width == 1 && height == 1) {
+            break;
+        }
+        width = std::max<uint16_t>(1, width / 2);
+        height = std::max<uint16_t>(1, height / 2);
+    }
+    return total;
 }
 
 size_t Texture2D::getPixelStride() const noexcept {
@@ -155,8 +178,8 @@ void Texture2D::createMetalTexture() noexcept {
     }
 
     // Create a new texture object
-    if (auto textureDescriptor = NS::RetainPtr(
-            MTL::TextureDescriptor::texture2DDescriptor(format, size.width, size.height, /*mipmapped=*/false))) {
+    if (auto textureDescriptor = NS::RetainPtr(MTL::TextureDescriptor::texture2DDescriptor(
+            format, size.width, size.height, /*mipmapped=*/samplerState.mipmapped))) {
         textureDescriptor->setUsage(usage);
 #if TARGET_OS_SIMULATOR || defined(__x86_64__)
         switch (format) {
@@ -215,6 +238,9 @@ void Texture2D::updateSamplerConfiguration() noexcept {
     samplerDescriptor->setMagFilter(samplerState.filter == gfx::TextureFilterType::Nearest
                                         ? MTL::SamplerMinMagFilterNearest
                                         : MTL::SamplerMinMagFilterLinear);
+    samplerDescriptor->setMipFilter(samplerState.mipmapped ? MTL::SamplerMipFilterLinear
+                                                           : MTL::SamplerMipFilterNotMipmapped);
+    samplerDescriptor->setMaxAnisotropy(std::max<NS::UInteger>(1, samplerState.maxAnisotropy));
     samplerDescriptor->setSAddressMode(samplerState.wrapU == gfx::TextureWrapType::Clamp
                                            ? MTL::SamplerAddressModeClampToEdge
                                            : MTL::SamplerAddressModeRepeat);

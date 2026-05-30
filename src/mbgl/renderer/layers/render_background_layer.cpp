@@ -23,12 +23,31 @@
 #include <mbgl/renderer/update_parameters.hpp>
 #include <mbgl/shaders/shader_program_base.hpp>
 
+#include <cstdlib>
+#include <limits>
+
 namespace mbgl {
 
 using namespace style;
 using namespace shaders;
 
 namespace {
+
+constexpr int32_t DrapeBackgroundLayerIndex = std::numeric_limits<int32_t>::max();
+
+bool klattraLogDrapeStale() {
+    return std::getenv("KLATTRA_LOG_DRAPE_STALE") != nullptr;
+}
+
+bool klattraDisableBackgroundDrape() {
+    static const bool disabled = std::getenv("KLATTRA_DISABLE_BACKGROUND_DRAPE") != nullptr;
+    return disabled;
+}
+
+std::string klattraDrapeIDString(const OverscaledTileID& id) {
+    return "z" + std::to_string(static_cast<int>(id.canonical.z)) + "/" +
+           std::to_string(id.canonical.x) + "/" + std::to_string(id.canonical.y);
+}
 
 inline const BackgroundLayer::Impl& impl_cast(const Immutable<style::Layer::Impl>& impl) {
     assert(impl->getTypeInfo() == BackgroundLayer::Impl::staticTypeInfo());
@@ -141,8 +160,7 @@ void RenderBackgroundLayer::update(gfx::ShaderRegistry& shaders,
                                evaluated.get<style::BackgroundOpacity>() < 1.0f ||
                                evaluated.get<style::BackgroundColor>().a < 1.0f)
                                 ? RenderPass::Translucent
-                                : RenderPass::Opaque |
-                                      RenderPass::Translucent; // evaluated based on opaquePassCutoff in render()
+                                : RenderPass::Opaque;
 
     // If the result is transparent or missing, just remove any existing drawables and stop
     if (drawPasses == RenderPass::None) {
@@ -241,6 +259,21 @@ void RenderBackgroundLayer::update(gfx::ShaderRegistry& shaders,
     // setup almost line-for-line, swapping the source of the RenderTarget
     // (Phase 1 drape cache instead of a fresh allocation per layer).
     if (activeTerrain) {
+        if (klattraDisableBackgroundDrape()) {
+            activeTerrain->visitDrapeTargets(
+                [&](const OverscaledTileID& id, TerrainDrapeTargetPtr& tgt) {
+                    const bool removed = tgt && tgt->removeLayerGroup(DrapeBackgroundLayerIndex);
+                    if (klattraLogDrapeStale()) {
+                        Log::Info(Event::Render,
+                                  "[Klättra DRAPE_STALE] layer=" + getID() +
+                                      " kind=background-drape-disabled tile=" +
+                                      klattraDrapeIDString(id) +
+                                      " removed=" + std::to_string(removed));
+                    }
+                });
+            return;
+        }
+
         // Lazily construct the drape-pass tweaker (ortho matrix instead of
         // the camera's getTileMatrix). Same evaluated properties as the
         // main tweaker so colour / opacity / pattern stay in sync.
@@ -262,12 +295,16 @@ void RenderBackgroundLayer::update(gfx::ShaderRegistry& shaders,
         std::unique_ptr<gfx::DrawableBuilder> drapeBuilder;
         for (auto& [tileID, drape] : drapeEntries) {
 
-            // Get or create a single-tile TileLayerGroup inside the target
-            // at layer index 0 (relative within the drape target).
-            auto* drapeGroup = static_cast<TileLayerGroup*>(drape->getLayerGroup(0).get());
+            // Get or create a single-tile TileLayerGroup inside the target.
+            // RenderTarget opaque passes visit layer indices high-to-low, so
+            // park the backdrop at the highest index to draw it first. If the
+            // background stays at index 0 it paints over draped hillshade/fills
+            // and the terrain samples a beige texture.
+            auto* drapeGroup = static_cast<TileLayerGroup*>(
+                drape->getLayerGroup(DrapeBackgroundLayerIndex).get());
             if (!drapeGroup) {
                 auto newGroup = context.createTileLayerGroup(
-                    /*layerIndex=*/0, /*initialCapacity=*/1, getID() + "-drape");
+                    /*layerIndex=*/DrapeBackgroundLayerIndex, /*initialCapacity=*/1, getID() + "-drape");
                 if (!newGroup) continue;
                 newGroup->addLayerTweaker(drapeLayerTweaker);
                 drape->addLayerGroup(newGroup, /*replace=*/false);
@@ -283,7 +320,12 @@ void RenderBackgroundLayer::update(gfx::ShaderRegistry& shaders,
                 drapeBuilder = context.createDrawableBuilder("background-drape");
                 drapeBuilder->setRenderPass(drawPasses);
                 drapeBuilder->setShader(curShader);
-                drapeBuilder->setDepthType(gfx::DepthMaskType::ReadWrite);
+                // In a terrain drape target the background is just the
+                // backdrop for later draped layers. If it writes depth, the
+                // fills/lines/hillshade that share the same tile-local plane
+                // can fail depth testing and the terrain samples a mostly
+                // beige texture.
+                drapeBuilder->setDepthType(gfx::DepthMaskType::ReadOnly);
                 drapeBuilder->setColorMode(drawPasses == RenderPass::Translucent
                                                ? gfx::ColorMode::alphaBlended()
                                                : gfx::ColorMode::unblended());

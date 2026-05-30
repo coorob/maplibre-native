@@ -11,6 +11,7 @@
 
 @class MLNSource;
 @class MLNLight;
+@class MLNTerrain;
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -282,6 +283,21 @@ MLN_EXPORT
  Provides global light source for the style.
  */
 @property (nonatomic, strong) MLNLight *light;
+
+// MARK: Managing the Style's Terrain
+
+/**
+ 3D terrain configuration, or `nil` if terrain is disabled.
+
+ Assign a non-`nil` ``MLNTerrain`` to enable 3D terrain rendering. Set to `nil`
+ to disable terrain — useful when the camera zooms below the DEM source's tile
+ range so that drape-capable layers fall back to flat rendering rather than
+ vanishing.
+
+ The terrain's ``MLNTerrain/sourceIdentifier`` must refer to a raster-DEM
+ source that exists in the style.
+ */
+@property (nonatomic, strong, nullable) MLNTerrain *terrain;
 
 // MARK: Localizing Map Content
 

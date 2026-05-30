@@ -23,6 +23,9 @@ public:
     virtual PremultipliedImage readStillImage() = 0;
 
     virtual const gfx::Texture2DPtr& getTexture() = 0;
+
+    virtual void setMipmapped(bool) {}
+    virtual void generateMipmaps() {}
 };
 
 } // namespace gfx

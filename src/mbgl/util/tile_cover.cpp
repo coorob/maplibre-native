@@ -2,6 +2,7 @@
 #include <mbgl/util/bounding_volumes.hpp>
 #include <mbgl/util/constants.hpp>
 #include <mbgl/util/interpolate.hpp>
+#include <mbgl/util/projection.hpp>
 #include <mbgl/util/tile_coordinate.hpp>
 #include <mbgl/util/tile_cover.hpp>
 #include <mbgl/util/tile_cover_impl.hpp>
@@ -174,7 +175,17 @@ std::vector<OverscaledTileID> tileCover(const TileCoverParameters& state,
     const auto& transform = state.transformState;
     const double numTiles = std::pow(2.0, z);
     const double worldSize = Projection::worldSize(transform.getScale());
-    const uint8_t minZoom = transform.getPitch() <= state.tileLodPitchThreshold ? z : 0;
+    const double metersToTileUnits = worldSize > 0.0
+        ? (1.0 / Projection::getMetersPerPixelAtLatitude(transform.getLatLng().latitude(), transform.getZoom())) /
+              worldSize * numTiles
+        : 0.0;
+    const double minElevation = std::min(state.tileCoverMinElevationMeters, state.tileCoverMaxElevationMeters) *
+                                metersToTileUnits;
+    const double maxElevation = std::max(state.tileCoverMinElevationMeters, state.tileCoverMaxElevationMeters) *
+                                metersToTileUnits;
+    const uint8_t minZoom = transform.getPitch() <= state.tileLodPitchThreshold
+                                ? z
+                                : std::min<uint8_t>(state.tileLodMinZoom, z);
     const uint8_t maxZoom = z;
     const uint8_t overscaledZoom = std::max(overscaledZ.value_or(z), z);
     const bool flippedY = transform.getViewportMode() == ViewportMode::FlippedY;
@@ -193,7 +204,7 @@ std::vector<OverscaledTileID> tileCover(const TileCoverParameters& state,
     const double radiusOfMaxLvlLodInTiles = std::max(1.0, state.tileLodMinRadius);
 
     const auto newRootTile = [&](int16_t wrap) -> Node {
-        return {AABB({{wrap * numTiles, 0.0, 0.0}}, {{(wrap + 1) * numTiles, numTiles, 0.0}}),
+        return {AABB({{wrap * numTiles, 0.0, minElevation}}, {{(wrap + 1) * numTiles, numTiles, maxElevation}}),
                 uint8_t(0),
                 uint16_t(0),
                 uint16_t(0),
@@ -281,6 +292,35 @@ std::vector<OverscaledTileID> tileCover(const TileCoverParameters& state,
 
     for (const auto& tile : result) {
         ids.push_back(tile.id);
+    }
+
+    if (state.tileCoverMinElevationMeters != 0.0 || state.tileCoverMaxElevationMeters != 0.0) {
+        std::vector<OverscaledTileID> expanded = ids;
+        const int32_t tileCountAtZ = 1 << z;
+        constexpr int32_t radius = 1;
+        for (const auto& id : ids) {
+            for (int32_t dy = -radius; dy <= radius; ++dy) {
+                const int32_t y = static_cast<int32_t>(id.canonical.y) + dy;
+                if (y < 0 || y >= tileCountAtZ) continue;
+                for (int32_t dx = -radius; dx <= radius; ++dx) {
+                    int32_t x = static_cast<int32_t>(id.canonical.x) + dx;
+                    int16_t wrap = id.wrap;
+                    while (x < 0) {
+                        x += tileCountAtZ;
+                        --wrap;
+                    }
+                    while (x >= tileCountAtZ) {
+                        x -= tileCountAtZ;
+                        ++wrap;
+                    }
+                    expanded.emplace_back(id.overscaledZ, wrap, id.canonical.z, static_cast<uint32_t>(x),
+                                          static_cast<uint32_t>(y));
+                }
+            }
+        }
+        std::sort(expanded.begin(), expanded.end());
+        expanded.erase(std::unique(expanded.begin(), expanded.end()), expanded.end());
+        ids = std::move(expanded);
     }
 
     return ids;

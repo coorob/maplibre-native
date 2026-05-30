@@ -9,6 +9,8 @@ namespace style {
 
 struct RasterDEMOptions {
     std::optional<Tileset::DEMEncoding> encoding = std::nullopt;
+    std::optional<uint8_t> minzoom = std::nullopt;
+    std::optional<uint8_t> maxzoom = std::nullopt;
 };
 
 // NOTE: Any derived class must invalidate `weakFactory` in the destructor

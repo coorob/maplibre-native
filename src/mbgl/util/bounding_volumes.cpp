@@ -128,11 +128,14 @@ Frustum::Frustum(const std::array<vec3, 8>& points_, const std::array<vec4, 6>& 
     for (size_t i = 0; i < frustumEdges.size(); i++) {
         // Cross product [1, 0, 0] x [a, b, c] == [0, -c, b]
         // Cross product [0, 1, 0] x [a, b, c] == [c, 0, -a]
+        // Cross product [0, 0, 1] x [a, b, c] == [-b, a, 0]
         const vec3 axis0 = {{0.0, -frustumEdges[i][2], frustumEdges[i][1]}};
         const vec3 axis1 = {{frustumEdges[i][2], 0.0, -frustumEdges[i][0]}};
+        const vec3 axis2 = {{-frustumEdges[i][1], frustumEdges[i][0], 0.0}};
 
-        projections[i * 2] = {axis0, ProjectPointsToAxis(points, points[0], axis0)};
-        projections[i * 2 + 1] = {axis1, ProjectPointsToAxis(points, points[0], axis1)};
+        projections[i * 3] = {axis0, ProjectPointsToAxis(points, points[0], axis0)};
+        projections[i * 3 + 1] = {axis1, ProjectPointsToAxis(points, points[0], axis1)};
+        projections[i * 3 + 2] = {axis2, ProjectPointsToAxis(points, points[0], axis2)};
     }
 }
 
@@ -199,16 +202,18 @@ IntersectionResult Frustum::intersects(const AABB& aabb) const {
     // Each frustum plane together with 3 major axes define the separating axes
     // This implementation is conservative as it's not checking all possible axes.
     // False positive rate is ~0.5% of all cases (see intersectsPrecise).
-    // Note: test only 4 points as both min and max points have zero elevation
-    assert(aabb.min[2] == 0.0 && aabb.max[2] == 0.0);
 
     if (!bounds.intersects(aabb)) return IntersectionResult::Separate;
 
-    const std::array<vec4, 4> aabbPoints = {{
-        vec4{{aabb.min[0], aabb.min[1], 0.0, 1.0}},
-        vec4{{aabb.max[0], aabb.min[1], 0.0, 1.0}},
-        vec4{{aabb.max[0], aabb.max[1], 0.0, 1.0}},
-        vec4{{aabb.min[0], aabb.max[1], 0.0, 1.0}},
+    const std::array<vec4, 8> aabbPoints = {{
+        vec4{{aabb.min[0], aabb.min[1], aabb.min[2], 1.0}},
+        vec4{{aabb.max[0], aabb.min[1], aabb.min[2], 1.0}},
+        vec4{{aabb.max[0], aabb.max[1], aabb.min[2], 1.0}},
+        vec4{{aabb.min[0], aabb.max[1], aabb.min[2], 1.0}},
+        vec4{{aabb.min[0], aabb.min[1], aabb.max[2], 1.0}},
+        vec4{{aabb.max[0], aabb.min[1], aabb.max[2], 1.0}},
+        vec4{{aabb.max[0], aabb.max[1], aabb.max[2], 1.0}},
+        vec4{{aabb.min[0], aabb.max[1], aabb.max[2], 1.0}},
     }};
 
     bool fullyInside = true;
@@ -218,10 +223,9 @@ IntersectionResult Frustum::intersects(const AABB& aabb) const {
     for (const vec4& plane : planes) {
         size_t pointsInside = 0;
 
-        pointsInside += vec4Dot(plane, aabbPoints[0]) >= -epsilon;
-        pointsInside += vec4Dot(plane, aabbPoints[1]) >= -epsilon;
-        pointsInside += vec4Dot(plane, aabbPoints[2]) >= -epsilon;
-        pointsInside += vec4Dot(plane, aabbPoints[3]) >= -epsilon;
+        for (const vec4& point : aabbPoints) {
+            pointsInside += vec4Dot(plane, point) >= -epsilon;
+        }
 
         if (!pointsInside) {
             // Separating axis found, no intersection
@@ -241,10 +245,16 @@ IntersectionResult Frustum::intersectsPrecise(const AABB& aabb, bool edgeCasesOn
         if (result == IntersectionResult::Separate) return result;
     }
 
-    const std::array<vec3, 4> aabbPoints = {{vec3{{aabb.min[0], aabb.min[1], 0.0}},
-                                             vec3{{aabb.max[0], aabb.min[1], 0.0}},
-                                             vec3{{aabb.max[0], aabb.max[1], 0.0}},
-                                             vec3{{aabb.min[0], aabb.max[1], 0.0}}}};
+    const std::array<vec3, 8> aabbPoints = {{
+        vec3{{aabb.min[0], aabb.min[1], aabb.min[2]}},
+        vec3{{aabb.max[0], aabb.min[1], aabb.min[2]}},
+        vec3{{aabb.max[0], aabb.max[1], aabb.min[2]}},
+        vec3{{aabb.min[0], aabb.max[1], aabb.min[2]}},
+        vec3{{aabb.min[0], aabb.min[1], aabb.max[2]}},
+        vec3{{aabb.max[0], aabb.min[1], aabb.max[2]}},
+        vec3{{aabb.max[0], aabb.max[1], aabb.max[2]}},
+        vec3{{aabb.min[0], aabb.max[1], aabb.max[2]}},
+    }};
 
     // For a precise SAT-test all edge cases needs to be covered
     // Projections of the frustum on separating axis candidates have been precomputed already

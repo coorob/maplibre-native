@@ -17,6 +17,7 @@
 #import "MLNSource.h"
 #import "MLNSource_Private.h"
 #import "MLNLight_Private.h"
+#import "MLNTerrain_Private.h"
 #import "MLNTileSource_Private.h"
 #import "MLNVectorTileSource_Private.h"
 #import "MLNRasterTileSource.h"
@@ -31,6 +32,7 @@
 #include <mbgl/style/style.hpp>
 #include <mbgl/style/image.hpp>
 #include <mbgl/style/light.hpp>
+#include <mbgl/style/terrain.hpp>
 #include <mbgl/style/sources/geojson_source.hpp>
 #include <mbgl/style/sources/vector_source.hpp>
 #include <mbgl/style/sources/raster_source.hpp>
@@ -580,6 +582,26 @@ const MLNExceptionName MLNRedundantSourceIdentifierException = @"MLNRedundantSou
     auto mbglLight = self.rawStyle->getLight();
     MLNLight *light = [[MLNLight alloc] initWithMBGLLight:mbglLight];
     return light;
+}
+
+// MARK: Style terrain
+
+- (void)setTerrain:(MLNTerrain *)terrain
+{
+    if (terrain) {
+        self.rawStyle->setTerrain([terrain mbglTerrain]);
+    } else {
+        self.rawStyle->setTerrain(nullptr);
+    }
+}
+
+- (MLNTerrain *)terrain
+{
+    const auto *mbglTerrain = self.rawStyle->getTerrain();
+    if (!mbglTerrain) {
+        return nil;
+    }
+    return [[MLNTerrain alloc] initWithMBGLTerrain:mbglTerrain];
 }
 
 - (NSString *)description

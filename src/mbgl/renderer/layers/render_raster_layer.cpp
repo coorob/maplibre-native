@@ -20,6 +20,7 @@
 #include <mbgl/renderer/update_parameters.hpp>
 #include <mbgl/shaders/shader_program_base.hpp>
 
+#include <cstdlib>
 #include <unordered_set>
 
 namespace mbgl {
@@ -32,6 +33,20 @@ namespace {
 inline const RasterLayer::Impl& impl_cast(const Immutable<style::Layer::Impl>& impl) {
     assert(impl->getTypeInfo() == RasterLayer::Impl::staticTypeInfo());
     return static_cast<const RasterLayer::Impl&>(*impl);
+}
+
+bool klattraLogDrapeStale() {
+    return std::getenv("KLATTRA_LOG_DRAPE_STALE") != nullptr;
+}
+
+bool klattraDisableRasterDrape() {
+    static const bool disabled = std::getenv("KLATTRA_DISABLE_RASTER_DRAPE") != nullptr;
+    return disabled;
+}
+
+std::string klattraDrapeIDString(const OverscaledTileID& id) {
+    return "z" + std::to_string(static_cast<int>(id.canonical.z)) + "/" +
+           std::to_string(id.canonical.x) + "/" + std::to_string(id.canonical.y);
 }
 
 } // namespace
@@ -300,11 +315,31 @@ void RenderRasterLayer::update(gfx::ShaderRegistry& shaders,
                     liveDrapeIDs.insert(drapeID);
                     if (auto* drapeGroup = static_cast<TileLayerGroup*>(
                             drapeTarget->getLayerGroup(layerIndex).get())) {
-                        stats.drawablesRemoved += drapeGroup->removeDrawablesIf(
+                        std::size_t removedNotInCover = 0;
+                        std::size_t removedNoOverlap = 0;
+                        const auto removed = drapeGroup->removeDrawablesIf(
                             [&](gfx::Drawable& drawable) {
                                 const auto& dID = drawable.getTileID();
-                                return dID && !hasRenderTile(*dID);
+                                if (!dID) return false;
+                                if (!hasRenderTile(*dID)) {
+                                    removedNotInCover++;
+                                    return true;
+                                }
+                                if (!LayerTweaker::tilesOverlap(*dID, drapeID)) {
+                                    removedNoOverlap++;
+                                    return true;
+                                }
+                                return false;
                             });
+                        stats.drawablesRemoved += removed;
+                        if (removed && klattraLogDrapeStale()) {
+                            Log::Info(Event::Render,
+                                      "[Klättra DRAPE_STALE] layer=" + getID() +
+                                          " kind=raster drape=" + klattraDrapeIDString(drapeID) +
+                                          " removed=" + std::to_string(removed) +
+                                          " not-in-cover=" + std::to_string(removedNotInCover) +
+                                          " no-overlap=" + std::to_string(removedNoOverlap));
+                        }
                     }
                 });
             for (auto it = drapeLayerTweakers.begin(); it != drapeLayerTweakers.end();) {
@@ -317,6 +352,19 @@ void RenderRasterLayer::update(gfx::ShaderRegistry& shaders,
         }
 
         auto* tileLayerGroup = static_cast<TileLayerGroup*>(layerGroup.get());
+
+        // When terrain is active, drop main-pass raster drawables for tiles
+        // with DEM coverage — the drape variant emitted further below paints
+        // them onto the terrain mesh. Tiles without DEM coverage keep their
+        // main-pass drawables so the layer doesn't vanish at zooms below
+        // the DEM source's range. See `render_fill_layer.cpp` for the
+        // rationale.
+        if (activeTerrain) {
+            stats.drawablesRemoved += tileLayerGroup->removeDrawablesIf([&](gfx::Drawable& drawable) {
+                const auto& tileID = drawable.getTileID();
+                return tileID && activeTerrain->hasElevationCoverage(*tileID);
+            });
+        }
 
         for (const RenderTile& tile : *renderTiles) {
             const auto& tileID = tile.getOverscaledTileID();
@@ -333,6 +381,18 @@ void RenderRasterLayer::update(gfx::ShaderRegistry& shaders,
             if (setRenderTileBucketID(tileID, bucket.getID())) {
                 // Bucket ID changed, we need to rebuild the drawables
                 removeTile(renderPass, tileID);
+                // Also drop drape-pass drawables for this tile (see
+                // render_fill_layer.cpp comment).
+                if (activeTerrain) {
+                    activeTerrain->visitDrapeTargets(
+                        [&](const OverscaledTileID&, TerrainDrapeTargetPtr& drapeTarget) {
+                            if (!drapeTarget) return;
+                            if (auto* drapeGroup = static_cast<TileLayerGroup*>(
+                                    drapeTarget->getLayerGroup(layerIndex).get())) {
+                                stats.drawablesRemoved += drapeGroup->removeDrawables(renderPass, tileID).size();
+                            }
+                        });
+                }
                 cleared = true;
             }
             // If the bucket data has changed, rebuild the drawables.
@@ -392,6 +452,14 @@ void RenderRasterLayer::update(gfx::ShaderRegistry& shaders,
             // finish
             builder->flush(context);
             for (auto& drawable : builder->clearDrawables()) {
+                if (activeTerrain && activeTerrain->hasElevationCoverage(tileID)) {
+                    // Skip main-pass — terrain mesh drapes raster via the
+                    // drape-pass variant emitted just below. Drawable
+                    // falls out of scope here and is destroyed.
+                    // When this tile has no DEM coverage, fall through to
+                    // the main-pass emit so the raster doesn't vanish.
+                    continue;
+                }
                 drawable->setTileID(tileID);
                 drawable->setLayerTweaker(layerTweaker);
                 tileLayerGroup->addDrawable(renderPass, tileID, std::move(drawable));
@@ -401,7 +469,7 @@ void RenderRasterLayer::update(gfx::ShaderRegistry& shaders,
             // Phase 2 drape routing: emit a copy of this raster tile into each
             // overlapping DEM drape RenderTarget so the terrain mesh can sample
             // raster basemap content (e.g. satellite tiles) as it displaces.
-            if (activeTerrain) {
+            if (activeTerrain && !klattraDisableRasterDrape()) {
                 activeTerrain->visitDrapeTargets(
                     [&](const OverscaledTileID& drapeID, TerrainDrapeTargetPtr& drapeTarget) {
                         if (!drapeTarget || !LayerTweaker::tilesOverlap(tileID, drapeID)) return;

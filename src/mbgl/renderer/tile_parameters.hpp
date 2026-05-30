@@ -31,12 +31,22 @@ public:
     mapbox::base::WeakPtr<AnnotationManager> annotationManager;
     std::shared_ptr<ImageManager> imageManager;
     std::shared_ptr<GlyphManager> glyphManager;
-    const uint8_t prefetchZoomDelta;
+    // Not const so per-source overrides (e.g. `RenderRasterDEMSource`
+    // capping DEM prefetch at delta=2 to avoid 16× resolution drops when
+    // tiles are streaming) can copy-and-edit `TileParameters` before
+    // passing to `TilePyramid::update`.
+    uint8_t prefetchZoomDelta;
     TaggedScheduler threadPool;
     double tileLodMinRadius = 3;
     double tileLodScale = 1;
     double tileLodPitchThreshold = (60.0 / 180.0) * std::numbers::pi;
     double tileLodZoomShift = 0;
+    // Floor on variable-zoom emission. See `TileCoverParameters::tileLodMinZoom`.
+    uint8_t tileLodMinZoom = 0;
+    // Conservative vertical tile-cover range for non-flat sources such as
+    // raster-dem terrain. Values are metres and default to the flat z=0 plane.
+    double tileCoverMinElevationMeters = 0.0;
+    double tileCoverMaxElevationMeters = 0.0;
     gfx::DynamicTextureAtlasPtr dynamicTextureAtlas;
 };
 

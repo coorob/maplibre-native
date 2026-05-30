@@ -113,13 +113,24 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
     util::TileCoverParameters tileCoverParameters = {parameters.transformState,
                                                      parameters.tileLodMinRadius,
                                                      parameters.tileLodScale,
-                                                     parameters.tileLodPitchThreshold};
+                                                     parameters.tileLodPitchThreshold,
+                                                     parameters.tileLodMinZoom,
+                                                     parameters.tileCoverMinElevationMeters,
+                                                     parameters.tileCoverMaxElevationMeters};
 
-    if (overscaledZoom >= zoomRange.min) {
-        int32_t idealZoom = std::min<int32_t>(zoomRange.max, overscaledZoom);
+    // Raster DEM is not a normal visual source: at pitched zoom-outs the
+    // camera can drop below the DEM archive's minzoom while terrain still
+    // needs a mesh/drape cover for the visible ground. Clamp to the source
+    // minzoom instead of returning no tiles, otherwise terrain disappears
+    // and drape-capable layers fall back to the bare background.
+    const bool underMinRasterDEM = type == SourceType::RasterDEM && overscaledZoom < zoomRange.min;
+    if (overscaledZoom >= zoomRange.min || underMinRasterDEM) {
+        int32_t idealZoom = std::min<int32_t>(
+            zoomRange.max,
+            std::max<int32_t>(zoomRange.min, overscaledZoom));
 
         // Make sure we're not reparsing overzoomed raster tiles.
-        if (type == SourceType::Raster) {
+        if (type == SourceType::Raster || type == SourceType::RasterDEM) {
             tileZoom = idealZoom;
         }
 

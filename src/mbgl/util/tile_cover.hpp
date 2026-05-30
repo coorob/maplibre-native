@@ -38,6 +38,19 @@ struct TileCoverParameters {
     double tileLodMinRadius = 3;
     double tileLodScale = 1;
     double tileLodPitchThreshold = (60.0 / 180.0) * std::numbers::pi;
+    // Floor on the variable-zoom emission level. When `transform.getPitch()`
+    // exceeds `tileLodPitchThreshold`, the cover algorithm is normally free
+    // to emit tiles down to zoom 0 for the distant horizon. Sources that
+    // are sensitive to large zoom gaps (e.g. raster-dem, where the terrain
+    // mesh visibly pops between a cached coarse parent and the streaming
+    // fine ideal) can raise this floor to cap how far down variable-zoom
+    // goes. 0 = no floor (existing behavior).
+    uint8_t tileLodMinZoom = 0;
+    // Optional vertical range, in metres, used when the tile surface is not a
+    // flat z=0 plane. Raster DEM terrain uses this to keep pitched frustum
+    // cover conservative until per-tile min/max elevation is available.
+    double tileCoverMinElevationMeters = 0.0;
+    double tileCoverMaxElevationMeters = 0.0;
 };
 
 int32_t coveringZoomLevel(double z, style::SourceType type, uint16_t tileSize) noexcept;

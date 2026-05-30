@@ -80,6 +80,14 @@ public:
         }
     }
 
+    /// Iterate every cached target (const overload).
+    template <typename Func /* void(const OverscaledTileID&, const TerrainDrapeTargetPtr&) */>
+    void visitAll(Func f) const {
+        for (const auto& entry : targetsByTileID) {
+            f(entry.first, entry.second);
+        }
+    }
+
     /// Number of cached targets.
     size_t size() const noexcept { return targetsByTileID.size(); }
 

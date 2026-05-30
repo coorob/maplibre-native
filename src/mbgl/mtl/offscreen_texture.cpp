@@ -79,6 +79,7 @@ public:
 
     void swap() override {
         assert(commandBuffer);
+        encodeMipmaps(commandBuffer.get());
         commandBuffer->commit();
         commandBuffer->waitUntilCompleted();
         commandBuffer.reset();
@@ -100,6 +101,35 @@ public:
     gfx::Texture2DPtr& getTexture() {
         assert(colorTexture);
         return colorTexture;
+    }
+
+    void setMipmapped(bool enabled) {
+        mipmapped = enabled;
+        colorTexture->setSamplerConfiguration({gfx::TextureFilterType::Linear,
+                                               gfx::TextureWrapType::Clamp,
+                                               gfx::TextureWrapType::Clamp,
+                                               static_cast<uint8_t>(enabled ? 8 : 1),
+                                               enabled});
+    }
+
+    void generateMipmaps() {
+        if (!mipmapped) {
+            return;
+        }
+
+        const auto& commandQueue = context.getBackend().getCommandQueue();
+        if (!commandQueue) {
+            return;
+        }
+
+        auto commandBuffer = NS::RetainPtr(commandQueue->commandBuffer());
+        if (!commandBuffer) {
+            return;
+        }
+
+        encodeMipmaps(commandBuffer.get());
+        commandBuffer->commit();
+        commandBuffer->waitUntilCompleted();
     }
 
     const RendererBackend& getBackend() const override { return context.getBackend(); }
@@ -124,11 +154,32 @@ private:
     gfx::Texture2DPtr stencilTexture;
     MTLCommandBufferPtr commandBuffer;
     MTLRenderPassDescriptorPtr renderPassDescriptor;
+    bool mipmapped = false;
+
+    void encodeMipmaps(MTL::CommandBuffer* targetCommandBuffer) {
+        if (!mipmapped || !targetCommandBuffer) {
+            return;
+        }
+
+        colorTexture->create();
+        auto* texture = static_cast<Texture2D*>(colorTexture.get())->getMetalTexture();
+        if (!texture || texture->mipmapLevelCount() <= 1) {
+            return;
+        }
+
+        auto blitEncoder = NS::RetainPtr(targetCommandBuffer->blitCommandEncoder());
+        if (!blitEncoder) {
+            return;
+        }
+
+        blitEncoder->generateMipmaps(texture);
+        blitEncoder->endEncoding();
+    }
 };
 
 OffscreenTexture::OffscreenTexture(
     Context& context, const Size size_, const gfx::TextureChannelDataType type, bool depth, bool stencil)
-    : gfx::OffscreenTexture(size, std::make_unique<OffscreenTextureResource>(context, size_, type, depth, stencil)) {}
+    : gfx::OffscreenTexture(size_, std::make_unique<OffscreenTextureResource>(context, size_, type, depth, stencil)) {}
 
 bool OffscreenTexture::isRenderable() {
     assert(false);
@@ -141,6 +192,14 @@ PremultipliedImage OffscreenTexture::readStillImage() {
 
 const gfx::Texture2DPtr& OffscreenTexture::getTexture() {
     return getResource<OffscreenTextureResource>().getTexture();
+}
+
+void OffscreenTexture::setMipmapped(bool enabled) {
+    getResource<OffscreenTextureResource>().setMipmapped(enabled);
+}
+
+void OffscreenTexture::generateMipmaps() {
+    getResource<OffscreenTextureResource>().generateMipmaps();
 }
 
 } // namespace mtl
