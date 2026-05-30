@@ -5,6 +5,8 @@
 #include <mbgl/util/run_loop.hpp>
 
 #include <filesystem>
+#include <memory>
+#include <vector>
 
 #include <climits>
 #include <gtest/gtest.h>
@@ -102,4 +104,58 @@ TEST(PMTilesFileSource, NonExistentTile) {
         });
 
     loop.run();
+}
+
+// Regression: a tile request chains header -> directory -> tile sub-requests.
+// Each hop used to overwrite a single per-request task slot, which freed the
+// still-executing sub-request from inside its own completion callback — a
+// use-after-free on the PMTilesFileSource worker thread that crashed during map
+// teardown/transitions. Fire several overlapping chains and require them all to
+// complete cleanly. Under ASan this also catches the freed-mid-callback access.
+TEST(PMTilesFileSource, ConcurrentTileRequests) {
+    util::RunLoop loop;
+
+    PMTilesFileSource pmtiles(ResourceOptions::Default(), ClientOptions());
+
+    constexpr int kCount = 8;
+    int completed = 0;
+    std::vector<std::unique_ptr<AsyncRequest>> reqs;
+
+    for (int i = 0; i < kCount; ++i) {
+        reqs.push_back(pmtiles.request(
+            Resource::tile(toAbsoluteURL("geography-class-png.pmtiles"), 1.0, 0, 0, 0, Tileset::Scheme::XYZ),
+            [&](Response res) {
+                EXPECT_EQ(nullptr, res.error);
+                if (++completed == kCount) {
+                    loop.stop();
+                }
+            }));
+    }
+
+    loop.run();
+
+    EXPECT_EQ(completed, kCount);
+}
+
+// Regression: tearing the source down while requests are in flight must cancel
+// the chained sub-requests cleanly and never free an in-flight request from
+// inside its own callback. Models the iOS map-view teardown that crashed.
+TEST(PMTilesFileSource, DestroyDuringRequest) {
+    util::RunLoop loop;
+
+    auto pmtiles = std::make_unique<PMTilesFileSource>(ResourceOptions::Default(), ClientOptions());
+
+    std::vector<std::unique_ptr<AsyncRequest>> reqs;
+    for (int i = 0; i < 8; ++i) {
+        reqs.push_back(pmtiles->request(
+            Resource::tile(toAbsoluteURL("geography-class-png.pmtiles"), 1.0, 0, 0, 0, Tileset::Scheme::XYZ),
+            [](Response) {}));
+    }
+
+    // Destroy the file source (joins the worker thread), then the requests,
+    // while sub-requests may still be in flight. Must not crash.
+    pmtiles.reset();
+    reqs.clear();
+
+    SUCCEED();
 }
