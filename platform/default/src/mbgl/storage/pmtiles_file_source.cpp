@@ -422,10 +422,12 @@ private:
                         return;
                     }
 
-                    if (!responseMetadata.data) {
-                        callback(std::make_unique<Response::Error>(
-                            Response::Error::Reason::Other,
-                            std::string("Error fetching PMTiles metadata: empty response data")));
+                    if (!responseMetadata.data || responseMetadata.data->empty()) {
+                        // Metadata is optional for building TileJSON. Some hosts/CDN
+                        // paths occasionally return an empty metadata range even
+                        // after a valid header; keep the source alive using the
+                        // header-derived fallback below.
+                        parse_callback(std::string());
                         return;
                     }
 
