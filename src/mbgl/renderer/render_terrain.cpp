@@ -103,6 +103,15 @@ uint32_t klattraEnvFrameCount(const char* name, uint32_t fallback) {
     return static_cast<uint32_t>(std::clamp<unsigned long>(parsed, 0, 120));
 }
 
+uint32_t klattraEnvLevelCount(const char* name, uint32_t fallback) {
+    const char* value = std::getenv(name);
+    if (!value) return fallback;
+    char* end = nullptr;
+    const unsigned long parsed = std::strtoul(value, &end, 10);
+    if (end == value) return fallback;
+    return static_cast<uint32_t>(std::clamp<unsigned long>(parsed, 0, 4));
+}
+
 } // namespace
 
 RenderTerrain::RenderTerrain(Immutable<style::Terrain::Impl> impl_)
@@ -221,6 +230,25 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
         currentSourceIDs.insert(renderTile.getOverscaledTileID());
     }
 
+    // Exact drape targets give the final sharp topo texture. Coarser parent
+    // targets give fast-moving cameras something stable to sample while new
+    // exact targets bake. This mirrors the render-to-texture tile pyramid in
+    // mature terrain renderers: show a cached parent immediately, sharpen to
+    // the child only after it has completed.
+    std::unordered_set<OverscaledTileID> currentDrapeIDs = currentIdealIDs;
+    static const uint32_t drapeFallbackLevels =
+        klattraEnvLevelCount("KLATTRA_DRAPE_FALLBACK_LEVELS", 2);
+    if (drapeFallbackLevels > 0) {
+        for (const auto& tileID : currentIdealIDs) {
+            for (uint32_t level = 1; level <= drapeFallbackLevels; ++level) {
+                if (tileID.canonical.z < level) {
+                    break;
+                }
+                currentDrapeIDs.insert(tileID.scaledTo(static_cast<uint8_t>(tileID.canonical.z - level)));
+            }
+        }
+    }
+
     const bool drapeCoverStable = currentIdealIDs == previousIdealIDs;
     const bool cameraChanging = state.isChanging() || state.isGestureInProgress();
     if (!cameraChanging && drapeCoverStable) {
@@ -239,6 +267,8 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
                       " cameraChanging=" + std::to_string(cameraChanging) +
                       " coverStable=" + std::to_string(drapeCoverStable) +
                       " stableFrames=" + std::to_string(stableDrapeCoverFrames) +
+                      " fallbackLevels=" + std::to_string(drapeFallbackLevels) +
+                      " activeDrapeTargets=" + std::to_string(currentDrapeIDs.size()) +
                       " highQuality=" + std::to_string(useHighQualityDrape));
     }
 
@@ -254,7 +284,7 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
     // shader samples this target as the surface colour; basemap layers route
     // drawables into it (RenderBackgroundLayer / RenderFillLayer / ...).
     {
-        const auto drapeTargetSizeForTile = [useHighQualityDrape](const OverscaledTileID& tileID) -> int32_t {
+        const auto drapeTargetSizeForTile = [&](const OverscaledTileID& tileID) -> int32_t {
             // Low-zoom DEM padding can legitimately cover many more terrain
             // tiles at pitched camera angles. Their on-screen texel density
             // does not justify the full close-zoom 2048px drape budget.
@@ -262,12 +292,16 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
             static const int32_t z10Size = klattraEnvTargetSize("KLATTRA_DRAPE_TARGET_SIZE_Z10", 1024);
             static const int32_t movingSize = klattraEnvTargetSize("KLATTRA_DRAPE_TARGET_SIZE_INTERACTIVE", 1024);
             static const int32_t stillSize = klattraEnvTargetSize("KLATTRA_DRAPE_TARGET_SIZE_CLOSE", DRAPE_TARGET_SIZE);
+            static const int32_t fallbackSize = klattraEnvTargetSize("KLATTRA_DRAPE_TARGET_SIZE_FALLBACK", 1024);
+            if (currentIdealIDs.find(tileID) == currentIdealIDs.end()) {
+                return std::min(fallbackSize, movingSize);
+            }
             if (tileID.canonical.z <= 8) return z8Size;
             if (tileID.canonical.z <= 10) return z10Size;
             return useHighQualityDrape ? stillSize : movingSize;
         };
 
-        for (const auto& tileID : currentIdealIDs) {
+        for (const auto& tileID : currentDrapeIDs) {
             const int32_t targetSize = drapeTargetSizeForTile(tileID);
             const Size desiredSize{static_cast<uint32_t>(targetSize), static_cast<uint32_t>(targetSize)};
             if (auto existing = drapeCache.get(tileID)) {
@@ -302,7 +336,7 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
             }
         }
         auto evicted = drapeCache.pruneIf([&](const OverscaledTileID& id) {
-            if (currentIdealIDs.find(id) != currentIdealIDs.end()) {
+            if (currentDrapeIDs.find(id) != currentDrapeIDs.end()) {
                 return false;
             }
             auto target = drapeCache.get(id);
@@ -333,7 +367,7 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
             changes.emplace_back(std::make_unique<RemoveRenderTargetRequest>(std::move(evictedTarget)));
         }
         for (auto it = retiredDrapeTargetsByTile.begin(); it != retiredDrapeTargetsByTile.end();) {
-            if (currentIdealIDs.find(it->first) == currentIdealIDs.end()) {
+            if (currentDrapeIDs.find(it->first) == currentDrapeIDs.end()) {
                 it = retiredDrapeTargetsByTile.erase(it);
             } else {
                 ++it;
