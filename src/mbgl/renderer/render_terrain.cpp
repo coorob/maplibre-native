@@ -37,6 +37,7 @@
 #include <cstring>
 #include <limits>
 #include <unordered_set>
+#include <utility>
 
 namespace mbgl {
 
@@ -66,7 +67,21 @@ std::size_t klattraDrapeDrawableCount(const TerrainDrapeTargetPtr& target) {
 }
 
 bool klattraDrapeTargetReady(const TerrainDrapeTargetPtr& target) {
-    return target && target->hasCompletedRender() && target->numDrawables() > 0;
+    return RenderTerrain::isDrapeTargetReady(target);
+}
+
+bool klattraIsAncestorOf(const OverscaledTileID& ancestor, const OverscaledTileID& child) {
+    return ancestor.canonical.z < child.canonical.z && LayerTweaker::tilesOverlap(ancestor, child);
+}
+
+std::pair<std::array<float, 2>, float> klattraSubrectForChildInAncestor(const OverscaledTileID& child,
+                                                                        const OverscaledTileID& ancestor) {
+    const uint8_t dz = static_cast<uint8_t>(child.canonical.z - ancestor.canonical.z);
+    const uint32_t mask = (1u << dz) - 1u;
+    const uint32_t subX = child.canonical.x & mask;
+    const uint32_t subY = child.canonical.y & mask;
+    const float scale = 1.0f / static_cast<float>(1u << dz);
+    return {{{static_cast<float>(subX) * scale, static_cast<float>(subY) * scale}}, scale};
 }
 
 int32_t klattraEnvTargetSize(const char* name, int32_t fallback) {
@@ -227,8 +242,21 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
                 changes.emplace_back(std::make_unique<AddRenderTargetRequest>(target));
             }
         }
-        auto evicted = drapeCache.pruneIf(
-            [&](const OverscaledTileID& id) { return currentIdealIDs.find(id) == currentIdealIDs.end(); });
+        auto evicted = drapeCache.pruneIf([&](const OverscaledTileID& id) {
+            if (currentIdealIDs.find(id) != currentIdealIDs.end()) {
+                return false;
+            }
+            auto target = drapeCache.get(id);
+            if (!klattraDrapeTargetReady(target)) {
+                return true;
+            }
+            for (const auto& idealID : currentIdealIDs) {
+                if (klattraIsAncestorOf(id, idealID)) {
+                    return false;
+                }
+            }
+            return true;
+        });
         for (auto& [evictedID, evictedTarget] : evicted) {
             if (traceDrape) {
                 Log::Info(Event::Render,
@@ -433,20 +461,16 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
         const OverscaledTileID idealOS(ideal.canonical.z, ideal.wrap, ideal.canonical);
         const auto& sourceID = tile.id;
 
-        DEMBinding binding{/*texture=*/nullptr, /*sourceID=*/sourceID};
+        DEMBinding binding(nullptr, sourceID);
 
         if (auto texIt = demTexturesByTile.find(sourceID); texIt != demTexturesByTile.end()) {
             binding.texture = texIt->second;
             // If the source tile is a strict ancestor of the ideal,
             // compute the ideal's sub-rect inside the source's UV space.
             if (ideal.canonical.z > sourceID.canonical.z) {
-                const uint8_t dz = static_cast<uint8_t>(ideal.canonical.z - sourceID.canonical.z);
-                const uint32_t mask = (1u << dz) - 1u;
-                const uint32_t sub_x = ideal.canonical.x & mask;
-                const uint32_t sub_y = ideal.canonical.y & mask;
-                const float scale = 1.0f / static_cast<float>(1u << dz);
-                binding.demTL = {{static_cast<float>(sub_x) * scale, static_cast<float>(sub_y) * scale}};
-                binding.demScale = scale;
+                auto [demTL, demScale] = klattraSubrectForChildInAncestor(idealOS, sourceID);
+                binding.demTL = demTL;
+                binding.demScale = demScale;
             }
             // Else: ideal == source (or, defensively, ideal is an ancestor
             // of source — shouldn't happen since updateRenderables walks
@@ -464,9 +488,33 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
             binding.usedEmptyDEM = true;
         }
 
-        auto drape = drapeCache.get(idealOS);
-        if (drape) {
-            binding.drapeReady = klattraDrapeTargetReady(drape);
+        TerrainDrapeTargetPtr drape = drapeCache.get(idealOS);
+        OverscaledTileID resolvedDrapeID = idealOS;
+        if (!klattraDrapeTargetReady(drape)) {
+            TerrainDrapeTargetPtr bestAncestor;
+            std::optional<OverscaledTileID> bestAncestorID;
+            drapeCache.visitAll([&](const OverscaledTileID& candidateID, const TerrainDrapeTargetPtr& candidate) {
+                if (!klattraDrapeTargetReady(candidate) || !klattraIsAncestorOf(candidateID, idealOS)) {
+                    return;
+                }
+                if (!bestAncestorID || candidateID.canonical.z > bestAncestorID->canonical.z) {
+                    bestAncestor = candidate;
+                    bestAncestorID = candidateID;
+                }
+            });
+            if (bestAncestor && bestAncestorID) {
+                drape = bestAncestor;
+                resolvedDrapeID = *bestAncestorID;
+                binding.usedDrapeFallback = true;
+                auto [drapeTL, drapeScale] = klattraSubrectForChildInAncestor(idealOS, resolvedDrapeID);
+                binding.drapeTL = drapeTL;
+                binding.drapeScale = drapeScale;
+            }
+        }
+        if (klattraDrapeTargetReady(drape) && drape->getTexture()) {
+            binding.drapeReady = true;
+            binding.drapeID = resolvedDrapeID;
+            binding.drapeTexture = drape->getTexture();
         }
 
         if (traceDrape) {
@@ -474,11 +522,16 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
                       "[KLATTRA DRAPE_TRACE] binding frame=" + std::to_string(drapeTraceFrame) +
                           " ideal=" + klattraTileString(idealOS) +
                           " source=" + klattraTileString(binding.sourceID) +
-                          " drape=" + klattraTileString(idealOS) +
+                          " drape=" + (binding.drapeID ? klattraTileString(*binding.drapeID) : std::string("none")) +
                           " demTexture=" + klattraTexturePtrString(binding.texture) +
                           " emptyDEM=" + std::to_string(binding.usedEmptyDEM) +
                           " demTL=" + std::to_string(binding.demTL[0]) + "," + std::to_string(binding.demTL[1]) +
                           " demScale=" + std::to_string(binding.demScale) +
+                          " drapeTexture=" + klattraTexturePtrString(binding.drapeTexture) +
+                          " drapeFallback=" + std::to_string(binding.usedDrapeFallback) +
+                          " drapeTL=" + std::to_string(binding.drapeTL[0]) + "," +
+                              std::to_string(binding.drapeTL[1]) +
+                          " drapeScale=" + std::to_string(binding.drapeScale) +
                           " drapeReady=" + std::to_string(binding.drapeReady) +
                           " drapePtr=" + std::to_string(reinterpret_cast<uintptr_t>(drape.get())) +
                           " drapeCompleted=" + std::to_string(drape ? drape->getCompletedRenderCount() : 0) +
@@ -498,6 +551,10 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
         if (auto existing = currentBindings.find(idealID); existing != currentBindings.end()) {
             if (existing->second.sourceID == binding.sourceID &&
                 existing->second.texture == binding.texture &&
+                existing->second.drapeTexture == binding.drapeTexture &&
+                existing->second.drapeID == binding.drapeID &&
+                existing->second.drapeTL == binding.drapeTL &&
+                existing->second.drapeScale == binding.drapeScale &&
                 existing->second.drapeReady == binding.drapeReady) {
                 if (traceDrape) {
                     Log::Info(Event::Render,
@@ -506,6 +563,10 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
                                   " ideal=" + klattraTileString(idealID) +
                                   " source=" + klattraTileString(binding.sourceID) +
                                   " demTexture=" + klattraTexturePtrString(binding.texture) +
+                                  " drape=" +
+                                      (binding.drapeID ? klattraTileString(*binding.drapeID) : std::string("none")) +
+                                  " drapeTexture=" + klattraTexturePtrString(binding.drapeTexture) +
+                                  " drapeFallback=" + std::to_string(binding.usedDrapeFallback) +
                                   " drapeReady=" + std::to_string(binding.drapeReady));
                 }
                 continue; // drawable already up to date
@@ -519,6 +580,13 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
                               " newSource=" + klattraTileString(binding.sourceID) +
                               " oldTexture=" + klattraTexturePtrString(existing->second.texture) +
                               " newTexture=" + klattraTexturePtrString(binding.texture) +
+                              " oldDrape=" +
+                                  (existing->second.drapeID ? klattraTileString(*existing->second.drapeID)
+                                                            : std::string("none")) +
+                              " newDrape=" +
+                                  (binding.drapeID ? klattraTileString(*binding.drapeID) : std::string("none")) +
+                              " oldDrapeTexture=" + klattraTexturePtrString(existing->second.drapeTexture) +
+                              " newDrapeTexture=" + klattraTexturePtrString(binding.drapeTexture) +
                               " oldDrapeReady=" + std::to_string(existing->second.drapeReady) +
                               " newDrapeReady=" + std::to_string(binding.drapeReady));
             }
@@ -923,28 +991,34 @@ std::unique_ptr<gfx::Drawable> RenderTerrain::createDrawableForTile(gfx::Context
         builder->setTexture(demTexture, 0); // slot 0 = demTexture
     }
 
-    // Bind the ideal tile's drape RenderTarget as the surface colour input.
-    // DEM sampling may still borrow a source parent through binding.demTL /
-    // binding.demScale, but visible map colour must not borrow that parent
-    // texture.
-    if (auto drape = drapeCache.get(idealID);
-        klattraDrapeTargetReady(drape) && drape->getTexture()) {
+    // Bind the resolved drape texture as the surface colour input. Usually
+    // this is the ideal tile's own target, but during zoom-in it can be a
+    // ready ancestor target with binding.drapeTL / binding.drapeScale
+    // remapping the child's UVs into the parent sub-rect.
+    if (binding.drapeReady && binding.drapeTexture) {
         if (klattraLogDrapeTrace()) {
+            auto drape = binding.drapeID ? drapeCache.get(*binding.drapeID) : nullptr;
             Log::Info(Event::Render,
                       "[KLATTRA DRAPE_TRACE] create-terrain-drawable-bind ideal=" +
                           klattraTileString(idealID) +
                           " source=" + klattraTileString(binding.sourceID) +
-                          " drape=" + klattraTileString(idealID) +
+                          " drape=" +
+                              (binding.drapeID ? klattraTileString(*binding.drapeID) : std::string("none")) +
                           " demTexture=" + klattraTexturePtrString(demTexture) +
                           " emptyDEM=" + std::to_string(binding.usedEmptyDEM) +
-                          " drapeTarget=" + drape->getDebugName() +
+                          " drapeTexture=" + klattraTexturePtrString(binding.drapeTexture) +
+                          " drapeFallback=" + std::to_string(binding.usedDrapeFallback) +
+                          " drapeTL=" + std::to_string(binding.drapeTL[0]) + "," +
+                              std::to_string(binding.drapeTL[1]) +
+                          " drapeScale=" + std::to_string(binding.drapeScale) +
+                          " drapeTarget=" + (drape ? drape->getDebugName() : std::string("none")) +
                           " drapePtr=" + std::to_string(reinterpret_cast<uintptr_t>(drape.get())) +
-                          " drapeCompleted=" + std::to_string(drape->getCompletedRenderCount()) +
-                          " drapeGroups=" + std::to_string(drape->numLayerGroups()) +
-                          " drapeContentGroups=" + std::to_string(drape->numContentLayerGroups()) +
+                          " drapeCompleted=" + std::to_string(drape ? drape->getCompletedRenderCount() : 0) +
+                          " drapeGroups=" + std::to_string(drape ? drape->numLayerGroups() : 0) +
+                          " drapeContentGroups=" + std::to_string(drape ? drape->numContentLayerGroups() : 0) +
                           " drapeDrawables=" + std::to_string(klattraDrapeDrawableCount(drape)));
         }
-        builder->setTexture(drape->getTexture(), 1); // slot 1 = mapTexture
+        builder->setTexture(binding.drapeTexture, 1); // slot 1 = mapTexture
     } else {
         Log::Warning(Event::Render,
                      "Drape target missing or not ready for ideal tile " + util::toString(idealID));

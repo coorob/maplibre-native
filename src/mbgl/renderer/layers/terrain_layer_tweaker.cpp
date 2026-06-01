@@ -210,11 +210,19 @@ void TerrainLayerTweaker::execute(LayerGroupBase& layerGroup, const PaintParamet
         std::array<float, 2> demTL{{0.0f, 0.0f}};
         float demScale = 1.0f;
         float metersPerTile = 1.0f;
+        std::array<float, 2> drapeTL{{0.0f, 0.0f}};
+        float drapeScale = 1.0f;
         if (const auto* binding = terrain->getDEMBinding(*drawable.getTileID())) {
             demTL = binding->demTL;
             demScale = binding->demScale;
             metersPerTile = metersPerTileAtCenter(binding->sourceID.canonical);
-            if (auto drape = terrain->getDrapeTarget(*drawable.getTileID())) {
+            drapeTL = binding->drapeTL;
+            drapeScale = binding->drapeScale;
+            if (binding->drapeID) {
+                if (auto drape = terrain->getDrapeTarget(*binding->drapeID)) {
+                    drape->inspectDebugPixels();
+                }
+            } else if (auto drape = terrain->getDrapeTarget(*drawable.getTileID())) {
                 drape->inspectDebugPixels();
             }
             if (logTerrainFinal && (logTerrainFinalRepeat || traceFrame <= 12 || traceFrame % 60 == 0)) {
@@ -222,12 +230,19 @@ void TerrainLayerTweaker::execute(LayerGroupBase& layerGroup, const PaintParamet
                           "[KLATTRA TERRAIN_FINAL] frame=" + std::to_string(traceFrame) +
                               " tile=" + klattraTileString(*drawable.getTileID()) +
                               " source=" + klattraTileString(binding->sourceID) +
-                              " drape=" + klattraTileString(*drawable.getTileID()) +
+                              " drape=" +
+                                  (binding->drapeID ? klattraTileString(*binding->drapeID)
+                                                    : std::string("none")) +
                               " demTexture=" + klattraTexturePtrString(binding->texture) +
                               " emptyDEM=" + std::to_string(binding->usedEmptyDEM) +
                               " drapeReady=" + std::to_string(binding->drapeReady) +
+                              " drapeTexture=" + klattraTexturePtrString(binding->drapeTexture) +
+                              " drapeFallback=" + std::to_string(binding->usedDrapeFallback) +
                               " demTL=" + std::to_string(demTL[0]) + "," + std::to_string(demTL[1]) +
                               " demScale=" + std::to_string(demScale) +
+                              " drapeTL=" + std::to_string(drapeTL[0]) + "," +
+                                  std::to_string(drapeTL[1]) +
+                              " drapeScale=" + std::to_string(drapeScale) +
                               " metersPerTile=" + std::to_string(metersPerTile) +
                               " matrixZ=" + std::to_string(matrix[8]) + "," +
                                   std::to_string(matrix[9]) + "," +
@@ -248,7 +263,10 @@ void TerrainLayerTweaker::execute(LayerGroupBase& layerGroup, const PaintParamet
             .matrix = util::cast<float>(matrix),
             .dem_tl = demTL,
             .dem_scale = demScale,
-            .meters_per_tile = metersPerTile
+            .meters_per_tile = metersPerTile,
+            .drape_tl = drapeTL,
+            .drape_scale = drapeScale,
+            .pad1 = 0.0f
         };
 
 #if !MLN_UBO_CONSOLIDATION

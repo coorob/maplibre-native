@@ -16,6 +16,9 @@ layout (std140) uniform TerrainDrawableUBO {
     highp vec2 u_dem_tl;
     highp float u_dem_scale;
     highp float u_meters_per_tile;
+    highp vec2 u_drape_tl;
+    highp float u_drape_scale;
+    highp float u_pad1_drawable;
 };
 
 layout (std140) uniform TerrainEvaluatedPropsUBO {
@@ -31,6 +34,7 @@ uniform sampler2D u_dem_texture;
 
 out vec2 v_uv;
 out vec2 v_mapUV;
+out vec2 v_drapeUV;
 out float v_elevation;
 out float v_meters_per_tile;
 out float v_dem_scale;
@@ -82,6 +86,7 @@ void main() {
     // sampled from the ideal tile's own target using raw `uv`, so coarse
     // DEM fallback cannot also force coarse map colour.
     vec2 mapUV = uv * u_dem_scale + u_dem_tl;
+    vec2 drapeUV = uv * u_drape_scale + u_drape_tl;
 
     // Bilinear-on-decoded centre elevation (avoids RGB-blend noise).
     float elevationMeters = sampleElevationBilinear(u_dem_texture, mapUV);
@@ -98,6 +103,7 @@ void main() {
     gl_Position = u_matrix * vec4(pos.x, pos.y, elevation, 1.0);
     v_uv = uv;
     v_mapUV = mapUV;
+    v_drapeUV = drapeUV;
     v_elevation = elevation;
     v_meters_per_tile = u_meters_per_tile;
     v_dem_scale = u_dem_scale;
@@ -105,6 +111,7 @@ void main() {
 )";
     static constexpr const char* fragment = R"(in vec2 v_uv;
 in vec2 v_mapUV;
+in vec2 v_drapeUV;
 in float v_elevation;
 in float v_meters_per_tile;
 in float v_dem_scale;
@@ -208,10 +215,11 @@ void main() {
     // relief in the final terrain pass instead of baking hillshade into
     // the drape texture.
     // Note: Y-coordinate is flipped (1.0 - y) to match OpenGL convention.
-    // Drape targets are keyed by the ideal tile, so sample them with raw
-    // ideal-tile UVs. `v_mapUV` remains the DEM parent-fallback sub-rect
-    // and is used only for elevation/relief.
-    vec4 mapColor = texture(u_map_texture, vec2(v_uv.x, 1.0 - v_uv.y));
+    // `v_drapeUV` is normally the ideal-tile UV, but can temporarily remap
+    // into a ready parent drape target while a zoomed-in child target warms.
+    // `v_mapUV` remains the DEM parent-fallback sub-rect and is used only
+    // for elevation/relief.
+    vec4 mapColor = texture(u_map_texture, vec2(v_drapeUV.x, 1.0 - v_drapeUV.y));
     if (mapColor.a > 0.01 || max(max(mapColor.r, mapColor.g), mapColor.b) > 0.001) {
         float shade = terrainReliefShade(u_dem_texture, v_mapUV, v_meters_per_tile);
         fragColor = vec4(clamp(mapColor.rgb * shade, vec3(0.0), vec3(1.0)), 1.0);

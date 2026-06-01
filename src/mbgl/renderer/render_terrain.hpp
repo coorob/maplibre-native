@@ -139,12 +139,21 @@ public:
     // when either changes — typically when the exact DEM arrives and
     // takes over from a parent fallback.
     struct DEMBinding {
+        DEMBinding(std::shared_ptr<gfx::Texture2D> texture_, const OverscaledTileID& sourceID_)
+            : texture(texture_),
+              sourceID(sourceID_) {}
+
         std::shared_ptr<gfx::Texture2D> texture;
         OverscaledTileID sourceID; // tile whose DEM is bound (may be ancestor)
         std::array<float, 2> demTL{{0.0f, 0.0f}};
         float demScale = 1.0f;
+        std::shared_ptr<gfx::Texture2D> drapeTexture;
+        std::optional<OverscaledTileID> drapeID; // drape target supplying map colour (may be ancestor)
+        std::array<float, 2> drapeTL{{0.0f, 0.0f}};
+        float drapeScale = 1.0f;
         bool drapeReady = false;
         bool usedEmptyDEM = false;
+        bool usedDrapeFallback = false;
     };
 
     /**
@@ -180,6 +189,22 @@ public:
      * overlaps so non-terrain areas stay populated instead of becoming the
      * beige clear colour.
      */
+    static uint64_t minCompletedDrapeRenders() noexcept {
+        const char* value = std::getenv("KLATTRA_DRAPE_READY_COMPLETED_RENDERS");
+        if (!value || !*value) {
+            return 2;
+        }
+        char* end = nullptr;
+        const auto parsed = std::strtoull(value, &end, 10);
+        return end != value && parsed > 0 ? parsed : 2;
+    }
+
+    static bool isDrapeTargetReady(const TerrainDrapeTargetPtr& target) noexcept {
+        return target &&
+               target->getCompletedRenderCount() >= minCompletedDrapeRenders() &&
+               target->hasContentLayerGroups();
+    }
+
     bool hasElevationCoverage(const OverscaledTileID& sourceTileID) const {
         if (drapeCache.size() == 0) return false;
         // Debug/visual experiment: at high pitch, low-zoom vector/raster
@@ -200,8 +225,9 @@ public:
         drapeCache.visitAll([&](const OverscaledTileID& drapeID, const TerrainDrapeTargetPtr& target) {
             if (covered) return;
             if (!target ||
-                (!skipPendingMainPass && !target->hasCompletedRender()) ||
-                target->numDrawables() == 0 ||
+                (!skipPendingMainPass &&
+                 target->getCompletedRenderCount() < minCompletedDrapeRenders()) ||
+                !target->hasContentLayerGroups() ||
                 !LayerTweaker::tilesOverlap(sourceTileID, drapeID)) {
                 return;
             }

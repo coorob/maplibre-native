@@ -21,9 +21,12 @@ struct alignas(16) TerrainDrawableUBO {
     /* 64 */ float2 dem_tl;
     /* 72 */ float dem_scale;
     /* 76 */ float meters_per_tile;
-    /* 80 */
+    /* 80 */ float2 drape_tl;
+    /* 88 */ float drape_scale;
+    /* 92 */ float pad1;
+    /* 96 */
 };
-static_assert(sizeof(TerrainDrawableUBO) == 80, "wrong size");
+static_assert(sizeof(TerrainDrawableUBO) == 96, "wrong size");
 
 struct alignas(16) TerrainTilePropsUBO {
     /*  0 */ float2 dem_tl;
@@ -77,6 +80,9 @@ struct FragmentStage {
                      // identity remap (exact-zoom data), `mapUV == uv`; with
                      // parent fallback, `mapUV` lands inside the parent's
                      // sub-rect. This is for DEM elevation/relief only.
+    float2 drapeUV;  // UV remapped to the drape colour target. Usually the
+                     // same as `uv`, but during zoom-in it may land inside a
+                     // ready parent target while the exact child target warms.
     float elevation;
     float metersPerTile;
     float demScale;
@@ -215,6 +221,7 @@ FragmentStage vertex vertexMain(thread const VertexStage vertx [[stage_in]],
     // Drape colour is sampled from the ideal tile's own target using raw
     // `uv`, so coarse DEM fallback cannot also force coarse map colour.
     float2 mapUV = uv * drawable.dem_scale + drawable.dem_tl;
+    float2 drapeUV = uv * drawable.drape_scale + drawable.drape_tl;
 
     // Centre elevation at this vertex, bilinearly interpolated on the
     // *decoded* values so vertices between DEM texels don't pick up the
@@ -254,6 +261,7 @@ FragmentStage vertex vertexMain(thread const VertexStage vertx [[stage_in]],
         .position  = position,
         .uv        = uv,
         .mapUV     = mapUV,
+        .drapeUV   = drapeUV,
         .elevation = elevation,
         .metersPerTile = drawable.meters_per_tile,
         .demScale = drawable.dem_scale,
@@ -281,10 +289,11 @@ half4 fragment fragmentMain(FragmentStage in [[stage_in]],
     // render target avoids the low-zoom hillshade tiling artifacts while
     // still letting the shaded surface follow the final DEM mesh.
     // Note: Y-coordinate is flipped (1.0 - y) to match OpenGL convention.
-    // Drape targets are keyed by the ideal tile, so sample them with raw
-    // ideal-tile UVs. `mapUV` remains the DEM parent-fallback sub-rect and
-    // is used only for elevation/relief.
-    float2 drapeUV = float2(in.uv.x, 1.0 - in.uv.y);
+    // `drapeUV` is normally the ideal-tile UV, but can temporarily remap
+    // into a ready parent drape target while a zoomed-in child target warms.
+    // `mapUV` remains the DEM parent-fallback sub-rect and is used only for
+    // elevation/relief.
+    float2 drapeUV = float2(in.drapeUV.x, 1.0 - in.drapeUV.y);
     float4 mapColor = (props.pad1 > 1.5 && props.pad1 < 2.5)
                           ? mapTexture.sample(mapSampler, drapeUV, level(0.0))
                           : mapTexture.sample(mapSampler, drapeUV);
