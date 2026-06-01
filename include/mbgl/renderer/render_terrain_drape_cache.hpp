@@ -54,6 +54,19 @@ public:
     /// not allocate.
     TerrainDrapeTargetPtr get(const OverscaledTileID& tileID) const;
 
+    /// Remove and return a target without destroying it immediately. The
+    /// caller can then emit a matching RemoveRenderTargetRequest before
+    /// replacing it with a differently sized target for the same tile.
+    TerrainDrapeTargetPtr take(const OverscaledTileID& tileID) {
+        auto it = targetsByTileID.find(tileID);
+        if (it == targetsByTileID.end()) {
+            return nullptr;
+        }
+        auto target = std::move(it->second);
+        targetsByTileID.erase(it);
+        return target;
+    }
+
     /// Evict targets for tile IDs that the predicate marks for removal.
     /// Returns the (id, target) pairs removed so the caller can emit a
     /// RemoveRenderTargetRequest for each before the targets' lifetimes

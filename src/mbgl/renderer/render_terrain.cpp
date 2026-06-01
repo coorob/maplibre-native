@@ -11,6 +11,7 @@
 #include <mbgl/renderer/layer_group.hpp>
 #include <mbgl/renderer/layers/terrain_layer_tweaker.hpp>
 #include <mbgl/renderer/buckets/hillshade_bucket.hpp>
+#include <mbgl/map/transform_state.hpp>
 #include <mbgl/geometry/dem_data.hpp>
 #include <mbgl/tile/raster_dem_tile.hpp>
 #include <mbgl/tile/tile.hpp>
@@ -93,6 +94,15 @@ int32_t klattraEnvTargetSize(const char* name, int32_t fallback) {
     return static_cast<int32_t>(std::clamp<long>(parsed, 256, 4096));
 }
 
+uint32_t klattraEnvFrameCount(const char* name, uint32_t fallback) {
+    const char* value = std::getenv(name);
+    if (!value) return fallback;
+    char* end = nullptr;
+    const unsigned long parsed = std::strtoul(value, &end, 10);
+    if (end == value) return fallback;
+    return static_cast<uint32_t>(std::clamp<unsigned long>(parsed, 0, 120));
+}
+
 } // namespace
 
 RenderTerrain::RenderTerrain(Immutable<style::Terrain::Impl> impl_)
@@ -113,7 +123,7 @@ void RenderTerrain::update(const UpdateParameters& parameters) {
 void RenderTerrain::update(RenderOrchestrator& orchestrator,
                            gfx::ShaderRegistry& shaders,
                            gfx::Context& context,
-                           const TransformState& /*state*/,
+                           const TransformState& state,
                            const std::shared_ptr<UpdateParameters>& /*updateParameters*/,
                            const RenderTree& renderTree,
                            UniqueChangeRequestVec& changes) {
@@ -211,6 +221,27 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
         currentSourceIDs.insert(renderTile.getOverscaledTileID());
     }
 
+    const bool drapeCoverStable = currentIdealIDs == previousIdealIDs;
+    const bool cameraChanging = state.isChanging() || state.isGestureInProgress();
+    if (!cameraChanging && drapeCoverStable) {
+        stableDrapeCoverFrames++;
+    } else {
+        stableDrapeCoverFrames = 0;
+    }
+    previousIdealIDs = currentIdealIDs;
+
+    static const uint32_t qualityUpgradeFrames =
+        klattraEnvFrameCount("KLATTRA_DRAPE_QUALITY_UPGRADE_FRAMES", 8);
+    const bool useHighQualityDrape = !cameraChanging && stableDrapeCoverFrames >= qualityUpgradeFrames;
+    if (traceDrape) {
+        Log::Info(Event::Render,
+                  "[KLATTRA DRAPE_TRACE] target-quality frame=" + std::to_string(drapeTraceFrame) +
+                      " cameraChanging=" + std::to_string(cameraChanging) +
+                      " coverStable=" + std::to_string(drapeCoverStable) +
+                      " stableFrames=" + std::to_string(stableDrapeCoverFrames) +
+                      " highQuality=" + std::to_string(useHighQualityDrape));
+    }
+
     // Phase 1 of the drape pass (see FINISH_TERRAIN.md / TERRAIN_PROGRESS.md):
     // ensure a per-tile RenderTarget exists before we create drawables for
     // those tiles, so the drawable-creation step can bind the matching
@@ -223,21 +254,49 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
     // shader samples this target as the surface colour; basemap layers route
     // drawables into it (RenderBackgroundLayer / RenderFillLayer / ...).
     {
-        const auto drapeTargetSizeForTile = [](const OverscaledTileID& tileID) -> int32_t {
+        const auto drapeTargetSizeForTile = [useHighQualityDrape](const OverscaledTileID& tileID) -> int32_t {
             // Low-zoom DEM padding can legitimately cover many more terrain
             // tiles at pitched camera angles. Their on-screen texel density
             // does not justify the full close-zoom 2048px drape budget.
             static const int32_t z8Size = klattraEnvTargetSize("KLATTRA_DRAPE_TARGET_SIZE_Z8", 512);
             static const int32_t z10Size = klattraEnvTargetSize("KLATTRA_DRAPE_TARGET_SIZE_Z10", 1024);
+            static const int32_t movingSize = klattraEnvTargetSize("KLATTRA_DRAPE_TARGET_SIZE_INTERACTIVE", 1024);
+            static const int32_t stillSize = klattraEnvTargetSize("KLATTRA_DRAPE_TARGET_SIZE_CLOSE", DRAPE_TARGET_SIZE);
             if (tileID.canonical.z <= 8) return z8Size;
             if (tileID.canonical.z <= 10) return z10Size;
-            return DRAPE_TARGET_SIZE;
+            return useHighQualityDrape ? stillSize : movingSize;
         };
 
         for (const auto& tileID : currentIdealIDs) {
-            const bool wasAllocated = drapeCache.get(tileID) != nullptr;
             const int32_t targetSize = drapeTargetSizeForTile(tileID);
-            auto target = drapeCache.getOrCreate(context, tileID, {targetSize, targetSize});
+            const Size desiredSize{static_cast<uint32_t>(targetSize), static_cast<uint32_t>(targetSize)};
+            if (auto existing = drapeCache.get(tileID)) {
+                const Size existingSize = existing->getSize();
+                const bool shouldUpgrade = existingSize != desiredSize && existingSize.area() < desiredSize.area();
+                if (shouldUpgrade) {
+                    auto oldTarget = drapeCache.take(tileID);
+                    if (klattraDrapeTargetReady(oldTarget)) {
+                        retiredDrapeTargetsByTile[tileID] = oldTarget;
+                    } else {
+                        retiredDrapeTargetsByTile.erase(tileID);
+                    }
+                    if (traceDrape) {
+                        Log::Info(Event::Render,
+                                  "[KLATTRA DRAPE_TRACE] cache-upgrade frame=" + std::to_string(drapeTraceFrame) +
+                                      " tile=" + klattraTileString(tileID) +
+                                      " oldSize=" + std::to_string(existingSize.width) + "x" +
+                                          std::to_string(existingSize.height) +
+                                      " newSize=" + std::to_string(desiredSize.width) + "x" +
+                                          std::to_string(desiredSize.height) +
+                                      " retiredReady=" + std::to_string(klattraDrapeTargetReady(oldTarget)) +
+                                      " stableFrames=" + std::to_string(stableDrapeCoverFrames));
+                    }
+                    changes.emplace_back(std::make_unique<RemoveRenderTargetRequest>(oldTarget));
+                }
+            }
+
+            const bool wasAllocated = drapeCache.get(tileID) != nullptr;
+            auto target = drapeCache.getOrCreate(context, tileID, desiredSize);
             if (!wasAllocated && target) {
                 changes.emplace_back(std::make_unique<AddRenderTargetRequest>(target));
             }
@@ -272,6 +331,13 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
             // shared_ptr to this target — emit a matching remove request
             // so it lets go and the GPU resources can release.
             changes.emplace_back(std::make_unique<RemoveRenderTargetRequest>(std::move(evictedTarget)));
+        }
+        for (auto it = retiredDrapeTargetsByTile.begin(); it != retiredDrapeTargetsByTile.end();) {
+            if (currentIdealIDs.find(it->first) == currentIdealIDs.end()) {
+                it = retiredDrapeTargetsByTile.erase(it);
+            } else {
+                ++it;
+            }
         }
     }
 
@@ -491,25 +557,32 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
         TerrainDrapeTargetPtr drape = drapeCache.get(idealOS);
         OverscaledTileID resolvedDrapeID = idealOS;
         if (!klattraDrapeTargetReady(drape)) {
-            TerrainDrapeTargetPtr bestAncestor;
-            std::optional<OverscaledTileID> bestAncestorID;
-            drapeCache.visitAll([&](const OverscaledTileID& candidateID, const TerrainDrapeTargetPtr& candidate) {
-                if (!klattraDrapeTargetReady(candidate) || !klattraIsAncestorOf(candidateID, idealOS)) {
-                    return;
+            auto retired = retiredDrapeTargetsByTile.find(idealOS);
+            if (retired != retiredDrapeTargetsByTile.end() && klattraDrapeTargetReady(retired->second)) {
+                drape = retired->second;
+            } else {
+                TerrainDrapeTargetPtr bestAncestor;
+                std::optional<OverscaledTileID> bestAncestorID;
+                drapeCache.visitAll([&](const OverscaledTileID& candidateID, const TerrainDrapeTargetPtr& candidate) {
+                    if (!klattraDrapeTargetReady(candidate) || !klattraIsAncestorOf(candidateID, idealOS)) {
+                        return;
+                    }
+                    if (!bestAncestorID || candidateID.canonical.z > bestAncestorID->canonical.z) {
+                        bestAncestor = candidate;
+                        bestAncestorID = candidateID;
+                    }
+                });
+                if (bestAncestor && bestAncestorID) {
+                    drape = bestAncestor;
+                    resolvedDrapeID = *bestAncestorID;
+                    binding.usedDrapeFallback = true;
+                    auto [drapeTL, drapeScale] = klattraSubrectForChildInAncestor(idealOS, resolvedDrapeID);
+                    binding.drapeTL = drapeTL;
+                    binding.drapeScale = drapeScale;
                 }
-                if (!bestAncestorID || candidateID.canonical.z > bestAncestorID->canonical.z) {
-                    bestAncestor = candidate;
-                    bestAncestorID = candidateID;
-                }
-            });
-            if (bestAncestor && bestAncestorID) {
-                drape = bestAncestor;
-                resolvedDrapeID = *bestAncestorID;
-                binding.usedDrapeFallback = true;
-                auto [drapeTL, drapeScale] = klattraSubrectForChildInAncestor(idealOS, resolvedDrapeID);
-                binding.drapeTL = drapeTL;
-                binding.drapeScale = drapeScale;
             }
+        } else {
+            retiredDrapeTargetsByTile.erase(idealOS);
         }
         if (klattraDrapeTargetReady(drape) && drape->getTexture()) {
             binding.drapeReady = true;
@@ -1077,6 +1150,9 @@ void RenderTerrain::clearRenderState(UniqueChangeRequestVec& changes) {
     currentBindings.clear();
     demImagesByTile.clear();
     demTexturesByTile.clear();
+    previousIdealIDs.clear();
+    stableDrapeCoverFrames = 0;
+    retiredDrapeTargetsByTile.clear();
 
     auto evicted = drapeCache.pruneIf([](const OverscaledTileID&) { return true; });
     for (auto& [tileID, target] : evicted) {

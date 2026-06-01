@@ -279,6 +279,10 @@ const gfx::Texture2DPtr& RenderTarget::getTexture() {
     return offscreenTexture->getTexture();
 };
 
+Size RenderTarget::getSize() const noexcept {
+    return offscreenTexture ? offscreenTexture->getSize() : Size{};
+}
+
 void RenderTarget::setMipmapped(bool enabled) {
     mipmapped = enabled;
     offscreenTexture->setMipmapped(enabled);

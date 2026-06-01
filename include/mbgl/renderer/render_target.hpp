@@ -37,6 +37,9 @@ public:
     /// Get the render target texture
     const gfx::Texture2DPtr& getTexture();
 
+    /// Pixel size of the offscreen target.
+    Size getSize() const noexcept;
+
     /// Number of completed offscreen renders for this target.
     uint64_t getCompletedRenderCount() const noexcept { return completedRenderCount; }
 
