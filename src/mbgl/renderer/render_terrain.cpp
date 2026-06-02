@@ -39,6 +39,7 @@
 #include <limits>
 #include <unordered_set>
 #include <utility>
+#include <vector>
 
 namespace mbgl {
 
@@ -110,6 +111,49 @@ uint32_t klattraEnvLevelCount(const char* name, uint32_t fallback) {
     const unsigned long parsed = std::strtoul(value, &end, 10);
     if (end == value) return fallback;
     return static_cast<uint32_t>(std::clamp<unsigned long>(parsed, 0, 4));
+}
+
+uint32_t klattraEnvTilePadding(const char* name, uint32_t fallback) {
+    const char* value = std::getenv(name);
+    if (!value) return fallback;
+    char* end = nullptr;
+    const unsigned long parsed = std::strtoul(value, &end, 10);
+    if (end == value) return fallback;
+    return static_cast<uint32_t>(std::clamp<unsigned long>(parsed, 0, 2));
+}
+
+void klattraAddDrapeOverscan(std::unordered_set<OverscaledTileID>& drapeIDs,
+                             const std::unordered_set<OverscaledTileID>& idealIDs,
+                             uint32_t padding) {
+    if (padding == 0 || idealIDs.empty()) {
+        return;
+    }
+
+    const int32_t pad = static_cast<int32_t>(padding);
+    const std::size_t ringArea = static_cast<std::size_t>((pad * 2 + 1) * (pad * 2 + 1) - 1);
+    drapeIDs.reserve(drapeIDs.size() + idealIDs.size() * ringArea);
+
+    for (const auto& tileID : idealIDs) {
+        const auto z = tileID.canonical.z;
+        const auto worldSize = int64_t{1} << z;
+        const auto baseX = static_cast<int64_t>(tileID.wrap) * worldSize +
+                           static_cast<int64_t>(tileID.canonical.x);
+        const auto baseY = static_cast<int64_t>(tileID.canonical.y);
+
+        for (int32_t dy = -pad; dy <= pad; ++dy) {
+            const auto y = baseY + dy;
+            if (y < 0 || y >= worldSize) {
+                continue;
+            }
+            for (int32_t dx = -pad; dx <= pad; ++dx) {
+                if (dx == 0 && dy == 0) {
+                    continue;
+                }
+                const UnwrappedTileID neighbor(z, baseX + dx, y);
+                drapeIDs.emplace(tileID.overscaledZ, neighbor.wrap, neighbor.canonical);
+            }
+        }
+    }
 }
 
 } // namespace
@@ -236,10 +280,15 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
     // mature terrain renderers: show a cached parent immediately, sharpen to
     // the child only after it has completed.
     std::unordered_set<OverscaledTileID> currentDrapeIDs = currentIdealIDs;
+    static const uint32_t drapeOverscanTiles =
+        klattraEnvTilePadding("KLATTRA_DRAPE_OVERSCAN_TILES", 1);
+    klattraAddDrapeOverscan(currentDrapeIDs, currentIdealIDs, drapeOverscanTiles);
+    const std::vector<OverscaledTileID> exactAndOverscanDrapeIDs(currentDrapeIDs.begin(),
+                                                                 currentDrapeIDs.end());
     static const uint32_t drapeFallbackLevels =
         klattraEnvLevelCount("KLATTRA_DRAPE_FALLBACK_LEVELS", 2);
     if (drapeFallbackLevels > 0) {
-        for (const auto& tileID : currentIdealIDs) {
+        for (const auto& tileID : exactAndOverscanDrapeIDs) {
             for (uint32_t level = 1; level <= drapeFallbackLevels; ++level) {
                 if (tileID.canonical.z < level) {
                     break;
@@ -268,6 +317,8 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
                       " coverStable=" + std::to_string(drapeCoverStable) +
                       " stableFrames=" + std::to_string(stableDrapeCoverFrames) +
                       " fallbackLevels=" + std::to_string(drapeFallbackLevels) +
+                      " overscanTiles=" + std::to_string(drapeOverscanTiles) +
+                      " exactDrapeTargets=" + std::to_string(exactAndOverscanDrapeIDs.size()) +
                       " activeDrapeTargets=" + std::to_string(currentDrapeIDs.size()) +
                       " highQuality=" + std::to_string(useHighQualityDrape));
     }

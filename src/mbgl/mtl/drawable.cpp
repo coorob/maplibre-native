@@ -25,9 +25,7 @@
 #include <simd/simd.h>
 
 #include <cassert>
-#if !defined(NDEBUG)
 #include <sstream>
-#endif
 
 namespace mbgl {
 namespace mtl {
@@ -74,7 +72,6 @@ MTL::PrimitiveType getPrimitiveType(const gfx::DrawModeType type) noexcept {
     }
 }
 
-#if !defined(NDEBUG)
 std::string debugLabel(const gfx::Drawable& drawable) {
     std::ostringstream oss;
     oss << drawable.getID().id() << "/" << drawable.getName() << "/tile=";
@@ -87,7 +84,6 @@ std::string debugLabel(const gfx::Drawable& drawable) {
 
     return oss.str();
 }
-#endif // !defined(NDEBUG)
 
 MTL::Buffer* getMetalBuffer(const gfx::IndexVectorBasePtr& indexes) noexcept {
     if (const auto* buf0 = indexes->getBuffer()) {
@@ -270,12 +266,20 @@ void Drawable::draw(PaintParameters& parameters) const {
             constexpr auto indexSize = sizeof(std::uint16_t);
             const NS::UInteger instanceCount = instanceAttributes ? instanceAttributes->getMaxCount() : 1;
             constexpr NS::UInteger baseInstance = 0;
+            const auto indexBufferLength = indexBuffer->length() / indexSize;
+            if (mlSegment.indexOffset + mlSegment.indexLength > indexBufferLength) {
+                Log::Warning(Event::General,
+                             "Skipping invalid Metal drawable segment " + debugLabel(*this) +
+                                 ": index range " + util::toString(mlSegment.indexOffset) + "+" +
+                                 util::toString(mlSegment.indexLength) + " exceeds index buffer length " +
+                                 util::toString(indexBufferLength));
+                continue;
+            }
             const NS::UInteger indexOffset = static_cast<NS::UInteger>(indexSize *
                                                                        mlSegment.indexOffset); // in bytes, not indexes
             const NS::Integer baseVertex = static_cast<NS::Integer>(mlSegment.vertexOffset);
 
 #if !defined(NDEBUG)
-            const auto indexBufferLength = indexBuffer->length() / indexSize;
             const auto* indexes = static_cast<const std::uint16_t*>(const_cast<MTL::Buffer*>(indexBuffer)->contents());
             const auto maxIndex = *std::max_element(indexes + mlSegment.indexOffset,
                                                     indexes + mlSegment.indexOffset + mlSegment.indexLength);
@@ -294,7 +298,6 @@ void Drawable::draw(PaintParameters& parameters) const {
             //             ") indexBuf=" + util::toString((uint64_t)indexBuffer) +
             //             "/" + util::toString(indexBuffer->gpuAddress()));
 
-            assert(mlSegment.indexOffset + mlSegment.indexLength <= indexBufferLength);
             assert(static_cast<std::size_t>(maxIndex) < mlSegment.vertexLength);
 #endif
 
