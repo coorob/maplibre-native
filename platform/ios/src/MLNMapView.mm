@@ -4398,6 +4398,71 @@ static void *windowScreenContext = &windowScreenContext;
     [self didChangeValueForKey:@"camera"];
 }
 
+- (void)setPitch:(CGFloat)pitch
+        aroundAnchorPoint:(CGPoint)anchorPoint
+             withDuration:(NSTimeInterval)duration
+  animationTimingFunction:(nullable CAMediaTimingFunction *)function
+        completionHandler:(nullable void (^)(void))completion {
+    if (!_mbglMap)
+    {
+        if (completion)
+        {
+            completion();
+        }
+        return;
+    }
+
+    MLNLogDebug(@"Setting pitch: %f anchorPoint: %@ duration: %f animationTimingFunction: %@ completionHandler: %@",
+                pitch, NSStringFromCGPoint(anchorPoint), duration, function, completion);
+
+    mbgl::AnimationOptions animationOptions;
+    if (duration > 0)
+    {
+        animationOptions.duration.emplace(MLNDurationFromTimeInterval(duration));
+        CAMediaTimingFunction *timingFunction =
+            function ?: [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionLinear];
+        animationOptions.easing.emplace(MLNUnitBezierForMediaTimingFunction(timingFunction));
+    }
+
+    dispatch_block_t pendingCompletion;
+
+    if (completion)
+    {
+        __weak __typeof__(self) weakSelf = self;
+
+        pendingCompletion = ^{
+            if (![weakSelf scheduleTransitionCompletion:completion])
+            {
+                completion();
+            }
+        };
+
+        animationOptions.transitionFinishFn = [pendingCompletion]() {
+            dispatch_async(dispatch_get_main_queue(), pendingCompletion);
+        };
+    }
+
+    if (pitch == self.camera.pitch)
+    {
+        if (pendingCompletion)
+        {
+            [self animateWithDelay:duration animations:pendingCompletion];
+        }
+        return;
+    }
+
+    [self willChangeValueForKey:@"camera"];
+    [self cancelTransitions];
+
+    self.cameraChangeReasonBitmask |= MLNCameraChangeReasonProgrammatic;
+
+    self.mbglMap.easeTo(mbgl::CameraOptions()
+                            .withPitch(pitch)
+                            .withAnchor(mbgl::ScreenCoordinate { anchorPoint.x, anchorPoint.y }),
+                        animationOptions);
+    [self didChangeValueForKey:@"camera"];
+}
+
 - (void)flyToCamera:(MLNMapCamera *)camera completionHandler:(nullable void (^)(void))completion
 {
     MLNLogDebug(@"Setting flyToCamera: %@ completionHandler: %@", camera, completion);

@@ -1076,6 +1076,29 @@ vertically on the map.
 - (void)setDirection:(CLLocationDirection)direction animated:(BOOL)animated;
 
 /**
+ Changes the pitch of the map around a fixed point in the receiver's coordinate
+ system, optionally animating the change.
+
+ This method is useful for keeping a known screen point, such as the user
+ location puck in follow mode, visually anchored while changing the map's tilt.
+
+ @param pitch The pitch of the map, measured in degrees.
+ @param anchorPoint The point in the receiver's coordinate system to keep
+    anchored during the pitch change.
+ @param duration The amount of time, measured in seconds, that the transition
+    animation should take. Specify `0` to jump to the new pitch immediately.
+ @param function A timing function used for the animation. Set this parameter to
+    `nil` for a linear transition. If the duration is `0`, this parameter is
+    ignored.
+ @param completion The block to execute after the animation finishes.
+ */
+- (void)setPitch:(CGFloat)pitch
+        aroundAnchorPoint:(CGPoint)anchorPoint
+             withDuration:(NSTimeInterval)duration
+  animationTimingFunction:(nullable CAMediaTimingFunction *)function
+        completionHandler:(nullable void (^)(void))completion;
+
+/**
  The minimum pitch of the map’s camera toward the horizon measured in degrees.
 
  If the value of this property is greater than that of the `maximumPitch`
