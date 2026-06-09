@@ -310,7 +310,7 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
     // the child only after it has completed.
     std::unordered_set<OverscaledTileID> currentDrapeIDs = currentIdealIDs;
     static const uint32_t drapeOverscanTiles =
-        klattraEnvTilePadding("KLATTRA_DRAPE_OVERSCAN_TILES", 1);
+        klattraEnvTilePadding("KLATTRA_DRAPE_OVERSCAN_TILES", 0);
     klattraAddDrapeOverscan(currentDrapeIDs, currentIdealIDs, drapeOverscanTiles);
     const std::vector<OverscaledTileID> exactAndOverscanDrapeIDs(currentDrapeIDs.begin(),
                                                                  currentDrapeIDs.end());
@@ -320,7 +320,7 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
     // overscan further so satellite colour is ready before the mesh arrives.
     const std::unordered_set<OverscaledTileID>& terrainMeshIDs = currentIdealIDs;
     static const uint32_t drapeFallbackLevels =
-        klattraEnvLevelCount("KLATTRA_DRAPE_FALLBACK_LEVELS", 2);
+        klattraEnvLevelCount("KLATTRA_DRAPE_FALLBACK_LEVELS", 0);
     if (drapeFallbackLevels > 0) {
         for (const auto& tileID : exactAndOverscanDrapeIDs) {
             for (uint32_t level = 1; level <= drapeFallbackLevels; ++level) {

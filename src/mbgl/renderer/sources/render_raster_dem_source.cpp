@@ -8,9 +8,30 @@
 #include <mbgl/util/tile_cover.hpp>
 #include <mbgl/util/math.hpp>
 
+#include <algorithm>
+#include <cstdlib>
+#include <cstddef>
+
 namespace mbgl {
 
 using namespace style;
+
+namespace {
+
+std::size_t klattraEnvMaxTerrainRenderTiles() {
+    const char* value = std::getenv("KLATTRA_TERRAIN_MAX_RENDER_TILES");
+    if (!value || !*value) {
+        return 72;
+    }
+    char* end = nullptr;
+    const unsigned long parsed = std::strtoul(value, &end, 10);
+    if (end == value) {
+        return 72;
+    }
+    return static_cast<std::size_t>(std::clamp<unsigned long>(parsed, 0, 256));
+}
+
+} // namespace
 
 RenderRasterDEMSource::RenderRasterDEMSource(Immutable<style::TileSource::Impl> impl_,
                                              const TaggedScheduler& threadPool_)
@@ -82,6 +103,12 @@ void RenderRasterDEMSource::updateInternal(const Tileset& tileset,
     // connecting mesh.
     demParameters.tileCoverMinElevationMeters = -6000.0;
     demParameters.tileCoverMaxElevationMeters = 8000.0;
+    // Keep the depth-read background fix from exposing an unbounded pitched
+    // terrain horizon. The env override is read once per source update so
+    // device runs can A/B caps without rebuilding:
+    //   KLATTRA_TERRAIN_MAX_RENDER_TILES=0   full cover
+    //   KLATTRA_TERRAIN_MAX_RENDER_TILES=72  default bounded cover
+    demParameters.tileCoverMaxTiles = klattraEnvMaxTerrainRenderTiles();
 
     // Hard floor on the variable-zoom cover: never emit tiles more than 2
     // zoom levels below the camera's ideal zoom for this source. At ideal

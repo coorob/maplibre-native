@@ -5,6 +5,7 @@
 
 #include <memory>
 #include <numbers>
+#include <cstddef>
 
 #include <mapbox/std/weak.hpp>
 
@@ -47,6 +48,8 @@ public:
     // raster-dem terrain. Values are metres and default to the flat z=0 plane.
     double tileCoverMinElevationMeters = 0.0;
     double tileCoverMaxElevationMeters = 0.0;
+    // Optional cap on visible source tiles. 0 preserves the full cover.
+    std::size_t tileCoverMaxTiles = 0;
     gfx::DynamicTextureAtlasPtr dynamicTextureAtlas;
 };
 

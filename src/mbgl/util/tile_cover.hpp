@@ -10,6 +10,7 @@
 #include <memory>
 #include <numbers>
 #include <optional>
+#include <cstddef>
 
 namespace mbgl {
 
@@ -51,6 +52,8 @@ struct TileCoverParameters {
     // cover conservative until per-tile min/max elevation is available.
     double tileCoverMinElevationMeters = 0.0;
     double tileCoverMaxElevationMeters = 0.0;
+    // Optional cap on returned tiles. 0 preserves the full cover.
+    std::size_t tileCoverMaxTiles = 0;
 };
 
 int32_t coveringZoomLevel(double z, style::SourceType type, uint16_t tileSize) noexcept;

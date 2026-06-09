@@ -116,7 +116,8 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
                                                      parameters.tileLodPitchThreshold,
                                                      parameters.tileLodMinZoom,
                                                      parameters.tileCoverMinElevationMeters,
-                                                     parameters.tileCoverMaxElevationMeters};
+                                                     parameters.tileCoverMaxElevationMeters,
+                                                     parameters.tileCoverMaxTiles};
 
     // Raster DEM is not a normal visual source: at pitched zoom-outs the
     // camera can drop below the DEM archive's minzoom while terrain still

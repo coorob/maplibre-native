@@ -7,6 +7,9 @@
 #include <mbgl/util/tile_cover.hpp>
 #include <mbgl/util/tile_cover_impl.hpp>
 
+#include <algorithm>
+#include <cmath>
+#include <cstddef>
 #include <functional>
 #include <list>
 
@@ -321,6 +324,31 @@ std::vector<OverscaledTileID> tileCover(const TileCoverParameters& state,
         std::sort(expanded.begin(), expanded.end());
         expanded.erase(std::unique(expanded.begin(), expanded.end()), expanded.end());
         ids = std::move(expanded);
+    }
+
+    if (state.tileCoverMaxTiles > 0 && ids.size() > state.tileCoverMaxTiles) {
+        const auto distanceFromCenter = [&](const OverscaledTileID& id) {
+            const double tilesAtZ = std::pow(2.0, id.canonical.z);
+            const auto centerAtZ = TileCoordinate::fromScreenCoordinate(
+                                       transform,
+                                       id.canonical.z,
+                                       {transform.getSize().width / 2.0, transform.getSize().height / 2.0})
+                                       .p;
+            const double dx = static_cast<double>(id.wrap) * tilesAtZ +
+                              static_cast<double>(id.canonical.x) + 0.5 - centerAtZ.x;
+            const double dy = static_cast<double>(id.canonical.y) + 0.5 - centerAtZ.y;
+            return dx * dx + dy * dy;
+        };
+
+        std::stable_sort(ids.begin(), ids.end(), [&](const OverscaledTileID& a, const OverscaledTileID& b) {
+            const double aDist = distanceFromCenter(a);
+            const double bDist = distanceFromCenter(b);
+            if (aDist == bDist) {
+                return a < b;
+            }
+            return aDist < bDist;
+        });
+        ids.erase(ids.begin() + static_cast<std::ptrdiff_t>(state.tileCoverMaxTiles), ids.end());
     }
 
     return ids;
