@@ -19,15 +19,33 @@ RenderPass::RenderPass(CommandEncoder& commandEncoder_, const char* name, const 
 
     if (const auto& buffer = resource.getCommandBuffer()) {
         if (auto rpd = resource.getRenderPassDescriptor()) {
-            if (descriptor.clearColor) {
-                if (auto copy = NS::TransferPtr(rpd->copy())) {
-                    if (auto* colorTarget = copy->colorAttachments()->object(0)) {
+            if (auto copy = NS::TransferPtr(rpd->copy())) {
+                if (auto* colorTarget = copy->colorAttachments()->object(0)) {
+                    if (descriptor.clearColor) {
                         const auto& c = *descriptor.clearColor;
                         colorTarget->setLoadAction(MTL::LoadActionClear);
                         colorTarget->setClearColor(MTL::ClearColor::Make(c.r, c.g, c.b, c.a));
-                        rpd = std::move(copy);
+                    } else {
+                        colorTarget->setLoadAction(MTL::LoadActionLoad);
                     }
                 }
+                if (auto* depthTarget = copy->depthAttachment()) {
+                    if (descriptor.clearDepth) {
+                        depthTarget->setLoadAction(MTL::LoadActionClear);
+                        depthTarget->setClearDepth(*descriptor.clearDepth);
+                    } else {
+                        depthTarget->setLoadAction(MTL::LoadActionLoad);
+                    }
+                }
+                if (auto* stencilTarget = copy->stencilAttachment()) {
+                    if (descriptor.clearStencil) {
+                        stencilTarget->setLoadAction(MTL::LoadActionClear);
+                        stencilTarget->setClearStencil(*descriptor.clearStencil);
+                    } else {
+                        stencilTarget->setLoadAction(MTL::LoadActionLoad);
+                    }
+                }
+                rpd = std::move(copy);
             }
             encoder = NS::RetainPtr(buffer->renderCommandEncoder(rpd.get()));
         }

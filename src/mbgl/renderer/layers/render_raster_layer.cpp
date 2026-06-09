@@ -21,6 +21,7 @@
 #include <mbgl/shaders/shader_program_base.hpp>
 
 #include <cstdlib>
+#include <cstring>
 #include <unordered_set>
 
 namespace mbgl {
@@ -207,7 +208,11 @@ void RenderRasterLayer::update(gfx::ShaderRegistry& shaders,
     // Populates a drawable xor a drawable builder for creates and updates, respectively.
     // Returns false if the drawable must be re-created.
     const auto buildVertexData =
-        [&](const gfx::UniqueDrawableBuilder& builder, gfx::Drawable* drawable, const RasterBucket& bucket) {
+        [&](const gfx::UniqueDrawableBuilder& builder,
+            gfx::Drawable* drawable,
+            const RasterBucket& bucket,
+            bool freshIndexBuffer = false,
+            bool localVertexBuffers = false) {
             // The bucket may later add, remove, or change masking.  In that case, the tile's
             // shared data and segments are not updated, and it needs to be re-created.
             if (drawable &&
@@ -221,11 +226,48 @@ void RenderRasterLayer::update(gfx::ShaderRegistry& shaders,
                                  !bucket.segments.empty());
             const auto& vertices = shared ? bucket.sharedVertices : staticDataVertices;
             const auto& indices = shared ? bucket.sharedTriangles : staticDataIndices;
+            const auto drawableIndices =
+                freshIndexBuffer && shared
+                    ? std::make_shared<gfx::IndexVectorBase>(*indices)
+                    : std::static_pointer_cast<gfx::IndexVectorBase>(indices);
             const auto* segments = shared ? &bucket.segments : staticDataSegments.get();
 
             gfx::VertexAttributeArrayPtr bucketAttrs;
             auto& vertexAttrs = shared ? bucketAttrs : staticAttrs;
-            if (!vertexAttrs) {
+            if (localVertexBuffers) {
+                vertexAttrs = context.createVertexAttributeArray();
+                const auto vertexCount = vertices->elements();
+                const auto* vertexData = vertices->data();
+                if (vertexData && vertexCount > 0) {
+                    if (auto& attr = vertexAttrs->set(
+                            idRasterPosVertexAttribute,
+                            /*index=*/-1,
+                            gfx::AttributeDataType::Short2,
+                            vertexCount)) {
+                        std::vector<std::uint8_t> raw(vertexCount * sizeof(RasterLayoutVertex::a1));
+                        for (std::size_t i = 0; i < vertexCount; ++i) {
+                            std::memcpy(raw.data() + (i * sizeof(RasterLayoutVertex::a1)),
+                                        &vertexData[i].a1,
+                                        sizeof(RasterLayoutVertex::a1));
+                        }
+                        attr->setRawData(std::move(raw));
+                    }
+
+                    if (auto& attr = vertexAttrs->set(
+                            idRasterTexturePosVertexAttribute,
+                            /*index=*/-1,
+                            gfx::AttributeDataType::Short2,
+                            vertexCount)) {
+                        std::vector<std::uint8_t> raw(vertexCount * sizeof(RasterLayoutVertex::a2));
+                        for (std::size_t i = 0; i < vertexCount; ++i) {
+                            std::memcpy(raw.data() + (i * sizeof(RasterLayoutVertex::a2)),
+                                        &vertexData[i].a2,
+                                        sizeof(RasterLayoutVertex::a2));
+                        }
+                        attr->setRawData(std::move(raw));
+                    }
+                }
+            } else if (!vertexAttrs) {
                 vertexAttrs = context.createVertexAttributeArray();
 
                 if (auto& attr = vertexAttrs->set(idRasterPosVertexAttribute)) {
@@ -248,11 +290,16 @@ void RenderRasterLayer::update(gfx::ShaderRegistry& shaders,
             assert(!!drawable ^ !!builder);
             if (drawable) {
                 drawable->updateVertexAttributes(
-                    vertexAttrs, vertices->elements(), gfx::Triangles(), indices, segments->data(), segments->size());
+                    vertexAttrs,
+                    vertices->elements(),
+                    gfx::Triangles(),
+                    drawableIndices,
+                    segments->data(),
+                    segments->size());
             } else if (builder) {
                 builder->setVertexAttributes(vertexAttrs);
                 builder->setRawVertices({}, vertices->elements(), gfx::AttributeDataType::Short2);
-                builder->setSegments(gfx::Triangles(), indices, segments->data(), segments->size());
+                builder->setSegments(gfx::Triangles(), drawableIndices, segments->data(), segments->size());
             }
             return true;
         };
@@ -312,6 +359,7 @@ void RenderRasterLayer::update(gfx::ShaderRegistry& shaders,
             activeTerrain->visitDrapeTargets(
                 [&](const OverscaledTileID& drapeID, TerrainDrapeTargetPtr& drapeTarget) {
                     if (!drapeTarget) return;
+                    drapeTarget->requireRasterDrapeContent();
                     liveDrapeIDs.insert(drapeID);
                     if (auto* drapeGroup = static_cast<TileLayerGroup*>(
                             drapeTarget->getLayerGroup(layerIndex).get())) {
@@ -362,7 +410,7 @@ void RenderRasterLayer::update(gfx::ShaderRegistry& shaders,
         if (activeTerrain) {
             stats.drawablesRemoved += tileLayerGroup->removeDrawablesIf([&](gfx::Drawable& drawable) {
                 const auto& tileID = drawable.getTileID();
-                return tileID && activeTerrain->hasElevationCoverage(*tileID);
+                return tileID && activeTerrain->hasReadyTerrainCoverage(*tileID);
             });
         }
 
@@ -452,7 +500,7 @@ void RenderRasterLayer::update(gfx::ShaderRegistry& shaders,
             // finish
             builder->flush(context);
             for (auto& drawable : builder->clearDrawables()) {
-                if (activeTerrain && activeTerrain->hasElevationCoverage(tileID)) {
+                if (activeTerrain && activeTerrain->hasReadyTerrainCoverage(tileID)) {
                     // Skip main-pass — terrain mesh drapes raster via the
                     // drape-pass variant emitted just below. Drawable
                     // falls out of scope here and is destroyed.
@@ -474,6 +522,19 @@ void RenderRasterLayer::update(gfx::ShaderRegistry& shaders,
                     [&](const OverscaledTileID& drapeID, TerrainDrapeTargetPtr& drapeTarget) {
                         if (!drapeTarget || !LayerTweaker::tilesOverlap(tileID, drapeID)) return;
 
+                        // Do not bake a raster drawable into terrain until its
+                        // image is actually available. Otherwise the drape
+                        // target can be marked ready while sampling the
+                        // renderer's default white texture.
+                        if (!bucket.image) {
+                            if (auto* existingDrapeGroup = static_cast<TileLayerGroup*>(
+                                    drapeTarget->getLayerGroup(layerIndex).get())) {
+                                stats.drawablesRemoved +=
+                                    existingDrapeGroup->removeDrawables(renderPass, tileID).size();
+                            }
+                            return;
+                        }
+
                         auto& tw = drapeLayerTweakers[drapeID];
                         if (!tw) {
                             tw = std::make_shared<RasterLayerTweaker>(
@@ -484,21 +545,35 @@ void RenderRasterLayer::update(gfx::ShaderRegistry& shaders,
                             drapeTarget->getLayerGroup(layerIndex).get());
                         if (!drapeGroup) {
                             auto newGroup = context.createTileLayerGroup(
-                                layerIndex, /*initialCapacity=*/4, getID() + "-drape");
+                                layerIndex, /*initialCapacity=*/4, getID() + "-raster-drape");
                             if (!newGroup) return;
                             newGroup->addLayerTweaker(tw);
                             drapeTarget->addLayerGroup(newGroup, /*replace=*/false);
                             drapeGroup = newGroup.get();
                         }
 
-                        if (drapeGroup->getDrawableCount(renderPass, tileID) > 0) return;
+                        // Raster buckets can change their mask geometry while
+                        // reusing the same shared index vector. The shared
+                        // vector may still point at an older uploaded Metal
+                        // buffer, which leaves current segments addressing a
+                        // shorter index buffer and produces white terrain
+                        // patches. Terrain drape targets are rebuilt here
+                        // instead of updated in place so each drawable gets a
+                        // fresh index vector/buffer that matches its segments.
+                        stats.drawablesRemoved += drapeGroup->removeDrawables(renderPass, tileID).size();
 
                         auto drapeBuilder = createBuilder();
                         if (!drapeBuilder) return;
-                        if (bucket.image) {
-                            setTextures(drapeBuilder, bucket);
+                        setTextures(drapeBuilder, bucket);
+                        if (!drapeBuilder->getTexture(idRasterImage0Texture) ||
+                            !drapeBuilder->getTexture(idRasterImage1Texture)) {
+                            return;
                         }
-                        buildVertexData(drapeBuilder, /*drawable=*/nullptr, bucket);
+                        buildVertexData(drapeBuilder,
+                                        /*drawable=*/nullptr,
+                                        bucket,
+                                        /*freshIndexBuffer=*/true,
+                                        /*localVertexBuffers=*/true);
                         drapeBuilder->flush(context);
 
                         for (auto& drapeDrawable : drapeBuilder->clearDrawables()) {

@@ -20,6 +20,7 @@
 #include <limits>
 #include <sstream>
 #include <stdexcept>
+#include <vector>
 #include <sys/stat.h>
 
 namespace mbgl {
@@ -136,6 +137,41 @@ std::string klattraPercent(const uint64_t count, const uint64_t total) {
     stream << std::fixed << std::setprecision(2)
            << (total ? (100.0 * static_cast<double>(count) / static_cast<double>(total)) : 0.0);
     return stream.str();
+}
+
+bool klattraTileCoversWholeTarget(const OverscaledTileID& cover, const OverscaledTileID& target) {
+    if (cover.wrap != target.wrap || cover.canonical.z > target.canonical.z) {
+        return false;
+    }
+    return LayerTweaker::tilesOverlap(cover, target);
+}
+
+bool klattraTileIsStrictChildOf(const OverscaledTileID& child, const OverscaledTileID& parent) {
+    return child.wrap == parent.wrap &&
+           child.canonical.z > parent.canonical.z &&
+           child.canonical.isChildOf(parent.canonical);
+}
+
+bool klattraRasterDrawablesCoverTile(const OverscaledTileID& tileID,
+                                     const std::vector<OverscaledTileID>& drawableTileIDs,
+                                     uint8_t maxDrawableZoom) {
+    for (const auto& drawableTileID : drawableTileIDs) {
+        if (klattraTileCoversWholeTarget(drawableTileID, tileID)) {
+            return true;
+        }
+    }
+
+    if (tileID.canonical.z >= maxDrawableZoom) {
+        return false;
+    }
+
+    for (const auto& child : tileID.canonical.children()) {
+        const OverscaledTileID childID(child.z, tileID.wrap, child);
+        if (!klattraRasterDrawablesCoverTile(childID, drawableTileIDs, maxDrawableZoom)) {
+            return false;
+        }
+    }
+    return true;
 }
 
 void klattraMaybeInspectTarget(gfx::OffscreenTexture& texture,
@@ -379,6 +415,51 @@ size_t RenderTarget::numContentLayerGroups() const noexcept {
         count++;
     }
     return count;
+}
+
+bool RenderTarget::hasRasterDrawableCoveringTile(const OverscaledTileID& tileID) const noexcept {
+    std::vector<OverscaledTileID> drawableTileIDs;
+    uint8_t maxDrawableZoom = tileID.canonical.z;
+
+    for (const auto& [layerIndex, layerGroup] : layerGroupsByLayerIndex) {
+        if (layerIndex == std::numeric_limits<int32_t>::max() ||
+            !layerGroup ||
+            layerGroup->empty() ||
+            layerGroup->getName().find("raster-drape") == std::string::npos) {
+            continue;
+        }
+
+        visitLayerGroupDrawables(*layerGroup, [&](gfx::Drawable& drawable) {
+            const auto& drawableTileID = drawable.getTileID();
+            if (!drawableTileID) return;
+
+            if (klattraTileCoversWholeTarget(*drawableTileID, tileID)) {
+                drawableTileIDs.clear();
+                drawableTileIDs.push_back(*drawableTileID);
+                maxDrawableZoom = drawableTileID->canonical.z;
+                return;
+            }
+            if (klattraTileIsStrictChildOf(*drawableTileID, tileID)) {
+                drawableTileIDs.push_back(*drawableTileID);
+                maxDrawableZoom = std::max(maxDrawableZoom, drawableTileID->canonical.z);
+            }
+        });
+
+        if (drawableTileIDs.size() == 1 &&
+            klattraTileCoversWholeTarget(drawableTileIDs.front(), tileID)) {
+            return true;
+        }
+    }
+
+    if (drawableTileIDs.empty()) {
+        return false;
+    }
+
+    // A satellite source can be one or more zoom levels sharper than the DEM
+    // drape target. No single child tile covers the whole target, but a full
+    // child set does. Treat that as ready so terrain can replace the flat
+    // main pass once the complete colour surface exists.
+    return klattraRasterDrawablesCoverTile(tileID, drawableTileIDs, maxDrawableZoom);
 }
 
 static const LayerGroupBasePtr no_group;

@@ -239,6 +239,9 @@ FragmentStage vertex vertexMain(thread const VertexStage vertx [[stage_in]],
     // being half-submerged in a flat "ocean" of basemap colour. Lifting
     // the whole mesh by a few hundred metres pulls the lowest valleys
     // above the basemap z=0 plane and the mesh sits cleanly on top.
+    if (!terrainReliefValidElevation(elevationMeters)) {
+        elevationMeters = 0.0;
+    }
     float elevation = elevationMeters * props.exaggeration + props.elevation_offset;
     // Drop skirt vertices well below sea level so the perimeter walls
     // reach under the basemap z=0 plane. 5000 m suffices for the entire

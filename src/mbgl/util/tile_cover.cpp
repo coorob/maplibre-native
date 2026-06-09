@@ -297,7 +297,7 @@ std::vector<OverscaledTileID> tileCover(const TileCoverParameters& state,
     if (state.tileCoverMinElevationMeters != 0.0 || state.tileCoverMaxElevationMeters != 0.0) {
         std::vector<OverscaledTileID> expanded = ids;
         const int32_t tileCountAtZ = 1 << z;
-        constexpr int32_t radius = 1;
+        constexpr int32_t radius = 4;
         for (const auto& id : ids) {
             for (int32_t dy = -radius; dy <= radius; ++dy) {
                 const int32_t y = static_cast<int32_t>(id.canonical.y) + dy;

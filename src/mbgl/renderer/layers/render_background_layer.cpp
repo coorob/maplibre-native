@@ -228,7 +228,16 @@ void RenderBackgroundLayer::update(gfx::ShaderRegistry& shaders,
             builder = context.createDrawableBuilder("background");
             builder->setRenderPass(drawPasses);
             builder->setShader(curShader);
-            builder->setDepthType(gfx::DepthMaskType::ReadWrite);
+            // The background is a backdrop and must never occlude geometry drawn on
+            // top of it. With a shared GL/Metal context (e.g. React Native) the
+            // "background as clear colour" optimisation is disabled
+            // (backgroundLayerAsColor = !contextIsShared()), so the background is
+            // drawn as flat sea-level (z=0) tile quads instead. Writing depth from
+            // those quads buries 3D terrain when zoomed out (the terrain ends up
+            // "behind" the z=0 plane in the depth test). A backdrop has nothing
+            // behind it, so it should only read depth, never write it — matching the
+            // terrain drape builder below and the line layer.
+            builder->setDepthType(gfx::DepthMaskType::ReadOnly);
             builder->setColorMode(drawPasses == RenderPass::Translucent ? gfx::ColorMode::alphaBlended()
                                                                         : gfx::ColorMode::unblended());
         }

@@ -8,6 +8,7 @@
 #include <mbgl/gfx/index_buffer.hpp>
 #include <mbgl/renderer/render_terrain_drape_cache.hpp>
 #include <mbgl/renderer/layer_tweaker.hpp>
+#include <mbgl/util/geo.hpp>
 
 #include <memory>
 #include <map>
@@ -96,6 +97,24 @@ public:
     float getElevationWithExaggeration(const UnwrappedTileID& tileID, float x, float y) const;
 
     /**
+     * @brief Sample the loaded DEM at a geographic coordinate.
+     *
+     * Returns std::nullopt when the current terrain cover has not loaded a DEM
+     * tile containing the coordinate yet.
+     */
+    std::optional<float> getElevationAtLatLng(const LatLng& latLng) const;
+
+    /**
+     * @brief DEM elevation currently used as the terrain vertical origin.
+     *
+     * Native camera zoom/altitude is expressed relative to the map plane. In
+     * high mountains, rendering absolute sea-level DEM elevations can put the
+     * camera inside the mesh at close drone zooms. Terrain is therefore drawn
+     * relative to the sampled elevation under the map center.
+     */
+    std::optional<float> getElevationOriginMeters() const { return elevationOriginMeters; }
+
+    /**
      * @brief Get the terrain exaggeration multiplier
      */
     float getExaggeration() const;
@@ -174,21 +193,17 @@ public:
     }
 
     /**
-     * @brief Whether the drape pass fully covers a source tile.
+     * @brief Whether ready terrain drawables cover a source tile.
      *
-     * Main-pass suppression is safe only when an ideal terrain drape target
-     * is at the same zoom as the source tile or an ancestor of it. A coarse
-     * source tile (for example z4 OpenFreeMap landcover) can overlap a
-     * handful of z12 terrain drape targets while still covering a much larger
-     * screen area.
-     * Treating that partial overlap as "covered" drops the whole z4 main-pass
-     * drawable and leaves plain background wherever no terrain target exists.
+     * Main-pass suppression must wait until terrain has a current binding
+     * with a ready drape texture. An allocated render target is not enough:
+     * if the raster layer drops its normal drawable before the terrain
+     * drawable exists, the framebuffer shows the map's clear colour.
      *
      * Phase-2 drape-capable layers consult this to decide whether to skip the
-     * main 2D pass for a given tile. Skip when the drape pass can cover the
-     * entire source tile; fall through to the main pass for partial/coarse
-     * overlaps so non-terrain areas stay populated instead of becoming the
-     * beige clear colour.
+     * main 2D pass for a given tile. Skip when the ready terrain pass can
+     * cover the entire source tile; fall through to the main pass for
+     * partial/coarse overlaps so non-terrain areas stay populated.
      */
     static uint64_t minCompletedDrapeRenders() noexcept {
         const char* value = std::getenv("KLATTRA_DRAPE_READY_COMPLETED_RENDERS");
@@ -206,8 +221,29 @@ public:
                target->hasContentLayerGroups();
     }
 
+    static bool isDrapeTargetReadyForTile(const TerrainDrapeTargetPtr& target,
+                                          const OverscaledTileID& tileID) noexcept {
+        if (!target || target->getCompletedRenderCount() < minCompletedDrapeRenders()) {
+            return false;
+        }
+        (void)tileID;
+        return target->hasContentLayerGroups();
+    }
+
+    bool hasReadyTerrainCoverage(const OverscaledTileID& sourceTileID) const {
+        if (currentBindings.empty()) return false;
+        for (const auto& [idealID, binding] : currentBindings) {
+            if (binding.drapeReady &&
+                binding.drapeTexture &&
+                LayerTweaker::tilesOverlap(sourceTileID, idealID)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     bool hasElevationCoverage(const OverscaledTileID& sourceTileID) const {
-        if (drapeCache.size() == 0) return false;
+        if (currentBindings.empty()) return false;
         // Debug/visual experiment: at high pitch, low-zoom vector/raster
         // source tiles that only partially overlap fine DEM drape targets can
         // remain in the main pass as flat translucent polygons over the
@@ -215,26 +251,17 @@ public:
         // drape target lets us isolate that duplicate-main-pass failure mode.
         const bool skipPartialMainPass =
             std::getenv("KLATTRA_TERRAIN_SKIP_PARTIAL_MAIN_PASS") != nullptr;
-        // If main-pass suppression waits for the drape target's first
-        // completed render, a 2D source tile can be emitted flat while the
-        // terrain target is warming up and then remain visible after camera
-        // motion settles. This experiment treats an allocated drape target as
-        // coverage immediately.
-        const bool skipPendingMainPass =
-            std::getenv("KLATTRA_TERRAIN_SKIP_PENDING_MAIN_PASS") != nullptr;
-        bool covered = false;
-        drapeCache.visitAll([&](const OverscaledTileID& drapeID, const TerrainDrapeTargetPtr& target) {
-            if (covered) return;
-            if (!target ||
-                (!skipPendingMainPass &&
-                 target->getCompletedRenderCount() < minCompletedDrapeRenders()) ||
-                !target->hasContentLayerGroups() ||
-                !LayerTweaker::tilesOverlap(sourceTileID, drapeID)) {
-                return;
+        for (const auto& [idealID, binding] : currentBindings) {
+            if (!binding.drapeReady ||
+                !binding.drapeTexture ||
+                !LayerTweaker::tilesOverlap(sourceTileID, idealID)) {
+                continue;
             }
-            if (skipPartialMainPass || drapeID.canonical.z <= sourceTileID.canonical.z) covered = true;
-        });
-        return covered;
+            if (skipPartialMainPass || idealID.canonical.z <= sourceTileID.canonical.z) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -343,6 +370,12 @@ private:
     // mid-frame. Refreshed each update() to match the current cover set.
     std::unordered_map<OverscaledTileID, std::shared_ptr<const PremultipliedImage>> demImagesByTile;
 
+    // Smoothed-ish local terrain origin, sampled at the current map center
+    // whenever a covering DEM tile is available. The shader subtracts this
+    // origin (after exaggeration) so close pitched cameras stay above the
+    // local surface while preserving nearby relief.
+    std::optional<float> elevationOriginMeters;
+
     // GPU DEM texture cache keyed by the actual DEM tile's overscaled ID.
     // Persisted across frames so a child drawable doing parent-fallback
     // can borrow a parent's texture without re-uploading it. Pruned each
@@ -381,44 +414,20 @@ private:
     // terrain cover padding can make many z8/z10 drape targets visible at once.
     static constexpr int32_t DRAPE_TARGET_SIZE = 2048;
 
-    // Mesh resolution (vertices per side). The index buffer uses UInt16,
-    // so total vertex count must stay under 65,536. With perimeter skirts
-    // added by `generateMesh()` to hide basemap bleed-through at tile
-    // edges, the budget is:
-    //   (MESH_SIZE+1)²  main grid vertices
-    // + 4*(MESH_SIZE+1) skirt vertices (one strip per edge)
-    // = 65,532 at MESH_SIZE=253 — 3 vertices below the UInt16 ceiling.
-    // (The previous mesh-only design fit MESH_SIZE=254 = 65,025 verts.)
-    // Switching to UInt32 indices would let us push higher, but 253×253
-    // is already overkill for the 514×514 DEM the texture vertex shader
-    // samples — every mesh cell oversamples the DEM bilinearly.
-    static constexpr size_t MESH_SIZE = 253;
-
-    // Vertical drop (metres of absolute elevation) from each tile-edge
-    // skirt vertex to its "below the mesh" anchor. Picked to clear the
-    // basemap's flat z=0 plane even when the mesh edge sits on a 2 km
-    // peak with exaggeration=2 (worst case in the Klättra coverage):
-    //     2000 m × 2 = 4000 m mesh elevation
-    // → 4000 m − 5000 m skirt drop = −1000 m, comfortably below z=0.
-    // The drape texture is sampled at the edge's UV so the skirt face
-    // visually continues the basemap content downward — the camera no
-    // longer sees a hard "mesh ends, basemap starts" seam where it
-    // looks past the tile boundary or steeply across the mesh edge.
-    static constexpr float SKIRT_DROP_METERS = 5000.0f;
+    // Mesh resolution (cells per side). A 128×128 grid keeps the terrain
+    // surface dense enough for drone-distance relief while avoiding the
+    // near-UInt16 vertex-limit mesh that made iOS Metal debugging painful.
+    static constexpr size_t MESH_SIZE = 128;
 
     // Cached DEM source
     RenderSource* demSource = nullptr;
 
-    // Layer index for the terrain mesh's layer group. Has to be lower than
-    // any user style layer (which start at 0 ascending) so that the terrain
-    // mesh draws LAST in the opaque pass — visitLayerGroupsReversed iterates
-    // highest-to-lowest, so the lowest index draws last and its opaque pixels
-    // overwrite any 2D layer (background, hillshade, etc.) underneath.
-    // Without this, the 2D-layer projection-matrix Z offset applied by
-    // LayerTweaker::multiplyWithProjectionMatrix can pull 2D layers' depth
-    // ahead of the terrain mesh's perspective depth, and the terrain mesh
-    // stays hidden.
-    static constexpr int32_t TERRAIN_LAYER_INDEX = -1;
+    // Layer index for the terrain mesh's layer group. Style layers start at 0
+    // and render in ascending order in the translucent pass. Terrain samples a
+    // completed offscreen drape texture, so it must draw after the ordinary 2D
+    // satellite/vector layers; otherwise a surviving flat raster drawable can
+    // cover the raised mesh and make the scene look like a pitched 2D map.
+    static constexpr int32_t TERRAIN_LAYER_INDEX = 1000000;
 
     /**
      * @brief Create a DEM texture from DEMData

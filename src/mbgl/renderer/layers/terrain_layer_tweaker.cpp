@@ -16,6 +16,7 @@
 #include <mbgl/util/projection.hpp>
 
 #include <algorithm>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -34,6 +35,16 @@ bool klattraLogTerrainFinal() {
 bool klattraLogTerrainFinalRepeat() {
     static const bool enabled = std::getenv("KLATTRA_LOG_TERRAIN_FINAL_REPEAT") != nullptr;
     return enabled;
+}
+
+bool klattraTraceStderr() {
+    static const bool enabled = std::getenv("KLATTRA_TRACE_STDERR") != nullptr;
+    return enabled;
+}
+
+void klattraTrace(const std::string& message) {
+    if (!klattraTraceStderr()) return;
+    std::fprintf(stderr, "[KLATTRA_TRACE] %s\n", message.c_str());
 }
 
 float klattraTerrainDebugColorMode() {
@@ -108,19 +119,17 @@ void TerrainLayerTweaker::execute(LayerGroupBase& layerGroup, const PaintParamet
 #endif
 
     const float exaggeration = terrain->getExaggeration();
-    // Mesh sits at its real DEM elevation — no artificial uplift.
-    //
-    // Previously we lifted the mesh by 500 m to clear the 2D basemap's
-    // z=0 plane (which used to bleed through the lowest valleys as a
-    // flat "ocean of basemap colour"). With Pass 2 (skip-main-pass for
-    // drape-capable layers in the presence of terrain) the basemap no
-    // longer renders at z=0, so the offset isn't needed for that any
-    // more. Removing it also recovers ~500 m of vertical headroom
-    // between the camera altitude (`distance × cos(pitch)`) and the
-    // mesh's tallest peaks, which is what was causing the camera to
-    // clip *inside* the mesh at high-pitch close-zoom and reveal the
-    // framebuffer past the near plane.
-    const float elevationOffset = 0.0f;
+    // Native camera altitude is anchored to the flat map plane. On high
+    // mountain routes, absolute sea-level DEM heights can place a close,
+    // pitched drone camera inside the terrain. Draw the mesh relative to the
+    // loaded DEM height under the current map center; this keeps the camera
+    // above the local surface while preserving nearby relief and slope.
+    const auto maybeElevationOrigin = terrain->getElevationOriginMeters();
+    const float fallbackElevationOrigin =
+        std::abs(state.getLatLng().latitude()) >= 60.0 ? 1000.0f : 0.0f;
+    const float elevationOrigin = maybeElevationOrigin.value_or(fallbackElevationOrigin);
+    const float elevationOffset =
+        std::getenv("KLATTRA_TERRAIN_ABSOLUTE_HEIGHTS") != nullptr ? 0.0f : -elevationOrigin * exaggeration;
 
     // Reuse fill-extrusion's interpretation of the global style light's
     // colour and intensity, but always compute the light position as if
@@ -155,6 +164,10 @@ void TerrainLayerTweaker::execute(LayerGroupBase& layerGroup, const PaintParamet
     const bool logTerrainFinal = klattraLogTerrainFinal();
     const bool logTerrainFinalRepeat = klattraLogTerrainFinalRepeat();
     const uint64_t traceFrame = logTerrainFinal ? ++finalTraceFrame : 0;
+    static uint64_t stderrTraceFrame = 0;
+    const bool stderrTrace = klattraTraceStderr();
+    const uint64_t stderrFrame = stderrTrace ? ++stderrTraceFrame : 0;
+    const bool shouldTraceStderr = stderrTrace && (stderrFrame <= 24 || stderrFrame % 60 == 0);
     if (logTerrainFinal && (logTerrainFinalRepeat || traceFrame <= 12 || traceFrame % 60 == 0)) {
         Log::Info(Event::Render,
                   "[KLATTRA TERRAIN_FINAL] frame=" + std::to_string(traceFrame) +
@@ -163,9 +176,23 @@ void TerrainLayerTweaker::execute(LayerGroupBase& layerGroup, const PaintParamet
                       " pitch=" + std::to_string(state.getPitch()) +
                       " bearing=" + std::to_string(state.getBearing()) +
                       " exaggeration=" + std::to_string(exaggeration) +
+                      " elevationOrigin=" + std::to_string(elevationOrigin) +
+                      " elevationOffset=" + std::to_string(elevationOffset) +
                       " shaderRelief=" + std::to_string(lightIntensity) +
                       " debugColor=" + std::to_string(debugColorMode) +
                       " debugVertex=" + std::to_string(debugVertexMode));
+    }
+    if (shouldTraceStderr) {
+        klattraTrace("terrain final-begin frame=" + std::to_string(stderrFrame) +
+                     " drawables=" + std::to_string(layerGroup.getDrawableCount()) +
+                     " zoom=" + std::to_string(state.getZoom()) +
+                     " pitch=" + std::to_string(state.getPitch()) +
+                     " bearing=" + std::to_string(state.getBearing()) +
+                     " exaggeration=" + std::to_string(exaggeration) +
+                     " elevationOrigin=" + std::to_string(elevationOrigin) +
+                     " elevationOffset=" + std::to_string(elevationOffset) +
+                     " debugColor=" + std::to_string(debugColorMode) +
+                     " debugVertex=" + std::to_string(debugVertexMode));
     }
 
 #if MLN_UBO_CONSOLIDATION
@@ -174,6 +201,7 @@ void TerrainLayerTweaker::execute(LayerGroupBase& layerGroup, const PaintParamet
 #endif
 
     // Visit each drawable to populate per-drawable UBOs
+    std::size_t stderrDrawableCount = 0;
     visitLayerGroupDrawables(layerGroup, [&](gfx::Drawable& drawable) {
         if (!drawable.getTileID()) {
             return;
@@ -184,19 +212,6 @@ void TerrainLayerTweaker::execute(LayerGroupBase& layerGroup, const PaintParamet
         // Calculate transformation matrix for this terrain tile.
         // This uses the same matrix calculation as other layers.
         mat4 matrix = parameters.matrixForTile(tileID);
-
-        // Vertices feed elevation in metres on the Z axis. The base tile
-        // matrix scales X/Y from tile units to mercator world-pixels but
-        // leaves Z scale at 1, so meters would feed into clip-space
-        // unscaled and the mesh collapses to a near-flat plane. Scale
-        // the Z column by pixelsPerMeter (same trick Camera uses for
-        // its world-to-camera matrix), so metres feed in correctly.
-        const double pixelsPerMeter = 1.0 / Projection::getMetersPerPixelAtLatitude(
-            state.getLatLng().latitude(), state.getZoom());
-        matrix[8] *= pixelsPerMeter;
-        matrix[9] *= pixelsPerMeter;
-        matrix[10] *= pixelsPerMeter;
-        matrix[11] *= pixelsPerMeter;
 
 #if !MLN_UBO_CONSOLIDATION
         auto& drawableUniforms = drawable.mutableUniformBuffers();
@@ -253,7 +268,25 @@ void TerrainLayerTweaker::execute(LayerGroupBase& layerGroup, const PaintParamet
                                   std::to_string(matrix[14]) + "," +
                                   std::to_string(matrix[15]));
             }
+            if (shouldTraceStderr && stderrDrawableCount < 4) {
+                klattraTrace("terrain final-drawable frame=" + std::to_string(stderrFrame) +
+                             " tile=" + klattraTileString(*drawable.getTileID()) +
+                             " source=" + klattraTileString(binding->sourceID) +
+                             " emptyDEM=" + std::to_string(binding->usedEmptyDEM) +
+                             " drapeReady=" + std::to_string(binding->drapeReady) +
+                             " demScale=" + std::to_string(demScale) +
+                             " metersPerTile=" + std::to_string(metersPerTile) +
+                             " matrixZ=" + std::to_string(matrix[8]) + "," +
+                                 std::to_string(matrix[9]) + "," +
+                                 std::to_string(matrix[10]) + "," +
+                                 std::to_string(matrix[11]) +
+                             " matrixW=" + std::to_string(matrix[12]) + "," +
+                                 std::to_string(matrix[13]) + "," +
+                                 std::to_string(matrix[14]) + "," +
+                                 std::to_string(matrix[15]));
+            }
         }
+        stderrDrawableCount++;
 
 #if MLN_UBO_CONSOLIDATION
         drawableUBOVector[i] = {

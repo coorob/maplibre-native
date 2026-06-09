@@ -1,6 +1,7 @@
 #pragma once
 
 #include <mbgl/gfx/types.hpp>
+#include <mbgl/tile/tile_id.hpp>
 #include <mbgl/util/color.hpp>
 #include <mbgl/util/size.hpp>
 
@@ -85,6 +86,14 @@ public:
     /// Whether the target has any non-background map content.
     bool hasContentLayerGroups() const noexcept { return numContentLayerGroups() > 0; }
 
+    /// Mark this drape target as needing raster content before terrain can
+    /// safely sample it. Vector-only drape content (trail lines, labels) is
+    /// not enough for satellite terrain, because the mesh would otherwise
+    /// sample empty colour where the raster tile has not arrived yet.
+    void requireRasterDrapeContent() noexcept { requiresRasterDrape = true; }
+    bool requiresRasterDrapeContent() const noexcept { return requiresRasterDrape; }
+    bool hasRasterDrawableCoveringTile(const OverscaledTileID&) const noexcept;
+
     /// @brief  Get a specific layer group by index
     /// @param layerIndex index
     /// @return the layer group if existant, othewise a shared null pointer
@@ -139,6 +148,7 @@ protected:
     uint64_t completedRenderCount = 0;
     std::string debugName;
     bool mipmapped = false;
+    bool requiresRasterDrape = false;
 };
 
 } // namespace mbgl

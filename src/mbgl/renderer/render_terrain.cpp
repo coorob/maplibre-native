@@ -22,11 +22,14 @@
 #include <mbgl/gfx/shader_registry.hpp>
 #include <mbgl/gfx/color_mode.hpp>
 #include <mbgl/gfx/texture2d.hpp>
+#include <mbgl/gfx/vertex_attribute.hpp>
+#include <mbgl/gfx/vertex_vector.hpp>
 #include <mbgl/shaders/shader_source.hpp>
 #include <mbgl/shaders/terrain_layer_ubo.hpp>
 #include <mbgl/shaders/shader_defines.hpp>
 #include <mbgl/shaders/segment.hpp>
 #include <mbgl/util/constants.hpp>
+#include <mbgl/util/projection.hpp>
 #include <mbgl/util/logging.hpp>
 #include <mbgl/util/image.hpp>
 #include <mbgl/util/mat4.hpp>
@@ -34,8 +37,10 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <cstdio>
 #include <limits>
 #include <unordered_set>
 #include <utility>
@@ -50,6 +55,16 @@ bool klattraLogDrapeTrace() {
     return enabled;
 }
 
+bool klattraTraceStderr() {
+    static const bool enabled = std::getenv("KLATTRA_TRACE_STDERR") != nullptr;
+    return enabled;
+}
+
+void klattraTrace(const std::string& message) {
+    if (!klattraTraceStderr()) return;
+    std::fprintf(stderr, "[KLATTRA_TRACE] %s\n", message.c_str());
+}
+
 std::string klattraTileString(const OverscaledTileID& id) {
     return "z" + std::to_string(id.canonical.z) +
            "/" + std::to_string(id.canonical.x) +
@@ -61,6 +76,11 @@ std::string klattraTexturePtrString(const std::shared_ptr<gfx::Texture2D>& textu
     return texture ? std::to_string(reinterpret_cast<uintptr_t>(texture.get())) : "0";
 }
 
+struct TerrainLayoutVertex {
+    std::array<int16_t, 2> pos;
+    std::array<int16_t, 2> texturePos;
+};
+
 std::size_t klattraDrapeDrawableCount(const TerrainDrapeTargetPtr& target) {
     if (!target) return 0;
     std::size_t count = 0;
@@ -70,6 +90,10 @@ std::size_t klattraDrapeDrawableCount(const TerrainDrapeTargetPtr& target) {
 
 bool klattraDrapeTargetReady(const TerrainDrapeTargetPtr& target) {
     return RenderTerrain::isDrapeTargetReady(target);
+}
+
+bool klattraDrapeTargetReadyForTile(const TerrainDrapeTargetPtr& target, const OverscaledTileID& tileID) {
+    return RenderTerrain::isDrapeTargetReadyForTile(target, tileID);
 }
 
 bool klattraIsAncestorOf(const OverscaledTileID& ancestor, const OverscaledTileID& child) {
@@ -185,6 +209,7 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
         demSource = orchestrator.getRenderSource(impl->sourceID);
         if (!demSource) {
             Log::Warning(Event::Render, "Terrain could not find DEM source: " + impl->sourceID);
+            klattraTrace("terrain no-dem-source source=" + impl->sourceID);
         }
     }
 
@@ -209,6 +234,7 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
 
     // If we don't have a DEM source, we can't create terrain drawables
     if (!demSource) {
+        klattraTrace("terrain update-no-dem source=" + impl->sourceID);
         if (traceDrape) {
             Log::Info(Event::Render,
                       "[KLATTRA DRAPE_TRACE] update-no-dem frame=" + std::to_string(drapeTraceFrame) +
@@ -220,6 +246,9 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
 
     auto renderTiles = demSource->getRawRenderTiles();
     if (renderTiles->empty()) {
+        klattraTrace("terrain update-empty-cover source=" + impl->sourceID +
+                     " previousBindings=" + std::to_string(currentBindings.size()) +
+                     " previousDrapeTargets=" + std::to_string(drapeCache.size()));
         if (traceDrape) {
             Log::Info(Event::Render,
                       "[KLATTRA DRAPE_TRACE] update-empty-cover frame=" + std::to_string(drapeTraceFrame) +
@@ -246,6 +275,12 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
                       " previousDrapeTargets=" + std::to_string(drapeCache.size()) +
                       " terrainDrawables=" + std::to_string(lg->getDrawableCount()));
     }
+    klattraTrace("terrain update-begin source=" + impl->sourceID +
+                 " renderTiles=" + std::to_string(renderTiles->size()) +
+                 " previousBindings=" + std::to_string(currentBindings.size()) +
+                 " previousDemTextures=" + std::to_string(demTexturesByTile.size()) +
+                 " previousDrapeTargets=" + std::to_string(drapeCache.size()) +
+                 " terrainDrawables=" + std::to_string(lg->getDrawableCount()));
 
     // Build two sets up-front:
     //
@@ -258,20 +293,14 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
     //    drawables — each at z=12 mesh density — sharing the parent's
     //    DEM texture via a UV sub-rect.
     //
-    //  - `currentSourceIDs`: the actual DEM tile's OverscaledTileID per
-    //    cover slot, deduped. Used as the DEM texture/image cache key.
-    //
     // Drape targets are keyed by ideal tile, not by DEM source tile. DEM
     // parent fallback is fine for elevation, but visible topo colour must
     // stay at the tile LOD the camera is actually drawing; otherwise a coarse
     // source parent can stretch low-zoom drape pixels across a close view.
     std::unordered_set<OverscaledTileID> currentIdealIDs;
-    std::unordered_set<OverscaledTileID> currentSourceIDs;
     currentIdealIDs.reserve(renderTiles->size());
-    currentSourceIDs.reserve(renderTiles->size());
     for (const auto& renderTile : *renderTiles) {
         currentIdealIDs.emplace(renderTile.id.canonical.z, renderTile.id.wrap, renderTile.id.canonical);
-        currentSourceIDs.insert(renderTile.getOverscaledTileID());
     }
 
     // Exact drape targets give the final sharp topo texture. Coarser parent
@@ -285,6 +314,11 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
     klattraAddDrapeOverscan(currentDrapeIDs, currentIdealIDs, drapeOverscanTiles);
     const std::vector<OverscaledTileID> exactAndOverscanDrapeIDs(currentDrapeIDs.begin(),
                                                                  currentDrapeIDs.end());
+    // Terrain meshes stay tied to the DEM source cover so every raised tile
+    // can resolve real elevation data (or a source-provided parent fallback).
+    // The DEM source itself expands its pitched cover; drape targets can still
+    // overscan further so satellite colour is ready before the mesh arrives.
+    const std::unordered_set<OverscaledTileID>& terrainMeshIDs = currentIdealIDs;
     static const uint32_t drapeFallbackLevels =
         klattraEnvLevelCount("KLATTRA_DRAPE_FALLBACK_LEVELS", 2);
     if (drapeFallbackLevels > 0) {
@@ -513,6 +547,10 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
                           " ready=" + std::to_string(imageReady) +
                           " missing=" + std::to_string(imageMissing));
         }
+        if (auto sampledElevation = getElevationAtLatLng(state.getLatLng())) {
+            elevationOriginMeters = *sampledElevation;
+            klattraTrace("terrain origin elevation=" + std::to_string(*sampledElevation));
+        }
     }
 
     // Refresh the GPU DEM texture cache. Keyed by the actual DEM tile's
@@ -596,44 +634,40 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
 
     // Compute per-ideal DEM bindings. Each cover slot resolves to either
     // the exact source tile's texture (identity UV remap) or — when the
-    // exact-zoom data is still in flight — to whichever ancestor's
-    // texture happens to be available, with a sub-rect UV remap. This
-    // is the GL-JS-style parent-fallback DEM sampling: the terrain mesh
-    // never has to render flat or with a sea-level empty texture while
-    // tiles stream in; it keeps a coarse-but-correct shape and silently
-    // sharpens once the exact-zoom DEM arrives.
+    // exact-zoom data is still in flight — to whichever ancestor's texture
+    // happens to be available, with a sub-rect UV remap.
     std::unordered_map<OverscaledTileID, DEMBinding> nextBindings;
-    nextBindings.reserve(renderTiles->size());
-    for (const auto& renderTile : *renderTiles) {
-        const auto& tile = renderTile.getTile();
-        if (tile.kind != Tile::Kind::RasterDEM) continue;
-
-        const auto& ideal = renderTile.id; // UnwrappedTileID
-        const OverscaledTileID idealOS(ideal.canonical.z, ideal.wrap, ideal.canonical);
-        const auto& sourceID = tile.id;
-
-        DEMBinding binding(nullptr, sourceID);
-
-        if (auto texIt = demTexturesByTile.find(sourceID); texIt != demTexturesByTile.end()) {
-            binding.texture = texIt->second;
-            // If the source tile is a strict ancestor of the ideal,
-            // compute the ideal's sub-rect inside the source's UV space.
-            if (ideal.canonical.z > sourceID.canonical.z) {
-                auto [demTL, demScale] = klattraSubrectForChildInAncestor(idealOS, sourceID);
-                binding.demTL = demTL;
-                binding.demScale = demScale;
-            }
-            // Else: ideal == source (or, defensively, ideal is an ancestor
-            // of source — shouldn't happen since updateRenderables walks
-            // UP from ideal looking for parents). Identity remap.
+    nextBindings.reserve(terrainMeshIDs.size());
+    std::size_t readyBindings = 0;
+    std::size_t emptyDemBindings = 0;
+    std::size_t fallbackDrapeBindings = 0;
+    for (const auto& idealOS : terrainMeshIDs) {
+        std::optional<OverscaledTileID> resolvedSourceID;
+        std::shared_ptr<gfx::Texture2D> resolvedTexture;
+        if (auto exact = demTexturesByTile.find(idealOS); exact != demTexturesByTile.end()) {
+            resolvedSourceID = idealOS;
+            resolvedTexture = exact->second;
         } else {
-            // No DEM data anywhere in the parent chain for this ideal —
-            // bind the 1×1 empty-elevation texture so the mesh renders
-            // flat for one frame rather than vanishing or showing
-            // basemap bleed-through. Once an ancestor's DEM lands in
-            // `demTexturesByTile`, the next frame upgrades to a real
-            // texture and the binding state-transition re-creates the
-            // drawable.
+            for (const auto& [candidateID, texture] : demTexturesByTile) {
+                if (!texture || !klattraIsAncestorOf(candidateID, idealOS)) {
+                    continue;
+                }
+                if (!resolvedSourceID || candidateID.canonical.z > resolvedSourceID->canonical.z) {
+                    resolvedSourceID = candidateID;
+                    resolvedTexture = texture;
+                }
+            }
+        }
+
+        DEMBinding binding(resolvedTexture, resolvedSourceID.value_or(idealOS));
+        if (binding.texture && resolvedSourceID && idealOS.canonical.z > resolvedSourceID->canonical.z) {
+            auto [demTL, demScale] = klattraSubrectForChildInAncestor(idealOS, *resolvedSourceID);
+            binding.demTL = demTL;
+            binding.demScale = demScale;
+        } else if (!binding.texture) {
+            // No DEM data anywhere in the loaded parent chain for this
+            // overscanned tile. Keep the mesh alive with a flat DEM texture
+            // for the frame instead of leaving a hole in the pitched view.
             binding.texture = getOrCreateEmptyDEMTexture(context);
             binding.sourceID = idealOS;
             binding.usedEmptyDEM = true;
@@ -641,15 +675,17 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
 
         TerrainDrapeTargetPtr drape = drapeCache.get(idealOS);
         OverscaledTileID resolvedDrapeID = idealOS;
-        if (!klattraDrapeTargetReady(drape)) {
+        if (!klattraDrapeTargetReadyForTile(drape, idealOS)) {
             auto retired = retiredDrapeTargetsByTile.find(idealOS);
-            if (retired != retiredDrapeTargetsByTile.end() && klattraDrapeTargetReady(retired->second)) {
+            if (retired != retiredDrapeTargetsByTile.end() &&
+                klattraDrapeTargetReadyForTile(retired->second, idealOS)) {
                 drape = retired->second;
             } else {
                 TerrainDrapeTargetPtr bestAncestor;
                 std::optional<OverscaledTileID> bestAncestorID;
                 drapeCache.visitAll([&](const OverscaledTileID& candidateID, const TerrainDrapeTargetPtr& candidate) {
-                    if (!klattraDrapeTargetReady(candidate) || !klattraIsAncestorOf(candidateID, idealOS)) {
+                    if (!klattraDrapeTargetReadyForTile(candidate, idealOS) ||
+                        !klattraIsAncestorOf(candidateID, idealOS)) {
                         return;
                     }
                     if (!bestAncestorID || candidateID.canonical.z > bestAncestorID->canonical.z) {
@@ -669,10 +705,19 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
         } else {
             retiredDrapeTargetsByTile.erase(idealOS);
         }
-        if (klattraDrapeTargetReady(drape) && drape->getTexture()) {
+        if (klattraDrapeTargetReadyForTile(drape, idealOS) && drape->getTexture()) {
             binding.drapeReady = true;
             binding.drapeID = resolvedDrapeID;
             binding.drapeTexture = drape->getTexture();
+        }
+        if (binding.drapeReady) {
+            readyBindings++;
+        }
+        if (binding.usedEmptyDEM) {
+            emptyDemBindings++;
+        }
+        if (binding.usedDrapeFallback) {
+            fallbackDrapeBindings++;
         }
 
         if (traceDrape) {
@@ -753,6 +798,10 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
             });
         }
         if (!binding.drapeReady) {
+            klattraTrace("terrain drawable-skip ideal=" + klattraTileString(idealID) +
+                         " source=" + klattraTileString(binding.sourceID) +
+                         " emptyDEM=" + std::to_string(binding.usedEmptyDEM) +
+                         " drapeFallback=" + std::to_string(binding.usedDrapeFallback));
             if (traceDrape) {
                 Log::Info(Event::Render,
                           "[KLATTRA DRAPE_TRACE] terrain-drawable-skip frame=" +
@@ -764,6 +813,10 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
             continue;
         }
         if (auto drawable = createDrawableForTile(context, shaders, idealID, binding)) {
+            klattraTrace("terrain drawable-add ideal=" + klattraTileString(idealID) +
+                         " source=" + klattraTileString(binding.sourceID) +
+                         " emptyDEM=" + std::to_string(binding.usedEmptyDEM) +
+                         " drapeFallback=" + std::to_string(binding.usedDrapeFallback));
             if (traceDrape) {
                 Log::Info(Event::Render,
                           "[KLATTRA DRAPE_TRACE] terrain-drawable-add frame=" +
@@ -780,9 +833,9 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
     // RenderTargets are pruned separately above; this only handles the
     // terrain mesh drawables themselves.
     if (!currentBindings.empty()) {
-        const auto removed = lg->removeDrawablesIf([&currentIdealIDs](gfx::Drawable& d) {
+        const auto removed = lg->removeDrawablesIf([&terrainMeshIDs](gfx::Drawable& d) {
             const auto& maybeID = d.getTileID();
-            return maybeID.has_value() && currentIdealIDs.find(*maybeID) == currentIdealIDs.end();
+            return maybeID.has_value() && terrainMeshIDs.find(*maybeID) == terrainMeshIDs.end();
         });
         if (traceDrape && removed > 0) {
             Log::Info(Event::Render,
@@ -794,6 +847,14 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
     }
 
     currentBindings = std::move(nextBindings);
+    klattraTrace("terrain update-end source=" + impl->sourceID +
+                 " bindings=" + std::to_string(currentBindings.size()) +
+                 " ready=" + std::to_string(readyBindings) +
+                 " emptyDEM=" + std::to_string(emptyDemBindings) +
+                 " drapeFallback=" + std::to_string(fallbackDrapeBindings) +
+                 " demTextures=" + std::to_string(demTexturesByTile.size()) +
+                 " drapeTargets=" + std::to_string(drapeCache.size()) +
+                 " terrainDrawables=" + std::to_string(lg->getDrawableCount()));
     if (traceDrape) {
         Log::Info(Event::Render,
                   "[KLATTRA DRAPE_TRACE] update-end frame=" + std::to_string(drapeTraceFrame) +
@@ -855,6 +916,52 @@ float RenderTerrain::getElevationWithExaggeration(const UnwrappedTileID& tileID,
     return getElevation(tileID, x, y) * getExaggeration();
 }
 
+std::optional<float> RenderTerrain::getElevationAtLatLng(const LatLng& latLng) const {
+    if (demImagesByTile.empty()) {
+        return std::nullopt;
+    }
+
+    std::optional<UnwrappedTileID> bestTile;
+    float bestX = 0.5f;
+    float bestY = 0.5f;
+    uint8_t bestZ = 0;
+
+    for (const auto& [cachedID, cachedImage] : demImagesByTile) {
+        if (!cachedImage || cachedImage->size.isEmpty()) {
+            continue;
+        }
+
+        const auto z = cachedID.canonical.z;
+        const auto projected = Projection::project(latLng, static_cast<int32_t>(z));
+        const auto unwrapped = cachedID.toUnwrapped();
+        const auto scale = int64_t{1} << z;
+        const double tileX = static_cast<double>(unwrapped.canonical.x) +
+                             static_cast<double>(unwrapped.wrap) * static_cast<double>(scale);
+        const double tileY = static_cast<double>(unwrapped.canonical.y);
+        const double localX = projected.x - tileX;
+        const double localY = projected.y - tileY;
+        if (localX < 0.0 || localX > 1.0 || localY < 0.0 || localY > 1.0) {
+            continue;
+        }
+        if (!bestTile || z >= bestZ) {
+            bestTile = unwrapped;
+            bestX = static_cast<float>(localX);
+            bestY = static_cast<float>(localY);
+            bestZ = z;
+        }
+    }
+
+    if (!bestTile) {
+        return std::nullopt;
+    }
+
+    const float elevation = getElevation(*bestTile, bestX, bestY);
+    if (elevation <= -500.0f || elevation >= 9000.0f) {
+        return std::nullopt;
+    }
+    return elevation;
+}
+
 float RenderTerrain::getExaggeration() const {
     return impl->exaggeration;
 }
@@ -875,50 +982,26 @@ const RenderTerrain::TerrainMesh& RenderTerrain::getMesh(gfx::Context& context) 
 }
 
 void RenderTerrain::generateMesh(gfx::Context& context) {
-    // Generate a regular grid mesh for terrain, plus a perimeter skirt to
-    // hide basemap bleed-through at tile edges and same-level seams.
+    (void)context;
+    // Generate a regular grid mesh for terrain in tile-extent coordinates
+    // (0..8192). Each vertex stores [pos.x, pos.y, tex.u, tex.v]; the vertex
+    // shader samples the DEM at pos / EXTENT and displaces the grid in metres.
     //
-    // The base mesh is the standard (MESH_SIZE+1)² grid of vertices in
-    // tile-extent coordinates (0..8192). Each vertex stores [pos.x,
-    // pos.y, tex.u, tex.v] — the vertex shader samples the DEM at
-    // `pos / EXTENT` (texture_pos is currently informational only).
-    //
-    // The skirt adds four strips of vertices along the tile perimeter
-    // — one per edge, each (MESH_SIZE+1) vertices long. Each skirt
-    // vertex has the SAME pos as its mesh-edge counterpart but
-    // `texture_pos = (-1, -1)` as a sentinel: the shader detects the
-    // negative tex coord and drops the vertex's world elevation by
-    // `SKIRT_DROP_METERS`. The result is a vertical wall hanging
-    // straight down from each tile edge, sampling the same drape
-    // texture as the edge so the wall visually continues the basemap
-    // content underneath the mesh. Mirrors `_buildSkirts` in
-    // maplibre-gl-js's `src/render/terrain.ts` (which uses a 3rd
-    // position component as the flag — we repurpose the texture_pos
-    // sentinel to avoid widening the vertex format).
-    //
-    // Why hanging-down skirts work: when the camera looks past a tile
-    // edge, the basemap (rendered at z=0 in the main pass) would
-    // otherwise show through. The skirt's bottom sits at
-    // `(mesh_edge_elevation − SKIRT_DROP_METERS)` — chosen to be well
-    // below z=0 in worst-case high-mountain coverage — so depth-test
-    // resolves the skirt in front of the basemap at the screen pixels
-    // adjacent to the edge. Same trick used by Cesium quantized-mesh
-    // (per-tile `westSkirtHeight` etc.) and discussed at length in the
-    // game-dev literature on LOD-crack mitigation.
+    // Earlier builds added 5 km vertical skirts at every tile edge. At the
+    // close, high-pitch drone camera used by trail preview, those curtains
+    // routinely crossed the camera frustum and hid the real surface. Terrain
+    // now relies on a padded cover plus drape fallback instead of skirt walls.
 
     const size_t gridSize = MESH_SIZE;
     const size_t verticesPerSide = gridSize + 1;
     const size_t totalMainVertices = verticesPerSide * verticesPerSide;
-    const size_t totalSkirtVertices = 4 * verticesPerSide;
 
     std::vector<int16_t> vertices;
-    vertices.reserve((totalMainVertices + totalSkirtVertices) * 4);
+    vertices.reserve(totalMainVertices * 4);
 
     const float posStep = static_cast<float>(util::EXTENT) / static_cast<float>(gridSize);
     const float texStep = static_cast<float>(util::EXTENT) / static_cast<float>(gridSize);
-    const int16_t extentI16 = static_cast<int16_t>(util::EXTENT);
 
-    // Main grid vertices.
     for (size_t y = 0; y < verticesPerSide; ++y) {
         for (size_t x = 0; x < verticesPerSide; ++x) {
             vertices.push_back(static_cast<int16_t>(x * posStep));
@@ -928,48 +1011,9 @@ void RenderTerrain::generateMesh(gfx::Context& context) {
         }
     }
 
-    // Skirt vertices: 4 perimeter strips. Each strip has `verticesPerSide`
-    // entries with `pos` = the corresponding mesh edge vertex's position
-    // and `texture_pos = (-1, -1)` as the shader sentinel. The shader
-    // applies SKIRT_DROP_METERS to skirt vertices' elevation. The skirt
-    // hangs straight down from each tile edge — outward-leaning skirts
-    // (Cesium-style) were tried but caused visible sloped "fins" at the
-    // outer cover boundary; the camera could see the slope from angles
-    // where the rest of the mesh occluded the tile interior. Vertical
-    // skirts hide behind the mesh from any typical viewing angle.
-    auto pushSkirtVertex = [&](int16_t px, int16_t py) {
-        vertices.push_back(px);
-        vertices.push_back(py);
-        vertices.push_back(-1);
-        vertices.push_back(-1);
-    };
-    // Top edge (y=0)
-    for (size_t x = 0; x < verticesPerSide; ++x) {
-        pushSkirtVertex(static_cast<int16_t>(x * posStep), 0);
-    }
-    // Bottom edge (y=EXTENT)
-    for (size_t x = 0; x < verticesPerSide; ++x) {
-        pushSkirtVertex(static_cast<int16_t>(x * posStep), extentI16);
-    }
-    // Left edge (x=0)
-    for (size_t y = 0; y < verticesPerSide; ++y) {
-        pushSkirtVertex(0, static_cast<int16_t>(y * posStep));
-    }
-    // Right edge (x=EXTENT)
-    for (size_t y = 0; y < verticesPerSide; ++y) {
-        pushSkirtVertex(extentI16, static_cast<int16_t>(y * posStep));
-    }
-
-    const size_t skirtTopBase = totalMainVertices;
-    const size_t skirtBottomBase = skirtTopBase + verticesPerSide;
-    const size_t skirtLeftBase = skirtBottomBase + verticesPerSide;
-    const size_t skirtRightBase = skirtLeftBase + verticesPerSide;
-
-    // Index data.
     std::vector<uint16_t> indices;
-    indices.reserve((gridSize * gridSize + 4 * gridSize) * 6);
+    indices.reserve(gridSize * gridSize * 6);
 
-    // Main grid triangles (2 per cell).
     for (size_t y = 0; y < gridSize; ++y) {
         for (size_t x = 0; x < gridSize; ++x) {
             const uint16_t topLeft = static_cast<uint16_t>(y * verticesPerSide + x);
@@ -983,48 +1027,6 @@ void RenderTerrain::generateMesh(gfx::Context& context) {
             indices.push_back(bottomLeft);
             indices.push_back(bottomRight);
         }
-    }
-
-    // Skirt triangles: each strip connects mesh-edge vertices to the
-    // matching skirt vertices, two triangles per cell.
-    // Winding matches the main grid (CW in tile-space y-down). Back-face
-    // culling is disabled for the terrain pass, so winding only affects
-    // depth-test consistency at near-coincident edges.
-    const auto addSkirtStrip = [&](size_t meshA, size_t meshB, size_t skirtA, size_t skirtB) {
-        indices.push_back(static_cast<uint16_t>(meshA));
-        indices.push_back(static_cast<uint16_t>(skirtA));
-        indices.push_back(static_cast<uint16_t>(meshB));
-        indices.push_back(static_cast<uint16_t>(meshB));
-        indices.push_back(static_cast<uint16_t>(skirtA));
-        indices.push_back(static_cast<uint16_t>(skirtB));
-    };
-    // Top edge: mesh row y=0 ↔ skirt-top strip.
-    for (size_t x = 0; x < gridSize; ++x) {
-        addSkirtStrip(/*meshA=*/x,
-                      /*meshB=*/x + 1,
-                      /*skirtA=*/skirtTopBase + x,
-                      /*skirtB=*/skirtTopBase + x + 1);
-    }
-    // Bottom edge: mesh row y=gridSize ↔ skirt-bottom strip.
-    for (size_t x = 0; x < gridSize; ++x) {
-        addSkirtStrip(/*meshA=*/gridSize * verticesPerSide + x + 1,
-                      /*meshB=*/gridSize * verticesPerSide + x,
-                      /*skirtA=*/skirtBottomBase + x + 1,
-                      /*skirtB=*/skirtBottomBase + x);
-    }
-    // Left edge: mesh column x=0 ↔ skirt-left strip.
-    for (size_t y = 0; y < gridSize; ++y) {
-        addSkirtStrip(/*meshA=*/(y + 1) * verticesPerSide,
-                      /*meshB=*/y * verticesPerSide,
-                      /*skirtA=*/skirtLeftBase + y + 1,
-                      /*skirtB=*/skirtLeftBase + y);
-    }
-    // Right edge: mesh column x=gridSize ↔ skirt-right strip.
-    for (size_t y = 0; y < gridSize; ++y) {
-        addSkirtStrip(/*meshA=*/y * verticesPerSide + gridSize,
-                      /*meshB=*/(y + 1) * verticesPerSide + gridSize,
-                      /*skirtA=*/skirtRightBase + y,
-                      /*skirtB=*/skirtRightBase + y + 1);
     }
 
     mesh = TerrainMesh{
@@ -1123,16 +1125,38 @@ std::unique_ptr<gfx::Drawable> RenderTerrain::createDrawableForTile(gfx::Context
     // 2D sublayer depth-offset hack that LayerTweaker applies for stacked 2D
     // layers — we want the actual perspective depth.
     builder->setShader(terrainShader);
-    builder->setRenderPass(RenderPass::Opaque);
+    builder->setRenderPass(RenderPass::Translucent);
     builder->setDepthType(gfx::DepthMaskType::ReadWrite);
     builder->setColorMode(gfx::ColorMode::unblended());
     builder->setEnableDepth(true);
     builder->setIs3D(true);
 
-    // Set vertex data - copy vertices to raw buffer
-    std::vector<uint8_t> vertexData(terrainMesh.vertices.size() * sizeof(int16_t));
-    std::memcpy(vertexData.data(), terrainMesh.vertices.data(), vertexData.size());
-    builder->setRawVertices(std::move(vertexData), terrainMesh.vertexCount, gfx::AttributeDataType::Short4);
+    auto sharedVertices = std::make_shared<gfx::VertexVector<TerrainLayoutVertex>>();
+    sharedVertices->reserve(terrainMesh.vertexCount);
+    for (size_t index = 0; index + 3 < terrainMesh.vertices.size(); index += 4) {
+        sharedVertices->emplace_back(TerrainLayoutVertex{
+            {terrainMesh.vertices[index + 0], terrainMesh.vertices[index + 1]},
+            {terrainMesh.vertices[index + 2], terrainMesh.vertices[index + 3]},
+        });
+    }
+
+    auto vertexAttributes = context.createVertexAttributeArray();
+    if (const auto& attr = vertexAttributes->set(shaders::idTerrainPosVertexAttribute)) {
+        attr->setSharedRawData(sharedVertices,
+                               offsetof(TerrainLayoutVertex, pos),
+                               /*vertexOffset=*/0,
+                               sizeof(TerrainLayoutVertex),
+                               gfx::AttributeDataType::Short2);
+    }
+    if (const auto& attr = vertexAttributes->set(shaders::idTerrainTexturePosVertexAttribute)) {
+        attr->setSharedRawData(sharedVertices,
+                               offsetof(TerrainLayoutVertex, texturePos),
+                               /*vertexOffset=*/0,
+                               sizeof(TerrainLayoutVertex),
+                               gfx::AttributeDataType::Short2);
+    }
+    builder->setVertexAttributes(std::move(vertexAttributes));
+    builder->setRawVertices({}, terrainMesh.vertexCount, gfx::AttributeDataType::Short4);
 
     // Set index data and segments
     // Create a single segment covering the entire terrain mesh

@@ -32,6 +32,7 @@
 #include <Metal/MTLCaptureScope.hpp>
 #include <Foundation/NSURL.hpp>
 #include <cstdlib>
+#include <optional>
 /// Enable programmatic Metal frame captures for specific frame numbers.
 /// Requries iOS 13
 constexpr auto EnableMetalCapture = 0;
@@ -409,8 +410,16 @@ void Renderer::Impl::render(const RenderTree& renderTree, const std::shared_ptr<
                                             PaintParameters::depthEpsilon;
 
         // draw layer groups, translucent pass
+        auto* terrain = orchestrator.getRenderTerrain();
+        const auto terrainLayerGroup = terrain ? terrain->getLayerGroup() : nullptr;
         parameters.currentLayer = static_cast<uint32_t>(orchestrator.numLayerGroups()) - 1;
         orchestrator.visitLayerGroups([&](LayerGroupBase& layerGroup) {
+            if (terrainLayerGroup && terrainLayerGroup.get() == &layerGroup) {
+                if (parameters.currentLayer > 0) {
+                    parameters.currentLayer--;
+                }
+                return;
+            }
             layerGroup.render(orchestrator, parameters);
             if (parameters.currentLayer > 0) {
                 parameters.currentLayer--;
@@ -429,6 +438,33 @@ void Renderer::Impl::render(const RenderTree& renderTree, const std::shared_ptr<
                 item.render(parameters);
             }
         }
+    };
+
+    const auto drawableTerrainPass = [&] {
+        auto* terrain = orchestrator.getRenderTerrain();
+        if (!terrain || !terrain->isEnabled() || !terrain->getLayerGroup()) {
+            return;
+        }
+
+        // Terrain needs normal 3D depth testing against itself, but the
+        // flat map passes populate the main buffer depth plane first. Draw
+        // terrain in a tiny second pass that preserves color and resets only
+        // depth, so hills can occlude valleys without being hidden by the
+        // 2D basemap.
+        parameters.renderPass.reset();
+        parameters.renderPass = parameters.encoder->createRenderPass(
+            "terrain buffer",
+            {.renderable = parameters.backend.getDefaultRenderable(),
+             .clearColor = std::nullopt,
+             .clearDepth = 1.0f,
+             .clearStencil = std::nullopt});
+        context.bindGlobalUniformBuffers(*parameters.renderPass);
+
+        const auto debugGroup(parameters.renderPass->createDebugGroup("terrain-final"));
+        parameters.pass = RenderPass::Translucent;
+        parameters.depthRangeSize = 1.0f;
+        parameters.currentLayer = 0;
+        terrain->getLayerGroup()->render(orchestrator, parameters);
     };
 
     const auto drawableDebugOverlays = [&] {
@@ -452,6 +488,7 @@ void Renderer::Impl::render(const RenderTree& renderTree, const std::shared_ptr<
     context.bindGlobalUniformBuffers(*parameters.renderPass);
     drawableOpaquePass();
     drawableTranslucentPass();
+    drawableTerrainPass();
     drawableDebugOverlays();
 
     // Give the layers a chance to do cleanup
