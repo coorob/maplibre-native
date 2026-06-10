@@ -415,6 +415,11 @@ private:
     // terrain surface for a frame.
     std::unordered_map<OverscaledTileID, TerrainDrapeTargetPtr> retiredDrapeTargetsByTile;
 
+    // Distance-ring membership per drape tile (0 = near, 1 = mid, 2 = far)
+    // with demotion hysteresis — see drapeTargetSizeForTile in
+    // render_terrain.cpp. Pruned alongside the drape cache.
+    std::unordered_map<OverscaledTileID, uint8_t> drapeRingByTile;
+
     // Maximum stable-view pixel size of each close-zoom drape target. Moving
     // cameras allocate smaller close targets first and upgrade to this after
     // the cover settles, so fast pans/zooms do not block on multiple 2048²

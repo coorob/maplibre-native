@@ -119,6 +119,15 @@ int32_t klattraEnvTargetSize(const char* name, int32_t fallback) {
     return static_cast<int32_t>(std::clamp<long>(parsed, 256, 4096));
 }
 
+uint32_t klattraEnvTileCount(const char* name, uint32_t fallback) {
+    const char* value = std::getenv(name);
+    if (!value) return fallback;
+    char* end = nullptr;
+    const unsigned long parsed = std::strtoul(value, &end, 10);
+    if (end == value) return fallback;
+    return static_cast<uint32_t>(std::clamp<unsigned long>(parsed, 0, 512));
+}
+
 uint32_t klattraEnvFrameCount(const char* name, uint32_t fallback) {
     const char* value = std::getenv(name);
     if (!value) return fallback;
@@ -374,21 +383,63 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
     // shader samples this target as the surface colour; basemap layers route
     // drawables into it (RenderBackgroundLayer / RenderFillLayer / ...).
     {
+        // Distance-ranked drape budgets: spend texture memory where the user
+        // is looking instead of by tile zoom. Every drape tile is ranked by
+        // its centre's mercator distance to the camera centre; the nearest
+        // KLATTRA_DRAPE_NEAR_TILES bake at nearSize even while the camera
+        // moves (the old moving/still split made gestures soft, then popped
+        // sharp on settle), the next KLATTRA_DRAPE_MID_TILES at midSize, and
+        // the rest at farSize. Worst-case GPU memory is bounded by the ring
+        // counts regardless of zoom or pitch — the per-zoom-bucket budgets
+        // this replaces let a pitched 72-tile cover jetsam the app when the
+        // z10 bucket was raised to 2048 (measured 3.3 GB on an iPhone 16 Pro).
+        const LatLng cameraCenter = state.getLatLng();
+        const double centerX = (cameraCenter.longitude() + 180.0) / 360.0;
+        const double centerLatRad = cameraCenter.latitude() * M_PI / 180.0;
+        const double centerY = 0.5 - std::log(std::tan(M_PI / 4.0 + centerLatRad / 2.0)) / (2.0 * M_PI);
+        std::vector<std::pair<double, OverscaledTileID>> rankedDrapeIDs;
+        rankedDrapeIDs.reserve(currentDrapeIDs.size());
+        for (const auto& tileID : currentDrapeIDs) {
+            const double scale = static_cast<double>(1u << tileID.canonical.z);
+            const double dx = (tileID.canonical.x + 0.5) / scale + tileID.wrap - centerX;
+            const double dy = (tileID.canonical.y + 0.5) / scale - centerY;
+            rankedDrapeIDs.emplace_back(dx * dx + dy * dy, tileID);
+        }
+        std::sort(rankedDrapeIDs.begin(), rankedDrapeIDs.end(), [](const auto& a, const auto& b) {
+            return a.first < b.first;
+        });
+        std::unordered_map<OverscaledTileID, uint32_t> drapeRankByTile;
+        drapeRankByTile.reserve(rankedDrapeIDs.size());
+        for (uint32_t i = 0; i < rankedDrapeIDs.size(); ++i) {
+            drapeRankByTile.emplace(rankedDrapeIDs[i].second, i);
+        }
+
+        static const int32_t nearSize = klattraEnvTargetSize("KLATTRA_DRAPE_TARGET_SIZE_NEAR", DRAPE_TARGET_SIZE);
+        static const int32_t midSize = klattraEnvTargetSize("KLATTRA_DRAPE_TARGET_SIZE_MID", 1024);
+        static const int32_t farSize = klattraEnvTargetSize("KLATTRA_DRAPE_TARGET_SIZE_FAR", 512);
+        static const uint32_t nearTiles = klattraEnvTileCount("KLATTRA_DRAPE_NEAR_TILES", 12);
+        static const uint32_t midTiles = klattraEnvTileCount("KLATTRA_DRAPE_MID_TILES", 24);
+        static const uint32_t ringSlack = klattraEnvTileCount("KLATTRA_DRAPE_RING_SLACK", 6);
+
         const auto drapeTargetSizeForTile = [&](const OverscaledTileID& tileID) -> int32_t {
-            // Low-zoom DEM padding can legitimately cover many more terrain
-            // tiles at pitched camera angles. Their on-screen texel density
-            // does not justify the full close-zoom 2048px drape budget.
-            static const int32_t z8Size = klattraEnvTargetSize("KLATTRA_DRAPE_TARGET_SIZE_Z8", 512);
-            static const int32_t z10Size = klattraEnvTargetSize("KLATTRA_DRAPE_TARGET_SIZE_Z10", 1024);
-            static const int32_t movingSize = klattraEnvTargetSize("KLATTRA_DRAPE_TARGET_SIZE_INTERACTIVE", 1024);
-            static const int32_t stillSize = klattraEnvTargetSize("KLATTRA_DRAPE_TARGET_SIZE_CLOSE", DRAPE_TARGET_SIZE);
-            static const int32_t fallbackSize = klattraEnvTargetSize("KLATTRA_DRAPE_TARGET_SIZE_FALLBACK", 1024);
-            if (currentIdealIDs.find(tileID) == currentIdealIDs.end()) {
-                return std::min(fallbackSize, movingSize);
+            const auto rankIt = drapeRankByTile.find(tileID);
+            const uint32_t rank = rankIt != drapeRankByTile.end() ? rankIt->second
+                                                                  : std::numeric_limits<uint32_t>::max();
+            const uint8_t desiredRing = rank < nearTiles ? 0 : (rank < nearTiles + midTiles ? 1 : 2);
+            uint8_t ring = desiredRing;
+            const auto ringIt = drapeRingByTile.find(tileID);
+            if (ringIt != drapeRingByTile.end() && desiredRing > ringIt->second) {
+                // Promote immediately, demote with slack: a tile keeps its
+                // ring until its rank falls RING_SLACK past the boundary, so
+                // panning does not flap targets at ring edges (every flip
+                // reallocates and rebakes a render target).
+                const uint32_t boundary = ringIt->second == 0 ? nearTiles : nearTiles + midTiles;
+                ring = rank >= boundary + ringSlack ? desiredRing : ringIt->second;
             }
-            if (tileID.canonical.z <= 8) return z8Size;
-            if (tileID.canonical.z <= 10) return z10Size;
-            return useHighQualityDrape ? stillSize : movingSize;
+            drapeRingByTile[tileID] = ring;
+            if (ring == 0) return nearSize;
+            if (ring == 1) return midSize;
+            return farSize;
         };
 
         for (const auto& tileID : currentDrapeIDs) {
@@ -396,8 +447,11 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
             const Size desiredSize{static_cast<uint32_t>(targetSize), static_cast<uint32_t>(targetSize)};
             if (auto existing = drapeCache.get(tileID)) {
                 const Size existingSize = existing->getSize();
-                const bool shouldUpgrade = existingSize != desiredSize && existingSize.area() < desiredSize.area();
-                if (shouldUpgrade) {
+                // Resize both ways: ring promotions sharpen the tile, ring
+                // demotions release the big target again — without them, long
+                // pans accumulate near-ring targets until jetsam. The retired
+                // target keeps rendering until its successor bakes.
+                if (existingSize != desiredSize) {
                     auto oldTarget = drapeCache.take(tileID);
                     if (klattraDrapeTargetReady(oldTarget)) {
                         retiredDrapeTargetsByTile[tileID] = oldTarget;
@@ -406,7 +460,7 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
                     }
                     if (traceDrape) {
                         Log::Info(Event::Render,
-                                  "[KLATTRA DRAPE_TRACE] cache-upgrade frame=" + std::to_string(drapeTraceFrame) +
+                                  "[KLATTRA DRAPE_TRACE] cache-resize frame=" + std::to_string(drapeTraceFrame) +
                                       " tile=" + klattraTileString(tileID) +
                                       " oldSize=" + std::to_string(existingSize.width) + "x" +
                                           std::to_string(existingSize.height) +
@@ -459,6 +513,13 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
         for (auto it = retiredDrapeTargetsByTile.begin(); it != retiredDrapeTargetsByTile.end();) {
             if (currentDrapeIDs.find(it->first) == currentDrapeIDs.end()) {
                 it = retiredDrapeTargetsByTile.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        for (auto it = drapeRingByTile.begin(); it != drapeRingByTile.end();) {
+            if (currentDrapeIDs.find(it->first) == currentDrapeIDs.end()) {
+                it = drapeRingByTile.erase(it);
             } else {
                 ++it;
             }
