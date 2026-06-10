@@ -1,5 +1,6 @@
 #include <mbgl/util/tile_cover.hpp>
 #include <mbgl/util/geo.hpp>
+#include <mbgl/util/tile_coordinate.hpp>
 #include <mbgl/map/transform.hpp>
 #include <mbgl/math/angles.hpp>
 
@@ -7,6 +8,8 @@
 #include <cstdlib> /* srand, rand */
 #include <ctime>   /* time */
 #include <gtest/gtest.h>
+
+#include <limits>
 
 using namespace mbgl;
 
@@ -506,6 +509,138 @@ TEST(TileCover, DISABLED_FuzzPoly) {
         while (tc.next()) {
         };
     }
+}
+
+// Regression (klattra memory bound): elevation dilation must size the tile
+// grid per tile. A pitched variable-zoom cover emits canonical.z below the
+// ideal z; using the ideal-z grid for the y-bound/x-wrap let dilation emit
+// ids with x/y outside the tile grid — OverscaledTileID asserts in debug,
+// phantom requests in release. Camera faces the south grid edge so coarse
+// horizon tiles sit within the dilation radius of their own grid edge.
+// (Verified to fail on the pre-fix code: emitted e.g. 7/68/128, y range at
+// z7 being 0..127.)
+TEST(TileCover, PitchedElevationDilationStaysInGrid) {
+    Transform transform;
+    transform.resize({1024, 768});
+    transform.jumpTo(
+        CameraOptions().withCenter(LatLng{-84.0, 0.0}).withZoom(8.0).withBearing(180.0).withPitch(61.0));
+
+    util::TileCoverParameters params{transform.getState()};
+    params.tileLodMinZoom = 6;
+    params.tileLodPitchThreshold = 45.0 * std::numbers::pi / 180.0;
+    params.tileLodScale = 4.0;
+    params.tileCoverMinElevationMeters = -6000.0;
+    params.tileCoverMaxElevationMeters = 8000.0;
+
+    const auto cover = util::tileCover(params, 8);
+    ASSERT_FALSE(cover.empty());
+    std::size_t lowZ = 0;
+    for (const auto& id : cover) {
+        if (id.canonical.z < 8) ++lowZ;
+        const uint32_t tileCount = 1u << id.canonical.z;
+        EXPECT_LT(id.canonical.x, tileCount);
+        EXPECT_LT(id.canonical.y, tileCount);
+    }
+    // The scenario must actually exercise the variable-zoom path.
+    EXPECT_GT(lowZ, 0u);
+}
+
+namespace {
+// Distance of a tile centre from the screen-centre coordinate, measured in
+// ideal-zoom tile units regardless of the tile's own canonical z — the
+// space tileCoverMaxTiles is required to rank in.
+double scaledSqDistFromCenter(const TransformState& state, uint8_t idealZ, const OverscaledTileID& id) {
+    const auto centerCoord = TileCoordinate::fromScreenCoordinate(
+                                 state, idealZ, {state.getSize().width / 2.0, state.getSize().height / 2.0})
+                                 .p;
+    const double scale = std::ldexp(1.0, static_cast<int>(idealZ) - static_cast<int>(id.canonical.z));
+    const double tilesAtTileZ = std::ldexp(1.0, static_cast<int>(id.canonical.z));
+    const double dx = (static_cast<double>(id.wrap) * tilesAtTileZ + static_cast<double>(id.canonical.x) + 0.5) *
+                          scale -
+                      centerCoord.x;
+    const double dy = (static_cast<double>(id.canonical.y) + 0.5) * scale - centerCoord.y;
+    return dx * dx + dy * dy;
+}
+} // namespace
+
+// Regression (klattra memory bound): with no dilation every candidate is
+// frustum cover, so the cap contract is exactly "keep the N nearest by
+// zoom-consistent distance". The old ranking compared distances at each
+// tile's own canonical z (one z7 unit == one z8 unit), so coarse far tiles
+// displaced nearer ideal-zoom tiles. (Verified to fail on the pre-fix code:
+// kept scaled d2 16.43 while evicting d2 2.41.)
+TEST(TileCover, MaxTilesKeepsNearestInZoomConsistentUnits) {
+    Transform transform;
+    transform.resize({1024, 768});
+    transform.jumpTo(
+        CameraOptions().withCenter(LatLng{47.0, 8.0}).withZoom(8.0).withBearing(0.0).withPitch(61.0));
+
+    util::TileCoverParameters params{transform.getState()};
+    params.tileLodMinZoom = 6;
+    params.tileLodPitchThreshold = 45.0 * std::numbers::pi / 180.0;
+    params.tileLodScale = 4.0;
+    const uint8_t idealZ = 8;
+
+    const auto uncapped = util::tileCover(params, idealZ);
+    params.tileCoverMaxTiles = 8;
+    const auto capped = util::tileCover(params, idealZ);
+
+    ASSERT_GT(uncapped.size(), params.tileCoverMaxTiles);
+    ASSERT_EQ(capped.size(), params.tileCoverMaxTiles);
+
+    double maxKept = 0.0;
+    for (const auto& id : capped) {
+        EXPECT_NE(std::find(uncapped.begin(), uncapped.end(), id), uncapped.end());
+        maxKept = std::max(maxKept, scaledSqDistFromCenter(transform.getState(), idealZ, id));
+    }
+    double minEvicted = std::numeric_limits<double>::max();
+    for (const auto& id : uncapped) {
+        if (std::find(capped.begin(), capped.end(), id) == capped.end()) {
+            minEvicted = std::min(minEvicted, scaledSqDistFromCenter(transform.getState(), idealZ, id));
+        }
+    }
+    EXPECT_LE(maxKept, minEvicted + 1e-9);
+}
+
+// Regression (klattra memory bound): with elevation dilation active the cap
+// budget goes to frustum cover before dilation padding; the ideal-zoom tile
+// under the screen centre always survives.
+TEST(TileCover, MaxTilesWithDilationKeepsLookAtTile) {
+    Transform transform;
+    transform.resize({1024, 768});
+    transform.jumpTo(
+        CameraOptions().withCenter(LatLng{47.0, 8.0}).withZoom(8.0).withBearing(0.0).withPitch(61.0));
+
+    util::TileCoverParameters params{transform.getState()};
+    params.tileLodMinZoom = 6;
+    params.tileLodPitchThreshold = 45.0 * std::numbers::pi / 180.0;
+    params.tileLodScale = 4.0;
+    params.tileCoverMinElevationMeters = -6000.0;
+    params.tileCoverMaxElevationMeters = 8000.0;
+    const uint8_t idealZ = 8;
+
+    const auto uncapped = util::tileCover(params, idealZ);
+    params.tileCoverMaxTiles = 24;
+    const auto capped = util::tileCover(params, idealZ);
+
+    ASSERT_GT(uncapped.size(), capped.size());
+    ASSERT_EQ(capped.size(), params.tileCoverMaxTiles);
+    for (const auto& id : capped) {
+        EXPECT_NE(std::find(uncapped.begin(), uncapped.end(), id), uncapped.end());
+    }
+
+    const auto centerCoord = TileCoordinate::fromScreenCoordinate(
+                                 transform.getState(),
+                                 idealZ,
+                                 {transform.getState().getSize().width / 2.0,
+                                  transform.getState().getSize().height / 2.0})
+                                 .p;
+    const OverscaledTileID lookAt{idealZ,
+                                  0,
+                                  idealZ,
+                                  static_cast<uint32_t>(centerCoord.x),
+                                  static_cast<uint32_t>(centerCoord.y)};
+    EXPECT_NE(std::find(capped.begin(), capped.end(), lookAt), capped.end());
 }
 
 TEST(TileCover, DISABLED_FuzzLine) {

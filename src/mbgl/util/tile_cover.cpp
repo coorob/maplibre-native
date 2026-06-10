@@ -12,6 +12,7 @@
 #include <cstddef>
 #include <functional>
 #include <list>
+#include <unordered_set>
 
 using namespace std::numbers;
 
@@ -297,23 +298,37 @@ std::vector<OverscaledTileID> tileCover(const TileCoverParameters& state,
         ids.push_back(tile.id);
     }
 
+    // Frustum-cover membership, kept only when a cap is active so the cap can
+    // prefer genuinely visible tiles over elevation-dilation padding.
+    std::unordered_set<OverscaledTileID> frustumCover;
+    bool dilated = false;
+
     if (state.tileCoverMinElevationMeters != 0.0 || state.tileCoverMaxElevationMeters != 0.0) {
+        if (state.tileCoverMaxTiles > 0) {
+            frustumCover.insert(ids.begin(), ids.end());
+        }
+        dilated = true;
         std::vector<OverscaledTileID> expanded = ids;
-        const int32_t tileCountAtZ = 1 << z;
         constexpr int32_t radius = 4;
         for (const auto& id : ids) {
+            // Bounds and wrap must use the tile's OWN grid size: a pitched
+            // (variable-zoom) cover emits canonical.z below the ideal z, and
+            // sizing the grid at the ideal z allowed x/y outside the tile
+            // grid — an assert in debug builds, phantom tile requests in
+            // release.
+            const int32_t tileCountAtTileZ = 1 << id.canonical.z;
             for (int32_t dy = -radius; dy <= radius; ++dy) {
                 const int32_t y = static_cast<int32_t>(id.canonical.y) + dy;
-                if (y < 0 || y >= tileCountAtZ) continue;
+                if (y < 0 || y >= tileCountAtTileZ) continue;
                 for (int32_t dx = -radius; dx <= radius; ++dx) {
                     int32_t x = static_cast<int32_t>(id.canonical.x) + dx;
                     int16_t wrap = id.wrap;
                     while (x < 0) {
-                        x += tileCountAtZ;
+                        x += tileCountAtTileZ;
                         --wrap;
                     }
-                    while (x >= tileCountAtZ) {
-                        x -= tileCountAtZ;
+                    while (x >= tileCountAtTileZ) {
+                        x -= tileCountAtTileZ;
                         ++wrap;
                     }
                     expanded.emplace_back(id.overscaledZ, wrap, id.canonical.z, static_cast<uint32_t>(x),
@@ -327,28 +342,46 @@ std::vector<OverscaledTileID> tileCover(const TileCoverParameters& state,
     }
 
     if (state.tileCoverMaxTiles > 0 && ids.size() > state.tileCoverMaxTiles) {
-        const auto distanceFromCenter = [&](const OverscaledTileID& id) {
-            const double tilesAtZ = std::pow(2.0, id.canonical.z);
-            const auto centerAtZ = TileCoordinate::fromScreenCoordinate(
-                                       transform,
-                                       id.canonical.z,
-                                       {transform.getSize().width / 2.0, transform.getSize().height / 2.0})
-                                       .p;
-            const double dx = static_cast<double>(id.wrap) * tilesAtZ +
-                              static_cast<double>(id.canonical.x) + 0.5 - centerAtZ.x;
-            const double dy = static_cast<double>(id.canonical.y) + 0.5 - centerAtZ.y;
-            return dx * dx + dy * dy;
+        // Rank every tile in a single zoom-consistent space before cutting:
+        // scale each tile centre into ideal-zoom (z) tile units and measure
+        // against the already-computed screen-centre coordinate. Comparing
+        // distances at each tile's own canonical z (previous behaviour) made
+        // one z10 unit equal one z12 unit, so coarse horizon tiles
+        // systematically outranked the visible foreground. Frustum-cover
+        // tiles always outrank dilation-only padding so the budget is spent
+        // on what is actually on screen — padding only fills slots the
+        // visible cover doesn't need.
+        struct RankedTile {
+            bool dilationOnly;
+            double sqrDist;
+            OverscaledTileID id;
         };
-
-        std::stable_sort(ids.begin(), ids.end(), [&](const OverscaledTileID& a, const OverscaledTileID& b) {
-            const double aDist = distanceFromCenter(a);
-            const double bDist = distanceFromCenter(b);
-            if (aDist == bDist) {
-                return a < b;
+        std::vector<RankedTile> ranked;
+        ranked.reserve(ids.size());
+        for (const auto& id : ids) {
+            const double scaleToIdealZ = std::ldexp(1.0, static_cast<int>(z) - static_cast<int>(id.canonical.z));
+            const double tilesAtTileZ = std::ldexp(1.0, static_cast<int>(id.canonical.z));
+            const double dx = (static_cast<double>(id.wrap) * tilesAtTileZ + static_cast<double>(id.canonical.x) +
+                               0.5) * scaleToIdealZ -
+                              centerCoord[0];
+            const double dy = (static_cast<double>(id.canonical.y) + 0.5) * scaleToIdealZ - centerCoord[1];
+            const bool dilationOnly = dilated && frustumCover.find(id) == frustumCover.end();
+            ranked.push_back({dilationOnly, dx * dx + dy * dy, id});
+        }
+        std::sort(ranked.begin(), ranked.end(), [](const RankedTile& a, const RankedTile& b) {
+            if (a.dilationOnly != b.dilationOnly) {
+                return b.dilationOnly;
             }
-            return aDist < bDist;
+            if (a.sqrDist != b.sqrDist) {
+                return a.sqrDist < b.sqrDist;
+            }
+            return a.id < b.id;
         });
-        ids.erase(ids.begin() + static_cast<std::ptrdiff_t>(state.tileCoverMaxTiles), ids.end());
+        ids.clear();
+        ids.reserve(state.tileCoverMaxTiles);
+        for (std::size_t i = 0; i < state.tileCoverMaxTiles; ++i) {
+            ids.push_back(ranked[i].id);
+        }
     }
 
     return ids;
