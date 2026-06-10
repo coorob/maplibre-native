@@ -333,8 +333,12 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
     // The DEM source itself expands its pitched cover; drape targets can still
     // overscan further so satellite colour is ready before the mesh arrives.
     const std::unordered_set<OverscaledTileID>& terrainMeshIDs = currentIdealIDs;
+    // One parent fallback level is back on by default: with distance-ranked
+    // ring budgets bounding target sizes, the extra ~25% mostly-far targets
+    // are cheap, and the parent texture is what stops fresh tiles flashing
+    // in empty at the leading edge of a pan (validated on-sim 2026-06-10).
     static const uint32_t drapeFallbackLevels =
-        klattraEnvLevelCount("KLATTRA_DRAPE_FALLBACK_LEVELS", 0);
+        klattraEnvLevelCount("KLATTRA_DRAPE_FALLBACK_LEVELS", 1);
     if (drapeFallbackLevels > 0) {
         for (const auto& tileID : exactAndOverscanDrapeIDs) {
             for (uint32_t level = 1; level <= drapeFallbackLevels; ++level) {
