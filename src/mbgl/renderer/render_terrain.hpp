@@ -79,6 +79,18 @@ public:
                 UniqueChangeRequestVec& changes);
 
     /**
+     * @brief Release everything this terrain registered with the renderer.
+     *
+     * Must be called (and the change requests applied) before the
+     * orchestrator destroys or replaces this RenderTerrain. The destructor
+     * cannot do this — it has no UniqueChangeRequestVec — so a plain
+     * reset()/reassignment strands every drape render target (~MBs each,
+     * re-rendered as an offscreen pass every frame) and leaves the terrain
+     * layer group active in the renderer.
+     */
+    void teardown(UniqueChangeRequestVec& changes);
+
+    /**
      * @brief Get elevation at a specific tile coordinate
      * @param tileID The tile containing the coordinate
      * @param x X coordinate within the tile

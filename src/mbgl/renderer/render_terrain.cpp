@@ -204,13 +204,18 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
                            const std::shared_ptr<UpdateParameters>& /*updateParameters*/,
                            const RenderTree& renderTree,
                            UniqueChangeRequestVec& changes) {
-    // Find the DEM source if we haven't already
+    // Re-resolve the DEM source every update. The orchestrator owns the
+    // RenderSources and can destroy them behind us (source removal,
+    // RenderOrchestrator::clearData on style swap) while this RenderTerrain
+    // survives — Terrain::Impl compares equal across styles sharing
+    // sourceID + exaggeration — so a pointer cached across frames can
+    // dangle (same UAF class as the PMTilesFileSource teardown bug). One
+    // map lookup per frame is cheap; a vanished source then routes through
+    // the clearRenderState path below, which also releases GPU targets.
+    demSource = impl->sourceID.empty() ? nullptr : orchestrator.getRenderSource(impl->sourceID);
     if (!demSource && !impl->sourceID.empty()) {
-        demSource = orchestrator.getRenderSource(impl->sourceID);
-        if (!demSource) {
-            Log::Warning(Event::Render, "Terrain could not find DEM source: " + impl->sourceID);
-            klattraTrace("terrain no-dem-source source=" + impl->sourceID);
-        }
+        Log::Warning(Event::Render, "Terrain could not find DEM source: " + impl->sourceID);
+        klattraTrace("terrain no-dem-source source=" + impl->sourceID);
     }
 
     // Create layer group if we don't have one
@@ -1249,6 +1254,19 @@ void RenderTerrain::activateLayerGroup(bool activate, UniqueChangeRequestVec& ch
             changes.emplace_back(std::make_unique<RemoveLayerGroupRequest>(layerGroup));
         }
     }
+}
+
+void RenderTerrain::teardown(UniqueChangeRequestVec& changes) {
+    // Drop drawables + every drape render target (clearRenderState emits the
+    // RemoveRenderTargetRequests), then deregister the terrain layer group.
+    // retiredDrapeTargetsByTile needs no requests here: retired targets had
+    // their RemoveRenderTargetRequest emitted when they were retired; the
+    // map only keeps the texture alive for sampling and is cleared inside
+    // clearRenderState.
+    clearRenderState(changes);
+    activateLayerGroup(false, changes);
+    layerGroup.reset();
+    demSource = nullptr;
 }
 
 void RenderTerrain::clearRenderState(UniqueChangeRequestVec& changes) {

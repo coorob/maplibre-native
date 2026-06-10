@@ -216,13 +216,25 @@ std::unique_ptr<RenderTree> RenderOrchestrator::createRenderTree(
         renderLight.evaluate(evaluationParameters);
     }
 
-    // Update terrain.
+    // Update terrain. Tear the old RenderTerrain down through the change
+    // queue before destroying/replacing it — its destructor cannot emit
+    // change requests, so dropping it directly strands every drape render
+    // target (still re-rendered per frame) and leaves its layer group
+    // active in the renderer.
     if (updateParameters->terrain) {
         if (!renderTerrain || renderTerrain->getImpl() != *updateParameters->terrain) {
+            if (renderTerrain) {
+                UniqueChangeRequestVec terrainChanges;
+                renderTerrain->teardown(terrainChanges);
+                addChanges(terrainChanges);
+            }
             renderTerrain = std::make_unique<RenderTerrain>(*updateParameters->terrain);
         }
         renderTerrain->update(*updateParameters);
     } else if (renderTerrain) {
+        UniqueChangeRequestVec terrainChanges;
+        renderTerrain->teardown(terrainChanges);
+        addChanges(terrainChanges);
         renderTerrain.reset();
     }
 
