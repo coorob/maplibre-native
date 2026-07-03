@@ -177,6 +177,7 @@ gfx::AttributeBindingArray UploadPass::buildAttributeBindings(
                     /*.vertexStride = */ static_cast<uint32_t>(VertexAttribute::getStrideOf(defaultAttr.getDataType())),
                     /*.vertexBufferResource = */ nullptr,
                     /*.vertexOffset = */ 0,
+                    /*.bufferIndex = */ bufferIndex,
                 };
                 return;
             }
@@ -203,6 +204,7 @@ gfx::AttributeBindingArray UploadPass::buildAttributeBindings(
                 /*.vertexStride = */ static_cast<uint32_t>(VertexAttribute::getStrideOf(defaultAttr.getDataType())),
                 /*.vertexBufferResource = */ nullptr,
                 /*.vertexOffset = */ 0,
+                /*.bufferIndex = */ bufferIndex,
             };
             return;
         }
@@ -232,6 +234,7 @@ gfx::AttributeBindingArray UploadPass::buildAttributeBindings(
             /*.vertexStride = */ static_cast<uint32_t>(VertexAttribute::getStrideOf(defaultAttr.getDataType())),
             /*.vertexBufferResource = */ nullptr,
             /*.vertexOffset = */ 0,
+            /*.bufferIndex = */ bufferIndex,
         };
     };
     // This version is called when the attribute is available, but isn't being used by the shader

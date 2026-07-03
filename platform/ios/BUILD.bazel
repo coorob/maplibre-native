@@ -156,6 +156,17 @@ apple_xcframework(
         ],
         "device": ["arm64"],
     },
+    linkopts = [
+        # The iPhoneSimulator 26.5 SDK's Metal.tbd is missing these two
+        # constants even though the device tbd and the runtime export them;
+        # metal-cpp's private-implementation TU references them eagerly when
+        # built against an SDK that declares them. Resolve dynamically at
+        # load instead of failing the simulator-slice link.
+        "-U",
+        "_MTLTensorDomain",
+        "-U",
+        "_MTLIOErrorDomain",
+    ],
     minimum_os_versions = {"ios": "12.0"},
     public_hdrs = public_hdrs,
     version = ":maplibre_ios_version",
