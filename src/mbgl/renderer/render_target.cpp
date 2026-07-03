@@ -503,6 +503,10 @@ void RenderTarget::render(RenderOrchestrator& orchestrator, const RenderTree& re
                                                                   .clearStencil = {}});
     context.bindGlobalUniformBuffers(*parameters.renderPass);
 
+    const gfx::ScissorRect prevScissorRect = parameters.scissorRect;
+    const auto& size = getTexture()->getSize();
+    parameters.scissorRect = {.x = 0, .y = 0, .width = size.width, .height = size.height};
+
     // Run layer tweakers to update any dynamic elements
     parameters.currentLayer = 0;
     visitLayerGroups([&](LayerGroupBase& layerGroup) {
@@ -549,6 +553,8 @@ void RenderTarget::render(RenderOrchestrator& orchestrator, const RenderTree& re
                       " ptr=" + std::to_string(reinterpret_cast<uintptr_t>(this)) +
                       " completedAfter=" + std::to_string(completedRenderCount));
     }
+
+    parameters.scissorRect = prevScissorRect;
 }
 
 } // namespace mbgl

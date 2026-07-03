@@ -117,6 +117,13 @@ MTL::Winding mapWindingMode(const gfx::CullFaceWindingType mode) noexcept {
     }
 }
 
+MTL::ScissorRect getMetalScissorRect(gfx::ScissorRect rect) noexcept {
+    return {.x = static_cast<uint32_t>(rect.x),
+            .y = static_cast<uint32_t>(rect.y),
+            .width = rect.width,
+            .height = rect.height};
+}
+
 } // namespace
 
 void Drawable::setColorMode(const gfx::ColorMode& value) {
@@ -173,8 +180,10 @@ void Drawable::draw(PaintParameters& parameters) const {
     if (impl->renderPassDescriptor && descriptor != *impl->renderPassDescriptor) {
         impl->pipelineState.reset();
     }
-    impl->renderPassDescriptor.emplace(gfx::RenderPassDescriptor{
-        descriptor.renderable, descriptor.clearColor, descriptor.clearDepth, descriptor.clearStencil});
+    impl->renderPassDescriptor.emplace(gfx::RenderPassDescriptor{.renderable = descriptor.renderable,
+                                                                 .clearColor = descriptor.clearColor,
+                                                                 .clearDepth = descriptor.clearDepth,
+                                                                 .clearStencil = descriptor.clearStencil});
 
     const auto& shaderMTL = static_cast<const ShaderProgram&>(*shader);
 
@@ -210,6 +219,8 @@ void Drawable::draw(PaintParameters& parameters) const {
     const auto& cullMode = getCullFaceMode();
     renderPass.setCullMode(cullMode.enabled ? mapCullMode(cullMode.side) : MTL::CullModeNone);
     renderPass.setFrontFacingWinding(mapWindingMode(cullMode.winding));
+
+    renderPass.setScissorRect(getMetalScissorRect(parameters.scissorRect));
 
     if (!impl->pipelineState) {
         impl->pipelineState = shaderMTL.getRenderPipelineState(
@@ -264,7 +275,7 @@ void Drawable::draw(PaintParameters& parameters) const {
             const auto primitiveType = getPrimitiveType(mode.type);
             constexpr auto indexType = MTL::IndexType::IndexTypeUInt16;
             constexpr auto indexSize = sizeof(std::uint16_t);
-            const NS::UInteger instanceCount = instanceAttributes ? instanceAttributes->getMaxCount() : 1;
+            const NS::UInteger instanceCount = instanceAttributes ? instanceAttributes->getMinCount() : 1;
             constexpr NS::UInteger baseInstance = 0;
             const auto indexBufferLength = indexBuffer->length() / indexSize;
             if (mlSegment.indexOffset + mlSegment.indexLength > indexBufferLength) {
@@ -389,33 +400,29 @@ void Drawable::setVertexAttrId(const size_t id) {
     impl->vertexAttrId = id;
 }
 
-void Drawable::bindAttributes(RenderPass& renderPass) const noexcept {
-    NS::UInteger attributeIndex = 0;
+void Drawable::bindAttributes(RenderPass& renderPass) const {
     for (const auto& binding : impl->attributeBindings) {
         const auto* buffer = static_cast<const mtl::VertexBufferResource*>(binding ? binding->vertexBufferResource
                                                                                    : nullptr);
         if (buffer && buffer->get()) {
             assert(binding->vertexStride * impl->vertexCount <= getBufferSize(binding->vertexBufferResource));
-            renderPass.bindVertex(buffer->get(), /*offset=*/0, attributeIndex);
+            renderPass.bindVertex(buffer->get(), /*offset=*/0, binding->bufferIndex);
         }
-        attributeIndex += 1;
     }
 }
 
-void Drawable::bindInstanceAttributes(RenderPass& renderPass) const noexcept {
-    NS::UInteger attributeIndex = 0;
+void Drawable::bindInstanceAttributes(RenderPass& renderPass) const {
     for (const auto& binding : impl->instanceBindings) {
         if (binding.has_value()) {
             const auto* buffer = static_cast<const mtl::VertexBufferResource*>(binding->vertexBufferResource);
             if (buffer && buffer->get()) {
-                renderPass.bindVertex(buffer->get(), /*offset=*/0, attributeIndex);
+                renderPass.bindVertex(buffer->get(), /*offset=*/0, binding->bufferIndex);
             }
         }
-        attributeIndex += 1;
     }
 }
 
-void Drawable::bindTextures(RenderPass& renderPass) const noexcept {
+void Drawable::bindTextures(RenderPass& renderPass) const {
     for (size_t id = 0; id < textures.size(); id++) {
         if (const auto& texture = textures[id]) {
             if (const auto& location = shader->getSamplerLocation(id)) {
@@ -435,7 +442,7 @@ void Drawable::unbindTextures(RenderPass& renderPass) const noexcept {
     }
 }
 
-void Drawable::uploadTextures(UploadPass&) const noexcept {
+void Drawable::uploadTextures(UploadPass&) const {
     for (const auto& texture : textures) {
         if (texture) {
             texture->upload();
@@ -545,10 +552,12 @@ void Drawable::upload(gfx::UploadPass& uploadPass_) {
         impl->indexes->setDirty(false);
     }
 
-    const bool buildAttribs = !impl->vertexDesc || !vertexAttributes || !attributeUpdateTime ||
-                              vertexAttributes->isModifiedAfter(*attributeUpdateTime);
+    const bool buildVertexAttribs = !impl->vertexDesc || !vertexAttributes || !attributeUpdateTime ||
+                                    vertexAttributes->isModifiedAfter(*attributeUpdateTime);
+    const bool buildInstanceAttribs = instanceAttributes && (!attributeUpdateTime ||
+                                                             instanceAttributes->isModifiedAfter(*attributeUpdateTime));
 
-    if (buildAttribs) {
+    if (buildVertexAttribs || buildInstanceAttribs) {
 #if !defined(NDEBUG)
         const auto debugGroup = uploadPass.createDebugGroup(debugLabel(*this));
 #endif
@@ -571,8 +580,27 @@ void Drawable::upload(gfx::UploadPass& uploadPass_) {
 
         vertexAttributes->visitAttributes([](gfx::VertexAttribute& attrib) { attrib.setDirty(false); });
 
-        if (impl->attributeBindings != attributeBindings_) {
+        // Build instance attribute buffers
+        gfx::AttributeBindingArray instanceBindings_;
+        if (instanceAttributes) {
+            std::vector<std::unique_ptr<gfx::VertexBufferResource>> instanceBuffers;
+            instanceBindings_ = uploadPass.buildAttributeBindings(instanceAttributes->getMinCount(),
+                                                                  /*vertexType*/ gfx::AttributeDataType::Byte,
+                                                                  /*vertexAttributeIndex=*/-1,
+                                                                  /*vertexData=*/{},
+                                                                  shader->getInstanceAttributes(),
+                                                                  *instanceAttributes,
+                                                                  usage,
+                                                                  attributeUpdateTime,
+                                                                  instanceBuffers);
+
+            // clear dirty flag
+            instanceAttributes->visitAttributes([](gfx::VertexAttribute& attrib) { attrib.setDirty(false); });
+        }
+
+        if (impl->attributeBindings != attributeBindings_ || impl->instanceBindings != instanceBindings_) {
             impl->attributeBindings = std::move(attributeBindings_);
+            impl->instanceBindings = std::move(instanceBindings_);
 
             // hash
             std::size_t hash{0};
@@ -580,73 +608,56 @@ void Drawable::upload(gfx::UploadPass& uploadPass_) {
             // Create a layout descriptor for each attribute
             auto vertDesc = NS::RetainPtr(MTL::VertexDescriptor::vertexDescriptor());
 
-            NS::UInteger index = 0;
-            for (auto& binding : impl->attributeBindings) {
-                if (!binding) {
-                    assert("Missing attribute binding");
-                    index += 1;
-                    continue;
-                }
-
-                if (!binding->vertexBufferResource && !impl->noBindingBuffer) {
-                    if (const auto& buf = context.getEmptyVertexBuffer()) {
-                        impl->noBindingBuffer = buf.get();
+            const auto applyBindings = [&](const gfx::AttributeBindingArray& attributeBindings,
+                                           MTL::VertexStepFunction stepFunction) {
+                NS::UInteger index = 0;
+                for (auto& binding : attributeBindings) {
+                    if (!binding) {
+                        assert("Missing attribute binding");
+                        index += 1;
+                        continue;
                     }
+
+                    if (!binding->vertexBufferResource && !impl->noBindingBuffer) {
+                        if (const auto& buf = context.getEmptyVertexBuffer()) {
+                            impl->noBindingBuffer = buf.get();
+                        }
+                    }
+
+                    const auto& attribDesc = vertDesc->attributes()->object(index);
+                    attribDesc->setBufferIndex(binding->bufferIndex);
+                    attribDesc->setOffset(static_cast<NS::UInteger>(binding->attribute.offset));
+                    attribDesc->setFormat(mtlVertexTypeOf(binding->attribute.dataType));
+
+                    const auto& layoutDesc = vertDesc->layouts()->object(binding->bufferIndex);
+                    if (!layoutDesc->stride()) {
+                        assert(binding->vertexStride > 0);
+                        layoutDesc->setStride(static_cast<NS::UInteger>(binding->vertexStride));
+                        layoutDesc->setStepFunction(binding->vertexBufferResource ? stepFunction
+                                                                                  : MTL::VertexStepFunctionConstant);
+                        layoutDesc->setStepRate(binding->vertexBufferResource ? 1 : 0);
+                    } else {
+                        assert(layoutDesc->stride() == static_cast<NS::UInteger>(binding->vertexStride));
+                        assert(layoutDesc->stepRate() == (binding->vertexBufferResource ? 1 : 0));
+                    }
+
+                    mbgl::util::hash_combine(hash,
+                                             mbgl::util::hash(index,
+                                                              binding->attribute.offset,
+                                                              binding->attribute.dataType,
+                                                              binding->vertexStride,
+                                                              static_cast<bool>(binding->vertexBufferResource)));
+
+                    index += 1;
                 }
+            };
 
-                auto attribDesc = NS::TransferPtr(MTL::VertexAttributeDescriptor::alloc()->init());
-                attribDesc->setBufferIndex(index);
-                attribDesc->setOffset(static_cast<NS::UInteger>(binding->attribute.offset));
-                attribDesc->setFormat(mtlVertexTypeOf(binding->attribute.dataType));
-                assert(binding->vertexStride > 0);
-
-                auto layoutDesc = NS::TransferPtr(MTL::VertexBufferLayoutDescriptor::alloc()->init());
-                layoutDesc->setStride(static_cast<NS::UInteger>(binding->vertexStride));
-                layoutDesc->setStepFunction(binding->vertexBufferResource ? MTL::VertexStepFunctionPerVertex
-                                                                          : MTL::VertexStepFunctionConstant);
-                layoutDesc->setStepRate(binding->vertexBufferResource ? 1 : 0);
-
-                vertDesc->attributes()->setObject(attribDesc.get(), index);
-                vertDesc->layouts()->setObject(layoutDesc.get(), index);
-
-                mbgl::util::hash_combine(hash,
-                                         mbgl::util::hash(index,
-                                                          binding->attribute.offset,
-                                                          binding->attribute.dataType,
-                                                          binding->vertexStride,
-                                                          static_cast<bool>(binding->vertexBufferResource)));
-
-                index += 1;
-            }
+            applyBindings(impl->attributeBindings, MTL::VertexStepFunctionPerVertex);
+            applyBindings(impl->instanceBindings, MTL::VertexStepFunctionPerInstance);
 
             impl->vertexDesc = std::move(vertDesc);
             impl->vertexDescHash = hash;
             impl->pipelineState.reset();
-        }
-    }
-
-    // build instance buffer
-    const bool buildInstanceBuffer =
-        (instanceAttributes && (!attributeUpdateTime || instanceAttributes->isModifiedAfter(*attributeUpdateTime)));
-
-    if (buildInstanceBuffer) {
-        // Build instance attribute buffers
-        std::vector<std::unique_ptr<gfx::VertexBufferResource>> instanceBuffers;
-        auto instanceBindings_ = uploadPass.buildAttributeBindings(instanceAttributes->getMaxCount(),
-                                                                   /*vertexType*/ gfx::AttributeDataType::Byte,
-                                                                   /*vertexAttributeIndex=*/-1,
-                                                                   /*vertexData=*/{},
-                                                                   shader->getInstanceAttributes(),
-                                                                   *instanceAttributes,
-                                                                   usage,
-                                                                   attributeUpdateTime,
-                                                                   instanceBuffers);
-
-        // clear dirty flag
-        instanceAttributes->visitAttributes([](gfx::VertexAttribute& attrib) { attrib.setDirty(false); });
-
-        if (impl->instanceBindings != instanceBindings_) {
-            impl->instanceBindings = std::move(instanceBindings_);
         }
     }
 

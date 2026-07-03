@@ -68,7 +68,8 @@ private:
 
     using RasterSegmentVector = SegmentVector;
     using RasterSegmentVectorPtr = std::shared_ptr<RasterSegmentVector>;
-    std::shared_ptr<RasterSegmentVector> staticDataSegments;
+    using SegmentVectorPtr = std::shared_ptr<SegmentVector>;
+    SegmentVectorPtr staticDataSegments;
 
     // Phase 2 drape routing: per-drape-target RasterLayerTweakers.
     std::unordered_map<OverscaledTileID, RasterLayerTweakerPtr> drapeLayerTweakers;

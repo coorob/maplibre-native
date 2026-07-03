@@ -30,6 +30,8 @@
 #include <mbgl/util/string.hpp>
 #include <mbgl/util/logging.hpp>
 
+#include <algorithm>
+
 namespace mbgl {
 
 using namespace style;
@@ -116,7 +118,7 @@ RenderOrchestrator::RenderOrchestrator(bool backgroundLayerAsColor_,
                                        const std::optional<std::string>& localFontFamily_)
     : observer(&nullObserver()),
       glyphManager(std::make_unique<GlyphManager>(std::make_unique<LocalGlyphRasterizer>(localFontFamily_))),
-      imageManager(std::make_unique<ImageManager>()),
+      imageManager(ImageManager::create()),
       lineAtlas(std::make_unique<LineAtlas>()),
       patternAtlas(std::make_unique<PatternAtlas>()),
       imageImpls(makeMutable<std::vector<Immutable<style::Image::Impl>>>()),
@@ -185,21 +187,22 @@ std::unique_ptr<RenderTree> RenderOrchestrator::createRenderTree(
     PropertyEvaluationParameters evaluationParameters{zoomHistory, updateParameters->timePoint, transitionDuration};
     evaluationParameters.zoomChanged = zoomChanged;
 
-    const TileParameters tileParameters{.pixelRatio = updateParameters->pixelRatio,
-                                        .debugOptions = updateParameters->debugOptions,
-                                        .transformState = updateParameters->transformState,
-                                        .fileSource = updateParameters->fileSource,
-                                        .mode = updateParameters->mode,
-                                        .annotationManager = updateParameters->annotationManager,
-                                        .imageManager = imageManager,
-                                        .glyphManager = glyphManager,
-                                        .prefetchZoomDelta = updateParameters->prefetchZoomDelta,
-                                        .threadPool = threadPool,
-                                        .tileLodMinRadius = updateParameters->tileLodMinRadius,
-                                        .tileLodScale = updateParameters->tileLodScale,
-                                        .tileLodPitchThreshold = updateParameters->tileLodPitchThreshold,
-                                        .tileLodZoomShift = updateParameters->tileLodZoomShift,
-                                        .dynamicTextureAtlas = dynamicTextureAtlas};
+    TileParameters tileParameters{.pixelRatio = updateParameters->pixelRatio,
+                                  .debugOptions = updateParameters->debugOptions,
+                                  .transformState = updateParameters->transformState,
+                                  .fileSource = updateParameters->fileSource,
+                                  .mode = updateParameters->mode,
+                                  .annotationManager = updateParameters->annotationManager,
+                                  .imageManager = imageManager,
+                                  .glyphManager = glyphManager,
+                                  .prefetchZoomDelta = updateParameters->prefetchZoomDelta,
+                                  .threadPool = threadPool,
+                                  .tileLodMinRadius = updateParameters->tileLodMinRadius,
+                                  .tileLodScale = updateParameters->tileLodScale,
+                                  .tileLodPitchThreshold = updateParameters->tileLodPitchThreshold,
+                                  .tileLodZoomShift = updateParameters->tileLodZoomShift,
+                                  .tileLodMode = updateParameters->tileLodMode,
+                                  .dynamicTextureAtlas = dynamicTextureAtlas};
 
     glyphManager->setURL(updateParameters->glyphURL);
     glyphManager->setFontFaces(updateParameters->fontFaces);
@@ -447,6 +450,7 @@ std::unique_ptr<RenderTree> RenderOrchestrator::createRenderTree(
             Log::Info(Event::Render, "Marking DEM source '" + sourceImpl->id + "' for terrain rendering");
         }
 
+        tileParameters.isUpdateSynchronous = sourceImpl->isUpdateSynchronous();
         source->update(sourceImpl, filteredLayersForSource, sourceNeedsRendering, sourceNeedsRelayout, tileParameters);
         filteredLayersForSource.clear();
 
@@ -626,10 +630,8 @@ void RenderOrchestrator::queryRenderedSymbols(std::unordered_map<std::string, st
     };
 
     std::unordered_map<std::string, const RenderLayer*> crossTileSymbolIndexLayers;
-    std::copy_if(layers.begin(),
-                 layers.end(),
-                 std::inserter(crossTileSymbolIndexLayers, crossTileSymbolIndexLayers.begin()),
-                 hasCrossTileIndex);
+    std::ranges::copy_if(
+        layers, std::inserter(crossTileSymbolIndexLayers, crossTileSymbolIndexLayers.begin()), hasCrossTileIndex);
 
     if (crossTileSymbolIndexLayers.empty()) {
         return;
@@ -644,11 +646,10 @@ void RenderOrchestrator::queryRenderedSymbols(std::unordered_map<std::string, st
     // Although symbol query is global, symbol results are only sortable within
     // a bucket For a predictable global sort renderItems, we sort the buckets
     // based on their corresponding tile position
-    std::sort(
-        bucketQueryData.begin(), bucketQueryData.end(), [](const RetainedQueryData& a, const RetainedQueryData& b) {
-            return std::tie(a.tileID.canonical.z, a.tileID.canonical.y, a.tileID.wrap, a.tileID.canonical.x) <
-                   std::tie(b.tileID.canonical.z, b.tileID.canonical.y, b.tileID.wrap, b.tileID.canonical.x);
-        });
+    std::ranges::sort(bucketQueryData, [](const RetainedQueryData& a, const RetainedQueryData& b) {
+        return std::tie(a.tileID.canonical.z, a.tileID.canonical.y, a.tileID.wrap, a.tileID.canonical.x) <
+               std::tie(b.tileID.canonical.z, b.tileID.canonical.y, b.tileID.wrap, b.tileID.canonical.x);
+    });
 
     for (auto wrappedQueryData : bucketQueryData) {
         auto& queryData = wrappedQueryData.get();
@@ -660,7 +661,7 @@ void RenderOrchestrator::queryRenderedSymbols(std::unordered_map<std::string, st
 
         for (auto layer : bucketSymbols) {
             auto& resultFeatures = resultsByLayer[layer.first];
-            std::move(layer.second.begin(), layer.second.end(), std::inserter(resultFeatures, resultFeatures.end()));
+            std::ranges::move(layer.second, std::inserter(resultFeatures, resultFeatures.end()));
         }
     }
 }
@@ -689,8 +690,7 @@ std::vector<Feature> RenderOrchestrator::queryRenderedFeatures(
         if (RenderSource* renderSource = getRenderSource(sourceID)) {
             auto sourceResults = renderSource->queryRenderedFeatures(
                 geometry, transformState, filteredLayers, options, projMatrix);
-            std::move(
-                sourceResults.begin(), sourceResults.end(), std::inserter(resultsByLayer, resultsByLayer.begin()));
+            std::ranges::move(sourceResults, std::inserter(resultsByLayer, resultsByLayer.begin()));
         }
     }
 
@@ -1039,7 +1039,11 @@ void RenderOrchestrator::updateLayers(gfx::ShaderRegistry& shaders,
         // its update() call. Cleared afterward so any out-of-band caller
         // can't accidentally use a stale pointer.
         renderLayer.activeTerrain = activeTerrain;
-        renderLayer.update(shaders, context, state, updateParameters, renderTree, changes);
+        try {
+            renderLayer.update(shaders, context, state, updateParameters, renderTree, changes);
+        } catch (...) {
+            observer->onRenderError(std::current_exception());
+        }
         renderLayer.activeTerrain = nullptr;
     }
 
@@ -1054,7 +1058,7 @@ void RenderOrchestrator::processChanges() {
 }
 
 bool RenderOrchestrator::addRenderTarget(RenderTargetPtr renderTarget, bool atFront) {
-    auto it = std::find(renderTargets.begin(), renderTargets.end(), renderTarget);
+    auto it = std::ranges::find(renderTargets, renderTarget);
     if (it == renderTargets.end()) {
         // atFront ensures hillshade-prepare RenderTargets render before
         // terrain drape RenderTargets that sample from them. Without this,
@@ -1074,7 +1078,7 @@ bool RenderOrchestrator::addRenderTarget(RenderTargetPtr renderTarget, bool atFr
 }
 
 bool RenderOrchestrator::removeRenderTarget(const RenderTargetPtr& renderTarget) {
-    auto it = std::find(renderTargets.begin(), renderTargets.end(), renderTarget);
+    auto it = std::ranges::find(renderTargets, renderTarget);
     if (it != renderTargets.end()) {
         renderTargets.erase(it);
         return true;

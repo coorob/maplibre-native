@@ -47,10 +47,18 @@ std::string extract_url(const std::string& url) {
 }
 } // namespace
 
+// temporary, remove this when it's available in `pmtiles.hpp`
+namespace pmtiles {
+const uint8_t TILETYPE_MLT = 0x6;
+} // namespace pmtiles
+
 namespace mbgl {
 using namespace rapidjson;
 
 using AsyncCallback = std::function<void(std::unique_ptr<Response::Error>)>;
+// Passes the parsed directory through to the continuation instead of letting
+// it re-read `directory_cache` — the cache is LRU-bounded, so an in-flight
+// chain's entry can be evicted between store and read (std::out_of_range).
 using AsyncDirectoryCallback =
     std::function<void(std::vector<pmtiles::entryv3>, std::unique_ptr<Response::Error>)>;
 using AsyncTileCallback = std::function<void(std::pair<uint64_t, uint32_t>, std::unique_ptr<Response::Error>)>;
@@ -74,16 +82,7 @@ public:
                 return;
             }
 
-            auto metadata = metadata_cache.find(url);
-            if (metadata == metadata_cache.end()) {
-                response.error = std::make_unique<Response::Error>(
-                    Response::Error::Reason::Other,
-                    std::string("Error fetching PMTiles metadata: metadata cache was not populated"));
-                ref.invoke(&FileSourceRequest::setResponse, response);
-                return;
-            }
-
-            response.data = std::make_shared<std::string>(metadata->second);
+            response.data = std::make_shared<std::string>(metadata_cache.at(url));
             ref.invoke(&FileSourceRequest::setResponse, response);
         });
     }
@@ -149,7 +148,7 @@ public:
                     }
 
                     Resource tileResource(Resource::Kind::Source, url);
-                    tileResource.loadingMethod = Resource::LoadingMethod::Network;
+                    tileResource.loadingMethod = Resource::LoadingMethod::All;
                     tileResource.dataRange = std::make_pair(tileAddress.first,
                                                             tileAddress.first + tileAddress.second - 1);
 
@@ -165,10 +164,13 @@ public:
                             return;
                         }
 
+                        if (tileResponse.notModified) {
+                            return;
+                        }
+
                         if (!tileResponse.data) {
                             response.error = std::make_unique<Response::Error>(
-                                Response::Error::Reason::Other,
-                                std::string("Error fetching PMTiles tile: empty response data"));
+                                Response::Error::Reason::Other, "Error fetching PMTiles tile: response has no data");
                             ref.invoke(&FileSourceRequest::setResponse, response);
                             return;
                         }
@@ -180,7 +182,18 @@ public:
                         response.etag = tileResponse.etag;
 
                         if (header.tile_compression == pmtiles::COMPRESSION_GZIP) {
-                            response.data = std::make_shared<std::string>(util::decompress(*tileResponse.data));
+                            // Support uncompressed tiles
+                            if (util::is_compressed(*tileResponse.data)) {
+                                try {
+                                    response.data = std::make_shared<std::string>(util::decompress(*tileResponse.data));
+                                } catch (const std::exception& e) {
+                                    response.error = std::make_unique<Response::Error>(
+                                        Response::Error::Reason::Other,
+                                        std::string("Error decompressing PMTiles tile: ") + e.what());
+                                }
+                            } else {
+                                response.data = tileResponse.data;
+                            }
                         }
 
                         ref.invoke(&FileSourceRequest::setResponse, response);
@@ -190,28 +203,29 @@ public:
         });
     }
 
+    // Drop every sub-request belonging to an outer request. Called when the
+    // outer FileSourceRequest is cancelled/destroyed; also the only place the
+    // per-request chain is released, so completed chains don't accumulate.
+    void cancel(AsyncRequest* req) { tasks.erase(req); }
+
     void setResourceOptions(ResourceOptions options) {
-        std::lock_guard<std::mutex> lock(resourceOptionsMutex);
+        std::scoped_lock lock(resourceOptionsMutex);
         resourceOptions = options;
     }
 
     ResourceOptions getResourceOptions() {
-        std::lock_guard<std::mutex> lock(resourceOptionsMutex);
+        std::scoped_lock lock(resourceOptionsMutex);
         return resourceOptions.clone();
     }
 
     void setClientOptions(ClientOptions options) {
-        std::lock_guard<std::mutex> lock(clientOptionsMutex);
+        std::scoped_lock lock(clientOptionsMutex);
         clientOptions = options;
     }
 
     ClientOptions getClientOptions() {
-        std::lock_guard<std::mutex> lock(clientOptionsMutex);
+        std::scoped_lock lock(clientOptionsMutex);
         return clientOptions.clone();
-    }
-
-    void cancel(AsyncRequest* req) {
-        tasks.erase(req);
     }
 
 private:
@@ -225,13 +239,10 @@ private:
     std::map<std::string, std::string> metadata_cache;
     std::map<std::string, std::map<std::string, std::vector<pmtiles::entryv3>>> directory_cache;
     std::map<std::string, std::vector<std::string>> directory_cache_control;
-    // One logical request chains several sub-requests (header -> directory ->
-    // tile). They must all stay alive for the lifetime of the logical request.
-    // Previously this was a single slot per `req` that each hop OVERWROTE, which
-    // destroyed the still-executing sub-request from inside its own completion
-    // callback — a use-after-free that crashed on the PMTilesFileSource worker
-    // thread during map teardown/transitions. Hold the chain in a vector and
-    // only clear it in cancel()/destruction so nothing is freed mid-callback.
+    // One outer request fans out into a header→directory→tile chain of
+    // sub-requests. Hold the WHOLE chain: overwriting a single slot destroys
+    // a sub-request from inside its own callback (use-after-free on the
+    // PMTilesFileSource thread during map teardown/transitions).
     std::map<AsyncRequest*, std::vector<std::unique_ptr<AsyncRequest>>> tasks;
 
     std::shared_ptr<FileSource> getFileSource() {
@@ -243,215 +254,240 @@ private:
         return fileSource;
     }
 
-    void getHeader(std::string url, AsyncRequest* req, AsyncCallback callback) {
-        if (header_cache.find(url) != header_cache.end()) {
+    void getHeader(const std::string& url, AsyncRequest* req, AsyncCallback callback) {
+        if (header_cache.contains(url)) {
             callback(std::unique_ptr<Response::Error>());
             return;
         }
 
         Resource resource(Resource::Kind::Source, url);
-        resource.loadingMethod = Resource::LoadingMethod::Network;
+        resource.loadingMethod = Resource::LoadingMethod::All;
 
         resource.dataRange = std::make_pair<uint64_t, uint64_t>(pmtilesHeaderOffset,
                                                                 pmtilesHeaderOffset + pmtilesHeaderLength - 1);
 
-        tasks[req].push_back(getFileSource()->request(resource, [=, this](const Response& response) {
-            if (response.error) {
-                std::string message = std::string("Error fetching PMTiles header: ") + response.error->message;
+        tasks[req].push_back(getFileSource()->request(
+            resource, [=, this](const Response& response) { // NOLINT(clang-analyzer-cplusplus.NewDeleteLeaks)
+                if (response.error) {
+                    std::string message = std::string("Error fetching PMTiles header: ") + response.error->message;
 
-                if (response.error->message.empty() && response.error->reason == Response::Error::Reason::NotFound) {
-                    if (url.starts_with(mbgl::util::FILE_PROTOCOL)) {
-                        message += "path not found: " +
-                                   url.substr(std::char_traits<char>::length(mbgl::util::FILE_PROTOCOL));
-                    } else {
-                        message += "url not found: " + url;
+                    if (response.error->message.empty() &&
+                        response.error->reason == Response::Error::Reason::NotFound) {
+                        if (url.starts_with(mbgl::util::FILE_PROTOCOL)) {
+                            message += "path not found: " +
+                                       url.substr(std::char_traits<char>::length(mbgl::util::FILE_PROTOCOL));
+                        } else {
+                            message += "url not found: " + url;
+                        }
                     }
+
+                    callback(std::make_unique<Response::Error>(response.error->reason, message));
+
+                    return;
                 }
 
-                callback(std::make_unique<Response::Error>(response.error->reason, message));
-
-                return;
-            }
-
-            if (!response.data || response.data->size() < pmtilesHeaderLength) {
-                callback(std::make_unique<Response::Error>(
-                    Response::Error::Reason::Other,
-                    std::string("Error fetching PMTiles header: empty or incomplete response data")));
-                return;
-            }
-
-            try {
-                pmtiles::headerv3 header = pmtiles::deserialize_header(response.data->substr(0, 127));
-
-                if ((header.internal_compression != pmtiles::COMPRESSION_NONE &&
-                     header.internal_compression != pmtiles::COMPRESSION_GZIP) ||
-                    (header.tile_compression != pmtiles::COMPRESSION_NONE &&
-                     header.tile_compression != pmtiles::COMPRESSION_GZIP)) {
-                    throw std::runtime_error("Compression method not supported");
+                if (response.notModified) {
+                    return;
                 }
 
-                header_cache.emplace(url, header);
+                if (!response.data) {
+                    callback(std::make_unique<Response::Error>(Response::Error::Reason::Other,
+                                                               "PMTiles header response has no data"));
+                    return;
+                }
 
-                callback(std::unique_ptr<Response::Error>());
-            } catch (const std::exception& e) {
-                callback(std::make_unique<Response::Error>(Response::Error::Reason::Other,
-                                                           std::string("Error parsing PMTiles header: ") + e.what()));
-            }
-        }));
+                try {
+                    pmtiles::headerv3 header = pmtiles::deserialize_header(response.data->substr(0, 127));
+
+                    if ((header.internal_compression != pmtiles::COMPRESSION_NONE &&
+                         header.internal_compression != pmtiles::COMPRESSION_GZIP) ||
+                        (header.tile_compression != pmtiles::COMPRESSION_NONE &&
+                         header.tile_compression != pmtiles::COMPRESSION_GZIP)) {
+                        throw std::runtime_error("Compression method not supported");
+                    }
+
+                    header_cache.emplace(url, header);
+
+                    callback(std::unique_ptr<Response::Error>());
+                } catch (const std::exception& e) {
+                    callback(std::make_unique<Response::Error>(
+                        Response::Error::Reason::Other, std::string("Error parsing PMTiles header: ") + e.what()));
+                }
+            }));
     }
 
-    void getMetadata(std::string url, AsyncRequest* req, AsyncCallback callback) {
-        if (metadata_cache.find(url) != metadata_cache.end()) {
+    void getMetadata(std::string& url, AsyncRequest* req, AsyncCallback callback) {
+        if (metadata_cache.contains(url)) {
             callback(std::unique_ptr<Response::Error>());
             return;
         }
 
-        getHeader(url, req, [=, this](std::unique_ptr<Response::Error> error) {
-            if (error) {
-                callback(std::move(error));
-                return;
-            }
-
-            pmtiles::headerv3 header = header_cache.at(url);
-
-            auto parse_callback = [=, this](const std::string& data) {
-                Document doc;
-
-                auto& allocator = doc.GetAllocator();
-
-                if (!data.empty()) {
-                    doc.Parse(data);
+        getHeader(
+            url,
+            req,
+            [=, this](std::unique_ptr<Response::Error> error) { // NOLINT(clang-analyzer-cplusplus.NewDeleteLeaks)
+                if (error) {
+                    callback(std::move(error));
+                    return;
                 }
 
-                if (!doc.IsObject()) {
-                    doc.SetObject();
-                }
+                pmtiles::headerv3 header = header_cache.at(url);
 
-                doc.AddMember("tilejson", "3.0.0", allocator);
+                auto parse_callback = [=, this](const std::string& data) {
+                    Document doc;
 
-                if (!doc.HasMember("scheme")) {
-                    doc.AddMember("scheme", rapidjson::Value(), allocator);
-                }
+                    auto& allocator = doc.GetAllocator();
 
-                doc["scheme"] = rapidjson::Value().SetString("xyz");
-
-                if (!doc.HasMember("tiles")) {
-                    doc.AddMember("tiles", rapidjson::Value(), allocator);
-                }
-
-                if (!doc["tiles"].IsArray()) {
-                    doc["tiles"] = rapidjson::Value().SetArray().PushBack(
-                        rapidjson::Value().SetString(std::string(util::PMTILES_PROTOCOL + url), allocator), allocator);
-                }
-
-                if (!doc.HasMember("bounds")) {
-                    doc.AddMember("bounds", rapidjson::Value(), allocator);
-                }
-
-                if (!doc["bounds"].IsArray()) {
-                    doc["bounds"] = rapidjson::Value()
-                                        .SetArray()
-                                        .PushBack(static_cast<double>(header.min_lon_e7) / 1e7, allocator)
-                                        .PushBack(static_cast<double>(header.min_lat_e7) / 1e7, allocator)
-                                        .PushBack(static_cast<double>(header.max_lon_e7) / 1e7, allocator)
-                                        .PushBack(static_cast<double>(header.max_lat_e7) / 1e7, allocator);
-                }
-
-                if (!doc.HasMember("center")) {
-                    doc.AddMember("center", rapidjson::Value(), allocator);
-                }
-
-                if (!doc["center"].IsArray()) {
-                    doc["center"] = rapidjson::Value()
-                                        .SetArray()
-                                        .PushBack(static_cast<double>(header.center_lon_e7) / 1e7, allocator)
-                                        .PushBack(static_cast<double>(header.center_lat_e7) / 1e7, allocator)
-                                        .PushBack(header.center_zoom, allocator);
-                }
-
-                if (!doc.HasMember("minzoom")) {
-                    doc.AddMember("minzoom", rapidjson::Value(), allocator);
-                }
-
-                auto& minzoom = doc["minzoom"];
-
-                if (minzoom.IsString()) {
-                    minzoom.SetInt(std::atoi(minzoom.GetString()));
-                }
-
-                if (!minzoom.IsNumber()) {
-                    minzoom = rapidjson::Value().SetUint(header.min_zoom);
-                }
-
-                doc["minzoom"] = minzoom;
-
-                if (!doc.HasMember("maxzoom")) {
-                    doc.AddMember("maxzoom", rapidjson::Value(), allocator);
-                }
-
-                auto& maxzoom = doc["maxzoom"];
-
-                if (maxzoom.IsString()) {
-                    maxzoom.SetInt(std::atoi(maxzoom.GetString()));
-                }
-
-                if (!maxzoom.IsNumber()) {
-                    maxzoom = rapidjson::Value().SetUint(header.max_zoom);
-                }
-
-                doc["maxzoom"] = maxzoom;
-
-                std::string metadata = serialize(doc);
-                metadata_cache.emplace(url, metadata);
-
-                callback(std::unique_ptr<Response::Error>());
-            };
-
-            if (header.json_metadata_bytes > 0) {
-                Resource resource(Resource::Kind::Source, url);
-                resource.loadingMethod = Resource::LoadingMethod::Network;
-                resource.dataRange = std::make_pair(header.json_metadata_offset,
-                                                    header.json_metadata_offset + header.json_metadata_bytes - 1);
-
-                tasks[req].push_back(getFileSource()->request(resource, [=](const Response& responseMetadata) {
-                    if (responseMetadata.error) {
-                        callback(std::make_unique<Response::Error>(
-                            responseMetadata.error->reason,
-                            std::string("Error fetching PMTiles metadata: ") + responseMetadata.error->message));
-
-                        return;
+                    if (!data.empty()) {
+                        doc.Parse(data);
                     }
 
-                    if (!responseMetadata.data || responseMetadata.data->empty()) {
-                        // Metadata is optional for building TileJSON. Some hosts/CDN
-                        // paths occasionally return an empty metadata range even
-                        // after a valid header; keep the source alive using the
-                        // header-derived fallback below.
-                        parse_callback(std::string());
-                        return;
+                    if (!doc.IsObject()) {
+                        doc.SetObject();
                     }
 
-                    std::string data = *responseMetadata.data;
+                    doc.AddMember("tilejson", "3.0.0", allocator);
 
-                    if (header.internal_compression == pmtiles::COMPRESSION_GZIP) {
-                        data = util::decompress(data);
+                    if (!doc.HasMember("scheme")) {
+                        doc.AddMember("scheme", rapidjson::Value(), allocator);
                     }
 
-                    parse_callback(data);
-                }));
+                    doc["scheme"] = rapidjson::Value().SetString("xyz");
 
-                return;
-            }
+                    if (!doc.HasMember("tiles")) {
+                        doc.AddMember("tiles", rapidjson::Value(), allocator);
+                    }
 
-            parse_callback(std::string());
-        });
+                    if (!doc["tiles"].IsArray()) {
+                        doc["tiles"] = rapidjson::Value().SetArray().PushBack(
+                            rapidjson::Value().SetString(std::string(util::PMTILES_PROTOCOL + url), allocator),
+                            allocator);
+                    }
+
+                    // Translate tile type field to source encoding.
+                    if (header.tile_type == pmtiles::TILETYPE_MLT) {
+                        doc.AddMember("encoding", "mlt", allocator);
+                    }
+
+                    if (!doc.HasMember("bounds")) {
+                        doc.AddMember("bounds", rapidjson::Value(), allocator);
+                    }
+
+                    if (!doc["bounds"].IsArray()) {
+                        doc["bounds"] = rapidjson::Value()
+                                            .SetArray()
+                                            .PushBack(static_cast<double>(header.min_lon_e7) / 1e7, allocator)
+                                            .PushBack(static_cast<double>(header.min_lat_e7) / 1e7, allocator)
+                                            .PushBack(static_cast<double>(header.max_lon_e7) / 1e7, allocator)
+                                            .PushBack(static_cast<double>(header.max_lat_e7) / 1e7, allocator);
+                    }
+
+                    if (!doc.HasMember("center")) {
+                        doc.AddMember("center", rapidjson::Value(), allocator);
+                    }
+
+                    if (!doc["center"].IsArray()) {
+                        doc["center"] = rapidjson::Value()
+                                            .SetArray()
+                                            .PushBack(static_cast<double>(header.center_lon_e7) / 1e7, allocator)
+                                            .PushBack(static_cast<double>(header.center_lat_e7) / 1e7, allocator)
+                                            .PushBack(header.center_zoom, allocator);
+                    }
+
+                    if (!doc.HasMember("minzoom")) {
+                        doc.AddMember("minzoom", rapidjson::Value(), allocator);
+                    }
+
+                    auto& minzoom = doc["minzoom"];
+
+                    if (minzoom.IsString()) {
+                        minzoom.SetInt(std::atoi(minzoom.GetString()));
+                    }
+
+                    if (!minzoom.IsNumber()) {
+                        minzoom = rapidjson::Value().SetUint(header.min_zoom);
+                    }
+
+                    doc["minzoom"] = minzoom;
+
+                    if (!doc.HasMember("maxzoom")) {
+                        doc.AddMember("maxzoom", rapidjson::Value(), allocator);
+                    }
+
+                    auto& maxzoom = doc["maxzoom"];
+
+                    if (maxzoom.IsString()) {
+                        maxzoom.SetInt(std::atoi(maxzoom.GetString()));
+                    }
+
+                    if (!maxzoom.IsNumber()) {
+                        maxzoom = rapidjson::Value().SetUint(header.max_zoom);
+                    }
+
+                    doc["maxzoom"] = maxzoom;
+
+                    std::string metadata = serialize(doc);
+                    metadata_cache.emplace(url, metadata);
+
+                    callback(std::unique_ptr<Response::Error>());
+                };
+
+                if (header.json_metadata_bytes > 0) {
+                    Resource resource(Resource::Kind::Source, url);
+                    resource.loadingMethod = Resource::LoadingMethod::All;
+                    resource.dataRange = std::make_pair(header.json_metadata_offset,
+                                                        header.json_metadata_offset + header.json_metadata_bytes - 1);
+
+                    tasks[req].push_back(getFileSource()->request(resource, [=](const Response& responseMetadata) {
+                        if (responseMetadata.error) {
+                            callback(std::make_unique<Response::Error>(
+                                responseMetadata.error->reason,
+                                std::string("Error fetching PMTiles metadata: ") + responseMetadata.error->message));
+
+                            return;
+                        }
+
+                        if (responseMetadata.notModified) {
+                            return;
+                        }
+
+                        if (!responseMetadata.data || responseMetadata.data->empty()) {
+                            // Metadata is optional for building TileJSON. Some hosts/CDN
+                            // paths occasionally return an empty metadata range even
+                            // after a valid header; keep the source alive using the
+                            // header-derived fallback.
+                            parse_callback(std::string());
+                            return;
+                        }
+
+                        std::string data = *responseMetadata.data;
+
+                        if (header.internal_compression == pmtiles::COMPRESSION_GZIP) {
+                            try {
+                                data = util::decompress(data);
+                            } catch (const std::exception& e) {
+                                callback(std::make_unique<Response::Error>(
+                                    Response::Error::Reason::Other,
+                                    std::string("Error decompressing PMTiles metadata: ") + e.what()));
+                                return;
+                            }
+                        }
+
+                        parse_callback(data);
+                    }));
+
+                    return;
+                }
+
+                parse_callback(std::string());
+            });
     }
 
     void storeDirectory(const std::string& url,
                         uint64_t directoryOffset,
                         uint64_t directoryLength,
                         std::vector<pmtiles::entryv3> directory) {
-        if (directory_cache.find(url) == directory_cache.end()) {
+        if (!directory_cache.contains(url)) {
             directory_cache.emplace(url, std::map<std::string, std::vector<pmtiles::entryv3>>());
             directory_cache_control.emplace(url, std::vector<std::string>());
         }
@@ -467,7 +503,7 @@ private:
         }
     }
 
-    void getDirectory(std::string url,
+    void getDirectory(const std::string& url,
                       AsyncRequest* req,
                       uint64_t directoryOffset,
                       uint32_t directoryLength,
@@ -475,8 +511,7 @@ private:
         std::string directory_cache_key = url + "|" + std::to_string(directoryOffset) + "|" +
                                           std::to_string(directoryLength);
 
-        if (directory_cache.find(url) != directory_cache.end() &&
-            directory_cache.at(url).find(directory_cache_key) != directory_cache.at(url).end()) {
+        if (directory_cache.contains(url) && directory_cache.at(url).contains(directory_cache_key)) {
             if (directory_cache_control.at(url).back() != directory_cache_key) {
                 directory_cache_control.at(url).emplace_back(directory_cache_key);
 
@@ -502,22 +537,27 @@ private:
             pmtiles::headerv3 header = header_cache.at(url);
 
             Resource resource(Resource::Kind::Source, url);
-            resource.loadingMethod = Resource::LoadingMethod::Network;
+            resource.loadingMethod = Resource::LoadingMethod::All;
             resource.dataRange = std::make_pair(directoryOffset, directoryOffset + directoryLength - 1);
 
             tasks[req].push_back(getFileSource()->request(resource, [=, this](const Response& response) {
                 if (response.error) {
-                    callback({}, std::make_unique<Response::Error>(
-                        response.error->reason,
-                        std::string("Error fetching PMTiles directory: ") + response.error->message));
+                    callback({},
+                             std::make_unique<Response::Error>(
+                                 response.error->reason,
+                                 std::string("Error fetching PMTiles directory: ") + response.error->message));
 
                     return;
                 }
 
+                if (response.notModified) {
+                    return;
+                }
+
                 if (!response.data) {
-                    callback({}, std::make_unique<Response::Error>(
-                        Response::Error::Reason::Other,
-                        std::string("Error fetching PMTiles directory: empty response data")));
+                    callback({},
+                             std::make_unique<Response::Error>(Response::Error::Reason::Other,
+                                                               "PMTiles directory response has no data"));
                     return;
                 }
 
@@ -534,15 +574,16 @@ private:
 
                     callback(std::move(callbackDirectory), std::unique_ptr<Response::Error>());
                 } catch (const std::exception& e) {
-                    callback({}, std::make_unique<Response::Error>(
-                        Response::Error::Reason::Other,
-                        std::string(std::string("Error parsing PMTiles directory: ") + e.what())));
+                    callback({},
+                             std::make_unique<Response::Error>(
+                                 Response::Error::Reason::Other,
+                                 std::string(std::string("Error parsing PMTiles directory: ") + e.what())));
                 }
             }));
         });
     }
 
-    void getTileAddress(std::string url,
+    void getTileAddress(const std::string& url,
                         AsyncRequest* req,
                         uint64_t tileID,
                         uint64_t directoryOffset,
@@ -558,39 +599,40 @@ private:
             return;
         }
 
-        getDirectory(url,
-                     req,
-                     directoryOffset,
-                     directoryLength,
-                     [=, this](std::vector<pmtiles::entryv3> directory,
-                               std::unique_ptr<Response::Error> error) {
-            if (error) {
-                callback(std::make_pair(0, 0), std::move(error));
-                return;
-            }
-
-            pmtiles::headerv3 header = header_cache.at(url);
-
-            pmtiles::entryv3 entry = pmtiles::find_tile(directory, tileID);
-
-            if (entry.length > 0) {
-                if (entry.run_length > 0) {
-                    callback(std::make_pair(header.tile_data_offset + entry.offset, entry.length), {});
+        getDirectory(
+            url,
+            req,
+            directoryOffset,
+            directoryLength,
+            [=, this](std::vector<pmtiles::entryv3> directory,
+                      std::unique_ptr<Response::Error> error) { // NOLINT(clang-analyzer-cplusplus.NewDeleteLeaks)
+                if (error) {
+                    callback(std::make_pair(0, 0), std::move(error));
                     return;
                 }
 
-                getTileAddress(url,
-                               req,
-                               tileID,
-                               header.leaf_dirs_offset + entry.offset,
-                               entry.length,
-                               directoryDepth + 1,
-                               std::move(callback));
-                return;
-            }
+                pmtiles::headerv3 header = header_cache.at(url);
 
-            callback(std::make_pair(0, 0), {});
-        });
+                pmtiles::entryv3 entry = pmtiles::find_tile(directory, tileID);
+
+                if (entry.length > 0) {
+                    if (entry.run_length > 0) {
+                        callback(std::make_pair(header.tile_data_offset + entry.offset, entry.length), {});
+                        return;
+                    }
+
+                    getTileAddress(url,
+                                   req,
+                                   tileID,
+                                   header.leaf_dirs_offset + entry.offset,
+                                   entry.length,
+                                   directoryDepth + 1,
+                                   std::move(callback));
+                    return;
+                }
+
+                callback(std::make_pair(0, 0), {});
+            });
     }
 
     std::string serialize(Document& doc) {
@@ -612,9 +654,9 @@ PMTilesFileSource::PMTilesFileSource(const ResourceOptions& resourceOptions, con
 std::unique_ptr<AsyncRequest> PMTilesFileSource::request(const Resource& resource, FileSource::Callback callback) {
     auto req = std::make_unique<FileSourceRequest>(std::move(callback));
 
-    req->onCancel([actorRef = thread->actor(), req = req.get()]() {
-        actorRef.invoke(&Impl::cancel, req);
-    });
+    // Release this request's sub-request chain when the caller cancels or
+    // destroys the handle (FileSourceRequest's destructor invokes onCancel).
+    req->onCancel([actorRef = thread->actor(), req = req.get()]() { actorRef.invoke(&Impl::cancel, req); });
 
     // assume if there is a tile request, that the pmtiles file has been validated
     if (resource.kind == Resource::Tile) {

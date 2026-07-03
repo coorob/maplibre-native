@@ -42,6 +42,7 @@ public:
     double tileLodScale = 1;
     double tileLodPitchThreshold = (60.0 / 180.0) * std::numbers::pi;
     double tileLodZoomShift = 0;
+    TileLodMode tileLodMode = TileLodMode::Default;
     // Floor on variable-zoom emission. See `TileCoverParameters::tileLodMinZoom`.
     uint8_t tileLodMinZoom = 0;
     // Conservative vertical tile-cover range for non-flat sources such as
@@ -51,6 +52,7 @@ public:
     // Optional cap on visible source tiles. 0 preserves the full cover.
     std::size_t tileCoverMaxTiles = 0;
     gfx::DynamicTextureAtlasPtr dynamicTextureAtlas;
+    bool isUpdateSynchronous = false;
 };
 
 } // namespace mbgl

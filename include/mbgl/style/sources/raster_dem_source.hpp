@@ -7,8 +7,11 @@
 namespace mbgl {
 namespace style {
 
-struct RasterDEMOptions {
-    std::optional<Tileset::DEMEncoding> encoding = std::nullopt;
+struct SourceOptions {
+    std::optional<Tileset::RasterEncoding> rasterEncoding = std::nullopt;
+    std::optional<Tileset::VectorEncoding> vectorEncoding = std::nullopt;
+    // Fork: per-source zoom-range overrides, used by raster-dem archives
+    // whose native zoom range differs from the tileset default.
     std::optional<uint8_t> minzoom = std::nullopt;
     std::optional<uint8_t> maxzoom = std::nullopt;
 };
@@ -19,7 +22,7 @@ public:
     RasterDEMSource(std::string id,
                     variant<std::string, Tileset> urlOrTileset,
                     uint16_t tileSize,
-                    std::optional<RasterDEMOptions> options = std::nullopt);
+                    std::optional<SourceOptions> options = std::nullopt);
     ~RasterDEMSource() override;
     bool supportsLayerType(const mbgl::style::LayerTypeInfo*) const override;
 
@@ -27,7 +30,7 @@ protected:
     void setTilesetOverrides(Tileset& tileset) override;
 
 private:
-    std::optional<RasterDEMOptions> options;
+    std::optional<SourceOptions> options;
 };
 
 template <>

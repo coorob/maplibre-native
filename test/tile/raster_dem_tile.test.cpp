@@ -22,7 +22,7 @@ public:
     TransformState transformState;
     util::RunLoop loop;
     AnnotationManager annotationManager{style};
-    std::shared_ptr<ImageManager> imageManager = std::make_shared<ImageManager>();
+    std::shared_ptr<ImageManager> imageManager = ImageManager::create();
     std::shared_ptr<GlyphManager> glyphManager = std::make_shared<GlyphManager>();
     gfx::DynamicTextureAtlasPtr dynamicTextureAtlas;
 
@@ -66,7 +66,7 @@ TEST(RasterDEMTile, onError) {
 TEST(RasterDEMTile, onParsed) {
     RasterDEMTileTest test;
     RasterDEMTile tile(OverscaledTileID(0, 0, 0), "testSource", test.tileParameters, test.tileset);
-    tile.onParsed(std::make_unique<HillshadeBucket>(PremultipliedImage({16, 16}), Tileset::DEMEncoding::Mapbox), 0);
+    tile.onParsed(std::make_unique<HillshadeBucket>(PremultipliedImage({16, 16}), Tileset::RasterEncoding::Mapbox), 0);
     EXPECT_TRUE(tile.isRenderable());
     EXPECT_TRUE(tile.isLoaded());
     EXPECT_TRUE(tile.isComplete());

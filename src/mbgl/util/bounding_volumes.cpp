@@ -133,9 +133,9 @@ Frustum::Frustum(const std::array<vec3, 8>& points_, const std::array<vec4, 6>& 
         const vec3 axis1 = {{frustumEdges[i][2], 0.0, -frustumEdges[i][0]}};
         const vec3 axis2 = {{-frustumEdges[i][1], frustumEdges[i][0], 0.0}};
 
-        projections[i * 3] = {axis0, ProjectPointsToAxis(points, points[0], axis0)};
-        projections[i * 3 + 1] = {axis1, ProjectPointsToAxis(points, points[0], axis1)};
-        projections[i * 3 + 2] = {axis2, ProjectPointsToAxis(points, points[0], axis2)};
+        projections[i * 3] = {.axis = axis0, .projection = ProjectPointsToAxis(points, points[0], axis0)};
+        projections[i * 3 + 1] = {.axis = axis1, .projection = ProjectPointsToAxis(points, points[0], axis1)};
+        projections[i * 3 + 2] = {.axis = axis2, .projection = ProjectPointsToAxis(points, points[0], axis2)};
     }
 }
 
@@ -168,9 +168,7 @@ Frustum Frustum::fromInvProjMatrix(const mat4& invProj, double worldSize, double
     }};
 
     if (flippedY) {
-        std::for_each(frustumPlanePointIndices.begin(), frustumPlanePointIndices.end(), [](vec3i& tri) {
-            std::swap(tri[1], tri[2]);
-        });
+        std::ranges::for_each(frustumPlanePointIndices, [](vec3i& tri) { std::swap(tri[1], tri[2]); });
     }
 
     std::array<vec4, 6> frustumPlanes;
