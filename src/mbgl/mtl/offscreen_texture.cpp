@@ -59,6 +59,16 @@ public:
 
     ~OffscreenTextureResource() noexcept override { context.renderingStats().numFrameBuffers--; }
 
+    // Whether the color target's MTLTexture actually exists. Allocation can
+    // fail under memory pressure (newTextureWithDescriptor returns nil);
+    // rendering into a descriptor with zero valid attachments raises
+    // NSInvalidArgumentException. Callers skip the pass instead; create()
+    // retries on a later frame once memory frees up (textureDirty stays set).
+    bool isRenderable() {
+        colorTexture->create();
+        return static_cast<Texture2D*>(colorTexture.get())->getMetalTexture() != nullptr;
+    }
+
     void bind() override {
         assert(context.getBackend().getCommandQueue());
         commandBuffer = NS::RetainPtr(context.getBackend().getCommandQueue()->commandBuffer());
@@ -188,8 +198,7 @@ OffscreenTexture::OffscreenTexture(
     : gfx::OffscreenTexture(size_, std::make_unique<OffscreenTextureResource>(context, size_, type, depth, stencil)) {}
 
 bool OffscreenTexture::isRenderable() {
-    assert(false);
-    return true;
+    return getResource<OffscreenTextureResource>().isRenderable();
 }
 
 PremultipliedImage OffscreenTexture::readStillImage() {

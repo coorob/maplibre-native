@@ -1345,6 +1345,10 @@ void RenderTerrain::clearRenderState(UniqueChangeRequestVec& changes) {
     previousIdealIDs.clear();
     stableDrapeCoverFrames = 0;
     retiredDrapeTargetsByTile.clear();
+    // Ring hysteresis must not survive a full eviction: stale "was near-ring"
+    // entries make re-covered tiles allocate 2048² targets they no longer rank
+    // for (~ringSlack × 22 MB of overshoot after a style swap / DEM loss).
+    drapeRingByTile.clear();
 
     auto evicted = drapeCache.pruneIf([](const OverscaledTileID&) { return true; });
     for (auto& [tileID, target] : evicted) {

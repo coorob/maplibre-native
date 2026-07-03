@@ -4,6 +4,8 @@
 #include <mbgl/mtl/upload_pass.hpp>
 #include <mbgl/util/logging.hpp>
 
+#include <atomic>
+
 #include <Metal/MTLDevice.hpp>
 #include <Metal/MTLRenderCommandEncoder.hpp>
 #include <Metal/MTLSampler.hpp>
@@ -284,16 +286,13 @@ void Texture2D::bind(RenderPass& renderPass, int32_t location) {
         updateSamplerConfiguration();
     }
 
-    if (metalTexture) {
-        static int bindCount = 0;
-        if (bindCount < 3) {  // Only log first 3 binds to avoid spam
-            mbgl::Log::Info(mbgl::Event::Render, "Binding Metal texture to location " + std::to_string(location) +
-                           ": size=" + std::to_string(metalTexture->width()) + "x" + std::to_string(metalTexture->height()) +
-                           ", format=" + std::to_string(static_cast<int>(metalTexture->pixelFormat())));
-            bindCount++;
+    if (!metalTexture) {
+        // Rate-limited: fires per bind, and a nil texture under memory
+        // pressure would otherwise flood the log every frame.
+        static std::atomic<int> nullBindLogCount{0};
+        if (nullBindLogCount.fetch_add(1) < 3) {
+            mbgl::Log::Error(mbgl::Event::Render, "Trying to bind null Metal texture!");
         }
-    } else {
-        mbgl::Log::Error(mbgl::Event::Render, "CRITICAL: Trying to bind null Metal texture!");
     }
 
     // Bind to BOTH vertex and fragment stages to support vertex shader texture sampling (e.g., terrain DEM)
@@ -313,19 +312,16 @@ void Texture2D::upload(const void* pixelData, const Size& size_) {
     setSize(size_);
     if (textureDirty) {
         createMetalTexture();
-        if (metalTexture) {
-            mbgl::Log::Info(mbgl::Event::Render, "Metal texture created: " + std::to_string(metalTexture->width()) + "x" +
-                           std::to_string(metalTexture->height()) + ", format=" + std::to_string(static_cast<int>(metalTexture->pixelFormat())));
-        }
     }
     if (samplerStateDirty) {
         updateSamplerConfiguration();
     }
     if (pixelData) {
         if (!metalTexture) {
-            mbgl::Log::Error(mbgl::Event::Render, "CRITICAL: No Metal texture to upload to!");
-        } else {
-            mbgl::Log::Info(mbgl::Event::Render, "Uploading " + std::to_string(size.width * size.height * 4) + " bytes to Metal texture");
+            static std::atomic<int> nullUploadLogCount{0};
+            if (nullUploadLogCount.fetch_add(1) < 3) {
+                mbgl::Log::Error(mbgl::Event::Render, "No Metal texture to upload to!");
+            }
         }
         uploadSubRegion(pixelData, size, 0, 0);
     }
@@ -346,16 +342,9 @@ void Texture2D::uploadSubRegion(const void* pixelData, const Size& size_, uint16
 
 void Texture2D::upload() {
     if (image && image->valid()) {
-        mbgl::Log::Info(mbgl::Event::Render, "Texture2D::upload() - Uploading texture with image size: " +
-                       std::to_string(image->size.width) + "x" + std::to_string(image->size.height) +
-                       ", bytes=" + std::to_string(image->bytes()));
         setFormat(gfx::TexturePixelType::RGBA, gfx::TextureChannelDataType::UnsignedByte);
         upload(image->data.get(), image->size);
         image.reset();
-        mbgl::Log::Info(mbgl::Event::Render, "Texture2D::upload() - Upload complete, image reset");
-    } else {
-        mbgl::Log::Info(mbgl::Event::Render, "Texture2D::upload() - No image to upload (image=" +
-                       std::to_string(!!image) + ", valid=" + std::to_string(image && image->valid()) + ")");
     }
 }
 

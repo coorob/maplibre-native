@@ -192,7 +192,10 @@ float terrainReliefShade(sampler2D demTexture, vec2 mapUV, float metersPerTile) 
     eU = terrainReliefSampleOrCenter(eU, eC);
     eD = terrainReliefSampleOrCenter(eD, eC);
 
-    float sourceMetersPerTile = metersPerTile / max(v_dem_scale, 0.0001);
+    // metersPerTile is already the SOURCE (possibly ancestor) tile's span and
+    // radiusUV is in that source texture's UV space; dividing by dem_scale
+    // double-counted the zoom gap during DEM parent fallback.
+    float sourceMetersPerTile = metersPerTile;
     float sampleMetersX = max(2.0 * radiusUV.x * sourceMetersPerTile, 1.0);
     float sampleMetersY = max(2.0 * radiusUV.y * sourceMetersPerTile, 1.0);
     float dzdx = clamp((eR - eL) * u_exaggeration / sampleMetersX, -0.75, 0.75);

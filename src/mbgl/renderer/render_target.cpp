@@ -474,6 +474,14 @@ void RenderTarget::upload(gfx::UploadPass& uploadPass) {
 }
 
 void RenderTarget::render(RenderOrchestrator& orchestrator, const RenderTree& renderTree, PaintParameters& parameters) {
+    // Under memory pressure the target's MTLTexture allocation can fail;
+    // encoding a pass with no valid attachments aborts the app. Skip the
+    // pass — the target stays not-ready, consumers keep using fallbacks,
+    // and the allocation is retried on a later frame.
+    if (!offscreenTexture || !offscreenTexture->isRenderable()) {
+        return;
+    }
+
     if (klattraLogDrapeTrace() && !debugName.empty()) {
         const auto size = offscreenTexture->getSize();
         std::size_t drawableCount = 0;

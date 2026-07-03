@@ -173,7 +173,12 @@ static inline float terrainReliefShade(texture2d<float, access::sample> demTextu
     eU = terrainReliefSampleOrCenter(eU, eC);
     eD = terrainReliefSampleOrCenter(eD, eC);
 
-    float sourceMetersPerTile = metersPerTile / max(demScale, 0.0001);
+    // metersPerTile is already the SOURCE (possibly ancestor) tile's span and
+    // radiusUV is in that source texture's UV space, so the sample distance is
+    // simply 2*radiusUV*metersPerTile. Dividing by demScale double-counted the
+    // zoom gap during DEM parent fallback (slopes shrank 2^dz -> washed-out
+    // hillshade that "popped" when the exact DEM arrived).
+    float sourceMetersPerTile = metersPerTile;
     float sampleMetersX = max(2.0 * radiusUV.x * sourceMetersPerTile, 1.0);
     float sampleMetersY = max(2.0 * radiusUV.y * sourceMetersPerTile, 1.0);
     float dzdx = clamp((eR - eL) * props.exaggeration / sampleMetersX, -0.75, 0.75);
