@@ -91,6 +91,13 @@ public:
     void teardown(UniqueChangeRequestVec& changes);
 
     /**
+     * @brief Memory-pressure response: release parked resize predecessors and
+     * out-of-cover ancestor fallback targets, emitting the remove requests.
+     * Wired from RenderOrchestrator::reduceMemoryUse (didReceiveMemoryWarning).
+     */
+    void reduceMemoryUse(UniqueChangeRequestVec& changes);
+
+    /**
      * @brief Get elevation at a specific tile coordinate
      * @param tileID The tile containing the coordinate
      * @param x X coordinate within the tile

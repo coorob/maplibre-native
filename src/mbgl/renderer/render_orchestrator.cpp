@@ -816,6 +816,11 @@ void RenderOrchestrator::reduceMemoryUse() {
         entry.second->reduceMemoryUse();
     }
     imageManager->reduceMemoryUse();
+    if (renderTerrain) {
+        UniqueChangeRequestVec changes;
+        renderTerrain->reduceMemoryUse(changes);
+        addChanges(changes);
+    }
     observer->onInvalidate();
 }
 

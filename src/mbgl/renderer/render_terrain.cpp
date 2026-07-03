@@ -446,6 +446,14 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
             return farSize;
         };
 
+        // A fast pan/zoom can reshuffle every ring assignment in a single
+        // update; resizing them all at once keeps old+new generations alive
+        // simultaneously (retired copy + fresh allocation per tile) and can
+        // transiently spike hundreds of MB above steady state. Cap resizes
+        // per frame — skipped tiles keep rendering at their old size and are
+        // picked up on following frames (0 = uncapped).
+        static const uint32_t maxResizesPerFrame = klattraEnvTileCount("KLATTRA_DRAPE_MAX_RESIZES_PER_FRAME", 3);
+        uint32_t resizesThisFrame = 0;
         for (const auto& tileID : currentDrapeIDs) {
             const int32_t targetSize = drapeTargetSizeForTile(tileID);
             const Size desiredSize{static_cast<uint32_t>(targetSize), static_cast<uint32_t>(targetSize)};
@@ -455,7 +463,9 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
                 // demotions release the big target again — without them, long
                 // pans accumulate near-ring targets until jetsam. The retired
                 // target keeps rendering until its successor bakes.
-                if (existingSize != desiredSize) {
+                if (existingSize != desiredSize &&
+                    (maxResizesPerFrame == 0 || resizesThisFrame < maxResizesPerFrame)) {
+                    resizesThisFrame++;
                     auto oldTarget = drapeCache.take(tileID);
                     if (klattraDrapeTargetReady(oldTarget)) {
                         retiredDrapeTargetsByTile[tileID] = oldTarget;
@@ -483,20 +493,37 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
                 changes.emplace_back(std::make_unique<AddRenderTargetRequest>(target));
             }
         }
+        // Retain ready out-of-cover ancestors as fallback content, but CAP
+        // them: uncapped retention accumulates one generation per zoom level
+        // on a continuous zoom-in (~100–400 MB that no ring budget covers).
+        // Deepest ancestors first — a z-1 parent is a far better fallback
+        // than a z-5 one.
+        static const uint32_t maxRetainedAncestors = klattraEnvTileCount("KLATTRA_DRAPE_MAX_RETAINED_ANCESTORS", 8);
+        std::vector<OverscaledTileID> retainedAncestors;
+        drapeCache.visitAll([&](const OverscaledTileID& id, const TerrainDrapeTargetPtr& target) {
+            if (currentDrapeIDs.find(id) != currentDrapeIDs.end()) return;
+            if (!klattraDrapeTargetReady(target)) return;
+            for (const auto& idealID : currentIdealIDs) {
+                if (klattraIsAncestorOf(id, idealID)) {
+                    retainedAncestors.push_back(id);
+                    return;
+                }
+            }
+        });
+        if (retainedAncestors.size() > maxRetainedAncestors) {
+            std::sort(retainedAncestors.begin(),
+                      retainedAncestors.end(),
+                      [](const OverscaledTileID& a, const OverscaledTileID& b) {
+                          return a.canonical.z > b.canonical.z;
+                      });
+            retainedAncestors.erase(retainedAncestors.begin() + maxRetainedAncestors, retainedAncestors.end());
+        }
+        const std::unordered_set<OverscaledTileID> ancestorKeep(retainedAncestors.begin(), retainedAncestors.end());
         auto evicted = drapeCache.pruneIf([&](const OverscaledTileID& id) {
             if (currentDrapeIDs.find(id) != currentDrapeIDs.end()) {
                 return false;
             }
-            auto target = drapeCache.get(id);
-            if (!klattraDrapeTargetReady(target)) {
-                return true;
-            }
-            for (const auto& idealID : currentIdealIDs) {
-                if (klattraIsAncestorOf(id, idealID)) {
-                    return false;
-                }
-            }
-            return true;
+            return ancestorKeep.find(id) == ancestorKeep.end();
         });
         for (auto& [evictedID, evictedTarget] : evicted) {
             if (traceDrape) {
@@ -516,6 +543,19 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
         }
         for (auto it = retiredDrapeTargetsByTile.begin(); it != retiredDrapeTargetsByTile.end();) {
             if (currentDrapeIDs.find(it->first) == currentDrapeIDs.end()) {
+                it = retiredDrapeTargetsByTile.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        // Release parked resize-predecessors as soon as their successor has
+        // baked — for EVERY cover member, not just ideals. The DEM-binding
+        // loop's erase only covers ideal tiles; fallback parents are never
+        // ideals, so their retired 2048² copies used to survive until the
+        // parent left cover entirely (~50–150 MB of dead targets during long
+        // pitched pans).
+        for (auto it = retiredDrapeTargetsByTile.begin(); it != retiredDrapeTargetsByTile.end();) {
+            if (klattraDrapeTargetReady(drapeCache.get(it->first))) {
                 it = retiredDrapeTargetsByTile.erase(it);
             } else {
                 ++it;
@@ -763,6 +803,21 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
                         bestAncestorID = candidateID;
                     }
                 });
+                // A freshly-resized ancestor's live target has no content for
+                // a frame or two, but its READY predecessor is parked in the
+                // retired map — use it, or children flash empty at the pan
+                // leading edge (the exact artifact parent fallback exists to
+                // prevent). Live candidates win ties via the strict > above.
+                for (const auto& [retiredID, retiredTarget] : retiredDrapeTargetsByTile) {
+                    if (!klattraDrapeTargetReadyForTile(retiredTarget, idealOS) ||
+                        !klattraIsAncestorOf(retiredID, idealOS)) {
+                        continue;
+                    }
+                    if (!bestAncestorID || retiredID.canonical.z > bestAncestorID->canonical.z) {
+                        bestAncestor = retiredTarget;
+                        bestAncestorID = retiredID;
+                    }
+                }
                 if (bestAncestor && bestAncestorID) {
                     drape = bestAncestor;
                     resolvedDrapeID = *bestAncestorID;
@@ -1332,6 +1387,23 @@ void RenderTerrain::teardown(UniqueChangeRequestVec& changes) {
     activateLayerGroup(false, changes);
     layerGroup.reset();
     demSource = nullptr;
+}
+
+void RenderTerrain::reduceMemoryUse(UniqueChangeRequestVec& changes) {
+    // Memory-pressure response (MLNMapView didReceiveMemoryWarning →
+    // Renderer::reduceMemoryUse → orchestrator): drop everything not strictly
+    // required for the current cover — parked resize predecessors and
+    // out-of-cover ancestor fallbacks. Content re-bakes on demand; a brief
+    // quality dip beats a jetsam kill. drapeRingByTile's keys are exactly the
+    // last update's cover set (pruned to it every frame), which update()
+    // keeps only as a local.
+    retiredDrapeTargetsByTile.clear();
+    auto evicted = drapeCache.pruneIf(
+        [&](const OverscaledTileID& id) { return drapeRingByTile.find(id) == drapeRingByTile.end(); });
+    for (auto& [tileID, target] : evicted) {
+        (void)tileID;
+        changes.emplace_back(std::make_unique<RemoveRenderTargetRequest>(std::move(target)));
+    }
 }
 
 void RenderTerrain::clearRenderState(UniqueChangeRequestVec& changes) {
