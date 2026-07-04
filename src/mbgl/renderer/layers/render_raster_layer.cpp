@@ -478,7 +478,35 @@ void RenderRasterLayer::update(gfx::ShaderRegistry& shaders,
                 // If we update existing drawables, don't build new ones.
                 // But if the geometry has changed, we need to drop and re-build them anyway.
                 if (updateTile(renderPass, tileID, std::move(updateExisting)) && !geometryChanged) {
-                    continue;
+                    // Fresh drape targets have no raster copy of this tile yet:
+                    // the drape routing below only runs when this tile
+                    // rebuilds, so a target created afterwards (leading-edge
+                    // cover growth, ring resizes) used to wait for an
+                    // unrelated rebuild — the drape baked background-only in
+                    // the meantime ("beige/black until the camera moves",
+                    // 2026-07-04 device finding). If any overlapping target
+                    // lacks this tile's drape drawable, fall through to a
+                    // rebuild so the standard routing backfills every target;
+                    // this triggers at most once per fresh target.
+                    bool drapeBackfillNeeded = false;
+                    if (activeTerrain && !klattraDisableRasterDrape() && bucket.image) {
+                        activeTerrain->visitDrapeTargets(
+                            [&](const OverscaledTileID& drapeID, TerrainDrapeTargetPtr& drapeTarget) {
+                                if (drapeBackfillNeeded || !drapeTarget ||
+                                    !LayerTweaker::tilesOverlap(tileID, drapeID)) {
+                                    return;
+                                }
+                                auto* drapeGroup = static_cast<TileLayerGroup*>(
+                                    drapeTarget->getLayerGroup(layerIndex).get());
+                                if (!drapeGroup || drapeGroup->getDrawableCount(renderPass, tileID) == 0) {
+                                    drapeBackfillNeeded = true;
+                                }
+                            });
+                    }
+                    if (!drapeBackfillNeeded) {
+                        continue;
+                    }
+                    removeTile(renderPass, tileID);
                 } else if (geometryChanged) {
                     removeTile(renderPass, tileID);
                 }
