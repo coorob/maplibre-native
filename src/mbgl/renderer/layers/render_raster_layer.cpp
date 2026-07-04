@@ -180,8 +180,13 @@ void RenderRasterLayer::update(gfx::ShaderRegistry& shaders,
     };
 
     const auto setTextures = [&](gfx::UniqueDrawableBuilder& builder, RasterBucket& bucket) {
-        if (bucket.image) {
-            if (!bucket.texture2d) {
+        {
+            // Create the GPU texture from the CPU image on first use, but
+            // REUSE an existing texture even if the image has since been
+            // released — requiring the image here silently starved drape
+            // routing for long-lived tiles (satellite far field baked pure
+            // background, 2026-07-04 "beige wedges").
+            if (!bucket.texture2d && bucket.image) {
                 if (auto tex = context.createTexture2D()) {
                     tex->setImage(bucket.image);
                     bucket.texture2d = std::move(tex);
@@ -489,7 +494,7 @@ void RenderRasterLayer::update(gfx::ShaderRegistry& shaders,
                     // rebuild so the standard routing backfills every target;
                     // this triggers at most once per fresh target.
                     bool drapeBackfillNeeded = false;
-                    if (activeTerrain && !klattraDisableRasterDrape() && bucket.image) {
+                    if (activeTerrain && !klattraDisableRasterDrape() && (bucket.image || bucket.texture2d)) {
                         activeTerrain->visitDrapeTargets(
                             [&](const OverscaledTileID& drapeID, TerrainDrapeTargetPtr& drapeTarget) {
                                 if (drapeBackfillNeeded || !drapeTarget ||
@@ -549,16 +554,17 @@ void RenderRasterLayer::update(gfx::ShaderRegistry& shaders,
                     [&](const OverscaledTileID& drapeID, TerrainDrapeTargetPtr& drapeTarget) {
                         if (!drapeTarget || !LayerTweaker::tilesOverlap(tileID, drapeID)) return;
 
-                        // Do not bake a raster drawable into terrain until its
-                        // image is actually available. Otherwise the drape
-                        // target can be marked ready while sampling the
-                        // renderer's default white texture.
-                        if (!bucket.image) {
-                            if (auto* existingDrapeGroup = static_cast<TileLayerGroup*>(
-                                    drapeTarget->getLayerGroup(layerIndex).get())) {
-                                stats.drawablesRemoved +=
-                                    existingDrapeGroup->removeDrawables(renderPass, tileID).size();
-                            }
+                        // Do not bake a raster drawable into terrain until a
+                        // texture source exists (fresh image OR the already-
+                        // uploaded GPU texture). Otherwise the drape target
+                        // can be marked ready while sampling the renderer's
+                        // default white texture. Crucially: when NEITHER is
+                        // available, leave any existing drape drawable alone —
+                        // the previous behaviour REMOVED it whenever the CPU
+                        // image had been released, evaporating far-field
+                        // imagery from targets on every routing pass
+                        // (2026-07-04 satellite beige wedges).
+                        if (!bucket.image && !bucket.texture2d) {
                             return;
                         }
 
