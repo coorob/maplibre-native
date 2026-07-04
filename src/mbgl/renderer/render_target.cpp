@@ -482,6 +482,17 @@ void RenderTarget::render(RenderOrchestrator& orchestrator, const RenderTree& re
         return;
     }
 
+    // Clear to the style's evaluated background colour (same value the main
+    // pass clears with), NOT the member default black: a drape bake whose
+    // background drawable hasn't been routed in yet — or never is, for some
+    // far targets — otherwise produces an opaque BLACK texture, and terrain
+    // meshes bound to it render as black rectangles until the tile's imagery
+    // arrives or a cover churn recreates the target (2026-07-04 device
+    // finding: mid-flight black rectangles that outlived pauses). With the
+    // basemap colour as the floor, a contentless bake reads as unloaded
+    // basemap instead of a void.
+    const Color drapeClearColor = renderTree.getParameters().backgroundColor;
+
     if (klattraLogDrapeTrace() && !debugName.empty()) {
         const auto size = offscreenTexture->getSize();
         std::size_t drawableCount = 0;
@@ -501,12 +512,12 @@ void RenderTarget::render(RenderOrchestrator& orchestrator, const RenderTree& re
                       " groups=" + std::to_string(numLayerGroups()) +
                       " drawables=" + std::to_string(drawableCount) +
                       " completedBefore=" + std::to_string(completedRenderCount) +
-                      " clear=" + klattraColorString(clearColor));
+                      " clear=" + klattraColorString(drapeClearColor));
     }
 
     parameters.renderPass = parameters.encoder->createRenderPass("render target",
                                                                  {.renderable = *offscreenTexture,
-                                                                  .clearColor = clearColor,
+                                                                  .clearColor = drapeClearColor,
                                                                   .clearDepth = 1.0f,
                                                                   .clearStencil = {}});
     context.bindGlobalUniformBuffers(*parameters.renderPass);
