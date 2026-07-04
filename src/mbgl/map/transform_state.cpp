@@ -9,6 +9,7 @@
 #include <mbgl/util/projection.hpp>
 #include <mbgl/util/tile_coordinate.hpp>
 
+#include <cstdlib>
 #include <numbers>
 
 using namespace std::numbers;
@@ -134,7 +135,32 @@ void TransformState::getProjMatrix(mat4& projMatrix, uint16_t nearZ, bool aligne
     const ScreenCoordinate offset = getCenterOffset();
 
     const double limitedPitch = util::clamp(getPitch(), 0.0, maxMercatorHorizonAngle);
-    const double cameraToSeaLevelDistance = cameraToCenterDistance + std::abs(z) / std::cos(limitedPitch);
+    // Terrain far-plane headroom: this derivation ends the frustum exactly
+    // where the top-of-screen ray meets the z=0 plane, which is only correct
+    // for flat maps. With terrain, the camera anchoring renders ground
+    // relative to the local elevation origin, so distant terrain BELOW that
+    // origin (valleys, lake basins — up to origin×exaggeration render-metres
+    // deep) lies UNDER the z=0 plane and the ray only reaches it beyond the
+    // stock farZ — it was depth-clipped into flat background wedges at the
+    // screen corners and beyond ridgelines (2026-07-04 flyover finding).
+    // Budget extra descent below the plane so the ray travels far enough.
+    // Pixel-unit conversion matches setElevation; the budget therefore
+    // shrinks automatically at low zooms where relief is visually flat.
+    // Tune/disable (sim only while devices cannot receive env vars):
+    // KLATTRA_FARZ_TERRAIN_HEADROOM_M, default 4000, 0 = stock behaviour.
+    static const double farPlaneHeadroomMeters = [] {
+        const char* v = std::getenv("KLATTRA_FARZ_TERRAIN_HEADROOM_M");
+        if (!v || !*v) {
+            return 4000.0;
+        }
+        char* end = nullptr;
+        const double parsed = std::strtod(v, &end);
+        return end != v ? util::clamp(parsed, 0.0, 20000.0) : 4000.0;
+    }();
+    const double farPlaneHeadroomPixels =
+        farPlaneHeadroomMeters / Projection::getMetersPerPixelAtLatitude(getLatLng().latitude(), getZoom());
+    const double cameraToSeaLevelDistance = cameraToCenterDistance +
+                                            (std::abs(z) + farPlaneHeadroomPixels) / std::cos(limitedPitch);
 
     // Find the Z distance from the viewport center point
     // [width/2 + offset.x, height/2 + offset.y] to the top edge; to point
