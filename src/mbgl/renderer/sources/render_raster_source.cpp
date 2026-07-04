@@ -4,6 +4,10 @@
 #include <mbgl/algorithm/update_tile_masks.hpp>
 #include <mbgl/renderer/tile_parameters.hpp>
 
+#include <algorithm>
+#include <cmath>
+#include <cstdlib>
+
 namespace mbgl {
 
 using namespace style;
@@ -24,10 +28,30 @@ void RenderRasterSource::updateInternal(const Tileset& tileset,
                                         const bool needsRendering,
                                         const bool needsRelayout,
                                         const TileParameters& parameters) {
+    // Mirror the DEM source's variable-zoom pitch gate (40°, see
+    // render_raster_dem_source.cpp): at trail-preview pitches (46–63°) the
+    // stock 60° gate emits NO coarse far-field tiles, so terrain drape
+    // targets beyond the near field have no raster tile to route imagery
+    // from — they baked base-colour only ("beige wedges" residue,
+    // 2026-07-04 sim histogram: ~102/112 targets content-less). With the
+    // gate lowered, the far field is served by few coarse parents instead
+    // of an unbounded full-frustum full-zoom cover — also a net tile-count
+    // and disk-write win. Same env knob as the DEM source.
+    TileParameters rasterParameters = parameters;
+    {
+        const char* v = std::getenv("KLATTRA_TERRAIN_LOD_PITCH_DEG");
+        double deg = 40.0;
+        if (v && *v) {
+            char* end = nullptr;
+            const double parsed = std::strtod(v, &end);
+            if (end != v) deg = std::clamp(parsed, 20.0, 60.0);
+        }
+        rasterParameters.tileLodPitchThreshold = deg * M_PI / 180.0;
+    }
     tilePyramid.update(layers,
                        needsRendering,
                        needsRelayout,
-                       parameters,
+                       rasterParameters,
                        *baseImpl,
                        impl().getTileSize(),
                        tileset.zoomRange,
