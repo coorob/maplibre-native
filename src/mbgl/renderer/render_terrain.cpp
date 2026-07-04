@@ -324,14 +324,15 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
     // the child only after it has completed.
     std::unordered_set<OverscaledTileID> currentDrapeIDs = currentIdealIDs;
     // Default 1: bake a ring of targets just outside the visible cover so a
-    // moving camera reaches tiles whose drape is already ready. With the
-    // per-target GPU waits gone (perf batch), frames present fast enough to
-    // expose the bake window at the leading edge as black/blurry tiles —
-    // the ring is what hides it. Ring targets rank as far in the
-    // distance-ranked budgets, so they stay at the small end of the size
-    // buckets.
+    // moving camera reaches tiles whose drape is already ready. Ring targets
+    // rank as far in the distance-ranked budgets, so they stay at the small
+    // end of the size buckets. (2 was tried on-device 2026-07-04: no visible
+    // gain over 1 — the persistent edge artifacts turned out to be
+    // cover-limit voids, not bake latency — while the extra ring showed up
+    // as compressor pressure. See the DEM LOD pitch gate in
+    // render_raster_dem_source.cpp for the actual cover fix.)
     static const uint32_t drapeOverscanTiles =
-        klattraEnvTilePadding("KLATTRA_DRAPE_OVERSCAN_TILES", 2);
+        klattraEnvTilePadding("KLATTRA_DRAPE_OVERSCAN_TILES", 1);
     klattraAddDrapeOverscan(currentDrapeIDs, currentIdealIDs, drapeOverscanTiles);
     const std::vector<OverscaledTileID> exactAndOverscanDrapeIDs(currentDrapeIDs.begin(),
                                                                  currentDrapeIDs.end());

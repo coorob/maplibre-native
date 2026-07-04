@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <cstddef>
+#include <numbers>
 
 namespace mbgl {
 
@@ -19,16 +20,40 @@ using namespace style;
 namespace {
 
 std::size_t klattraEnvMaxTerrainRenderTiles() {
+    // Default 112 (was 72): with the DEM LOD pitch gate lowered to 40° the
+    // far field emits ~30-40 extra coarse rows; 72 truncated them back off
+    // and re-opened the horizon hole the gate change closes. The cut ranks
+    // by zoom-normalized distance (tile_cover.cpp), so a too-small cap
+    // always drops the farthest tiles first.
     const char* value = std::getenv("KLATTRA_TERRAIN_MAX_RENDER_TILES");
     if (!value || !*value) {
-        return 72;
+        return 112;
     }
     char* end = nullptr;
     const unsigned long parsed = std::strtoul(value, &end, 10);
     if (end == value) {
-        return 72;
+        return 112;
     }
     return static_cast<std::size_t>(std::clamp<unsigned long>(parsed, 0, 256));
+}
+
+double klattraEnvTerrainLodPitchDeg() {
+    // The stock 60° variable-zoom gate sits INSIDE the trail-preview pitch
+    // band (46–63°): for most of a flyover no far-field tiles were emitted
+    // at all, so the terrain mesh stopped at the near full-zoom radius and
+    // the void backdrop showed as permanent black wedges at the frustum
+    // edges (device pause-test 2026-07-04). 40° keeps the whole preview
+    // band — and hand-pitched 3D browsing — inside variable-zoom cover.
+    const char* value = std::getenv("KLATTRA_TERRAIN_LOD_PITCH_DEG");
+    if (!value || !*value) {
+        return 40.0;
+    }
+    char* end = nullptr;
+    const double parsed = std::strtod(value, &end);
+    if (end == value) {
+        return 40.0;
+    }
+    return std::clamp(parsed, 20.0, 60.0);
 }
 
 } // namespace
@@ -93,6 +118,9 @@ void RenderRasterDEMSource::updateInternal(const Tileset& tileset,
     TileParameters demParameters = parameters;
     demParameters.tileLodMinRadius = 2.0;
     demParameters.tileLodScale = 1.0;
+    // Engage variable-zoom for the whole trail-preview pitch band (46–63°),
+    // not just past the stock 60° gate — see klattraEnvTerrainLodPitchDeg.
+    demParameters.tileLodPitchThreshold = klattraEnvTerrainLodPitchDeg() * std::numbers::pi / 180.0;
     // Native tile cover historically culled tiles against a flat z=0 plane.
     // That under-selects pitched low-zoom terrain: raised mountains can be
     // visible even when the flat ground plane for the same tile is outside the
