@@ -5,6 +5,8 @@
 #include <mbgl/renderer/tile_parameters.hpp>
 
 #include <algorithm>
+#include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 
@@ -60,6 +62,37 @@ void RenderRasterSource::updateInternal(const Tileset& tileset,
                            return std::make_unique<RasterTile>(tileID, baseImpl->id, parameters, tileset, observer_);
                        });
     algorithm::updateTileMasks(tilePyramid.getRenderedTiles());
+
+    // Probe: 1 Hz rendered-pyramid histogram for the beige-wedge hunt — is
+    // there ANY coarse far-field imagery tile for drape routing to pick up?
+    // stderr because the simulator swallows mbgl Log::Warning.
+    if (std::getenv("KLATTRA_TRACE_STDERR") != nullptr) {
+        static std::chrono::steady_clock::time_point lastLog{};
+        const auto now = std::chrono::steady_clock::now();
+        if (now - lastLog >= std::chrono::seconds(1)) {
+            lastLog = now;
+            std::array<uint32_t, 26> byZ{};
+            std::size_t rendered = 0;
+            for (const auto& [renderedID, tileRef] : tilePyramid.getRenderedTiles()) {
+                (void)tileRef;
+                ++byZ[std::min<std::size_t>(renderedID.canonical.z, byZ.size() - 1)];
+                ++rendered;
+            }
+            std::string hist;
+            for (std::size_t z = 0; z < byZ.size(); ++z) {
+                if (!byZ[z]) continue;
+                if (!hist.empty()) hist += ' ';
+                hist += 'z' + std::to_string(z) + ':' + std::to_string(byZ[z]);
+            }
+            fprintf(stderr,
+                    "[KLATTRA_TRACE] [KLATTRA RASTER] source=%s rendered=%zu byZ=%s zoom=%.2f pitchDeg=%.1f\n",
+                    baseImpl->id.c_str(),
+                    rendered,
+                    hist.empty() ? "-" : hist.c_str(),
+                    parameters.transformState.getZoom(),
+                    parameters.transformState.getPitch() * 180.0 / M_PI);
+        }
+    }
 }
 
 void RenderRasterSource::prepare(const SourcePrepareParameters& parameters) {

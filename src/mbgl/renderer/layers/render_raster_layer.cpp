@@ -1,4 +1,5 @@
 #include <mbgl/renderer/layers/render_raster_layer.hpp>
+#include <chrono>
 #include <mbgl/renderer/buckets/raster_bucket.hpp>
 #include <mbgl/renderer/render_tile.hpp>
 #include <mbgl/renderer/paint_parameters.hpp>
@@ -418,7 +419,13 @@ void RenderRasterLayer::update(gfx::ShaderRegistry& shaders,
             });
         }
 
-        for (const RenderTile& tile : *renderTiles) {
+        // [KLATTRA RASTER_DRAPE] probe counters for this update pass — which
+    // exit of the drape-routing pipeline drops the far field?
+    std::size_t probeTiles = 0, probeBypassed = 0, probeBackfills = 0, probeBlockTiles = 0,
+                probeOverlaps = 0, probeAdded = 0, probeSkipNoTexSrc = 0, probeSkipBuilderTex = 0,
+                probeRemovedStale = 0;
+    for (const RenderTile& tile : *renderTiles) {
+        ++probeTiles;
             const auto& tileID = tile.getOverscaledTileID();
 
             auto* bucket_ = tile.getBucket(*baseImpl);
@@ -441,7 +448,11 @@ void RenderRasterLayer::update(gfx::ShaderRegistry& shaders,
                             if (!drapeTarget) return;
                             if (auto* drapeGroup = static_cast<TileLayerGroup*>(
                                     drapeTarget->getLayerGroup(layerIndex).get())) {
-                                stats.drawablesRemoved += drapeGroup->removeDrawables(renderPass, tileID).size();
+                                {
+                            const auto removedStale = drapeGroup->removeDrawables(renderPass, tileID).size();
+                            stats.drawablesRemoved += removedStale;
+                            probeRemovedStale += removedStale;
+                        }
                             }
                         });
                 }
@@ -495,6 +506,7 @@ void RenderRasterLayer::update(gfx::ShaderRegistry& shaders,
                     // this triggers at most once per fresh target.
                     bool drapeBackfillNeeded = false;
                     if (activeTerrain && !klattraDisableRasterDrape() && (bucket.image || bucket.texture2d)) {
+                ++probeBlockTiles;
                         activeTerrain->visitDrapeTargets(
                             [&](const OverscaledTileID& drapeID, TerrainDrapeTargetPtr& drapeTarget) {
                                 if (drapeBackfillNeeded || !drapeTarget ||
@@ -509,8 +521,10 @@ void RenderRasterLayer::update(gfx::ShaderRegistry& shaders,
                             });
                     }
                     if (!drapeBackfillNeeded) {
+                        ++probeBypassed;
                         continue;
                     }
+                    ++probeBackfills;
                     removeTile(renderPass, tileID);
                 } else if (geometryChanged) {
                     removeTile(renderPass, tileID);
@@ -553,6 +567,7 @@ void RenderRasterLayer::update(gfx::ShaderRegistry& shaders,
                 activeTerrain->visitDrapeTargets(
                     [&](const OverscaledTileID& drapeID, TerrainDrapeTargetPtr& drapeTarget) {
                         if (!drapeTarget || !LayerTweaker::tilesOverlap(tileID, drapeID)) return;
+                        ++probeOverlaps;
 
                         // Do not bake a raster drawable into terrain until a
                         // texture source exists (fresh image OR the already-
@@ -565,6 +580,7 @@ void RenderRasterLayer::update(gfx::ShaderRegistry& shaders,
                         // imagery from targets on every routing pass
                         // (2026-07-04 satellite beige wedges).
                         if (!bucket.image && !bucket.texture2d) {
+                            ++probeSkipNoTexSrc;
                             return;
                         }
 
@@ -600,6 +616,7 @@ void RenderRasterLayer::update(gfx::ShaderRegistry& shaders,
                         setTextures(drapeBuilder, bucket);
                         if (!drapeBuilder->getTexture(idRasterImage0Texture) ||
                             !drapeBuilder->getTexture(idRasterImage1Texture)) {
+                            ++probeSkipBuilderTex;
                             return;
                         }
                         buildVertexData(drapeBuilder,
@@ -614,8 +631,32 @@ void RenderRasterLayer::update(gfx::ShaderRegistry& shaders,
                             drapeDrawable->setLayerTweaker(tw);
                             drapeGroup->addDrawable(renderPass, tileID, std::move(drapeDrawable));
                             ++stats.drawablesAdded;
+                            ++probeAdded;
                         }
                     });
+            }
+        }
+
+        // 1 Hz probe summary (stderr — the simulator swallows Log::Warning).
+        if (std::getenv("KLATTRA_TRACE_STDERR") != nullptr &&
+            (probeTiles || probeBlockTiles || probeAdded)) {
+            static std::chrono::steady_clock::time_point lastProbe{};
+            const auto now = std::chrono::steady_clock::now();
+            if (now - lastProbe >= std::chrono::milliseconds(900)) {
+                lastProbe = now;
+                fprintf(stderr,
+                        "[KLATTRA_TRACE] [KLATTRA RASTER_DRAPE] layer=%s tiles=%zu bypassed=%zu backfills=%zu "
+                        "blockTiles=%zu overlaps=%zu added=%zu skipNoTexSrc=%zu skipBuilderTex=%zu removedStale=%zu\n",
+                        getID().c_str(),
+                        probeTiles,
+                        probeBypassed,
+                        probeBackfills,
+                        probeBlockTiles,
+                        probeOverlaps,
+                        probeAdded,
+                        probeSkipNoTexSrc,
+                        probeSkipBuilderTex,
+                        probeRemovedStale);
             }
         }
     }
