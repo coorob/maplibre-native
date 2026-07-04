@@ -331,7 +331,7 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
     // distance-ranked budgets, so they stay at the small end of the size
     // buckets.
     static const uint32_t drapeOverscanTiles =
-        klattraEnvTilePadding("KLATTRA_DRAPE_OVERSCAN_TILES", 1);
+        klattraEnvTilePadding("KLATTRA_DRAPE_OVERSCAN_TILES", 2);
     klattraAddDrapeOverscan(currentDrapeIDs, currentIdealIDs, drapeOverscanTiles);
     const std::vector<OverscaledTileID> exactAndOverscanDrapeIDs(currentDrapeIDs.begin(),
                                                                  currentDrapeIDs.end());
@@ -882,6 +882,10 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
     // when the source DEM tile changes (typically an upgrade from a
     // parent-fallback texture to the exact-zoom texture, or empty
     // fallback → real DEM); otherwise reuse the existing drawable.
+    // Tiles that end this update WITH a drawable — the prune below holds a
+    // leaving tile's drawable until the ideals covering it appear here.
+    std::unordered_set<OverscaledTileID> drawableBackedTiles;
+    drawableBackedTiles.reserve(nextBindings.size());
     for (const auto& [idealID, binding] : nextBindings) {
         if (auto existing = currentBindings.find(idealID); existing != currentBindings.end()) {
             if (existing->second.sourceID == binding.sourceID &&
@@ -904,6 +908,7 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
                                   " drapeFallback=" + std::to_string(binding.usedDrapeFallback) +
                                   " drapeReady=" + std::to_string(binding.drapeReady));
                 }
+                drawableBackedTiles.insert(idealID);
                 continue; // drawable already up to date
             }
             if (traceDrape) {
@@ -939,6 +944,7 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
                                   " source=" + klattraTileString(binding.sourceID) +
                                   " reason=refresh-drape-not-ready");
                 }
+                drawableBackedTiles.insert(idealID);
                 continue;
             }
             lg->removeDrawablesIf([&idealID](gfx::Drawable& d) {
@@ -974,22 +980,67 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
                               " terrainDrawablesBefore=" + std::to_string(lg->getDrawableCount()));
             }
             lg->addDrawable(std::move(drawable));
+            drawableBackedTiles.insert(idealID);
         }
     }
 
     // Prune drawables for ideals that left the cover. The drape cache's
     // RenderTargets are pruned separately above; this only handles the
     // terrain mesh drawables themselves.
+    //
+    // Zoom-level transitions need care: the replacement ideals often haven't
+    // had their first bake when the old level's tiles leave the cover, and
+    // pruning immediately flashes a hole (black at high pitch). Hold a
+    // leaving tile's drawable until every current ideal overlapping it is
+    // drawable-backed — the swap then happens within one update, so old and
+    // new never coexist in a rendered frame in the common single-cover case.
+    // Tiles with no overlapping ideal (camera panned away) prune at once,
+    // and a frame cap bounds pathological covers.
     if (!currentBindings.empty()) {
-        const auto removed = lg->removeDrawablesIf([&terrainMeshIDs](gfx::Drawable& d) {
+        static const uint32_t pruneHoldFrames =
+            klattraEnvFrameCount("KLATTRA_DRAPE_PRUNE_HOLD_FRAMES", 30);
+        std::unordered_map<OverscaledTileID, uint32_t> nextPruneHoldAges;
+        std::size_t held = 0;
+        const auto removed = lg->removeDrawablesIf([&](gfx::Drawable& d) {
             const auto& maybeID = d.getTileID();
-            return maybeID.has_value() && terrainMeshIDs.find(*maybeID) == terrainMeshIDs.end();
+            if (!maybeID.has_value()) return false;
+            const auto& leavingID = *maybeID;
+            if (terrainMeshIDs.find(leavingID) != terrainMeshIDs.end()) {
+                return false; // still an ideal
+            }
+            if (pruneHoldFrames > 0) {
+                bool overlapsAny = false;
+                bool covered = true;
+                for (const auto& idealID : terrainMeshIDs) {
+                    if (!klattraIsAncestorOf(idealID, leavingID) &&
+                        !klattraIsAncestorOf(leavingID, idealID)) {
+                        continue;
+                    }
+                    overlapsAny = true;
+                    if (drawableBackedTiles.find(idealID) == drawableBackedTiles.end()) {
+                        covered = false;
+                        break;
+                    }
+                }
+                if (overlapsAny && !covered) {
+                    const auto ageIt = pruneHoldAgeByTile.find(leavingID);
+                    const uint32_t age = (ageIt == pruneHoldAgeByTile.end()) ? 1 : ageIt->second + 1;
+                    if (age <= pruneHoldFrames) {
+                        nextPruneHoldAges.emplace(leavingID, age);
+                        held++;
+                        return false; // hold: replacement not ready yet
+                    }
+                }
+            }
+            return true;
         });
-        if (traceDrape && removed > 0) {
+        pruneHoldAgeByTile = std::move(nextPruneHoldAges);
+        if (traceDrape && (removed > 0 || held > 0)) {
             Log::Info(Event::Render,
                       "[KLATTRA DRAPE_TRACE] terrain-drawable-prune frame=" +
                           std::to_string(drapeTraceFrame) +
                           " removed=" + std::to_string(removed) +
+                          " held=" + std::to_string(held) +
                           " remaining=" + std::to_string(lg->getDrawableCount()));
         }
     }
@@ -1467,6 +1518,7 @@ void RenderTerrain::clearRenderState(UniqueChangeRequestVec& changes) {
     // entries make re-covered tiles allocate 2048² targets they no longer rank
     // for (~ringSlack × 22 MB of overshoot after a style swap / DEM loss).
     drapeRingByTile.clear();
+    pruneHoldAgeByTile.clear();
 
     auto evicted = drapeCache.pruneIf([](const OverscaledTileID&) { return true; });
     for (auto& [tileID, target] : evicted) {

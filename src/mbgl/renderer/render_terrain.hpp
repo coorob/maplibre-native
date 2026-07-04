@@ -436,6 +436,11 @@ private:
     // render_terrain.cpp. Pruned alongside the drape cache.
     std::unordered_map<OverscaledTileID, uint8_t> drapeRingByTile;
 
+    // Frames a leaving-ideal tile's drawable has been held waiting for its
+    // replacement ideals to become drawable-backed (zoom-level transitions).
+    // See the prune block in updateDrapeTargets.
+    std::unordered_map<OverscaledTileID, uint32_t> pruneHoldAgeByTile;
+
     // Maximum stable-view pixel size of each close-zoom drape target. Moving
     // cameras allocate smaller close targets first and upgrade to this after
     // the cover settles, so fast pans/zooms do not block on multiple 2048²
