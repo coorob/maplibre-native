@@ -146,21 +146,35 @@ void RenderRasterDEMSource::updateInternal(const Tileset& tileset,
     // cached coarser tiles, but with the cap they never look more than
     // mildly soft — the dramatic blurry pop from a z=8 stand-in is gone.
     //
-    // The floor is computed against the camera's ideal zoom (via
-    // `coveringZoomLevel`, mirroring `TilePyramid::update`'s own
-    // calculation) rather than the per-source maxZoom so it scales with
-    // how the user is looking at the map: zoomed in tight (z=14 ideal)
-    // caps at z=12; pulled out (z=10 ideal) caps at z=8 — but never below
-    // the DEM tileset's own minzoom. Emitting below the source range creates
-    // empty DEM/drape placeholders that look like beige terrain holes while
-    // the main basemap is suppressed by terrain coverage.
+    // The floor is measured from the COVER zoom — the camera's ideal zoom
+    // (via `coveringZoomLevel`) clamped into the tileset range, exactly the
+    // `idealZoom` clamp `TilePyramid::update` applies before running the
+    // cover — so "two levels below" always means two levels below the mesh
+    // detail that is actually rendered. Measuring from the raw camera zoom
+    // (previous behaviour) silently disabled variable-zoom in the regime
+    // the 40° pitch gate above exists for: trail-preview flyovers run
+    // camera zoom ~12.5–13.5, so the raw ideal (12–13) put the floor at
+    // 10–11 while the cover itself was pinned at the DEM maxzoom 12 — far
+    // tiles could coarsen at most one level, the full-frustum emission
+    // stayed in the hundreds, and `tileCoverMaxTiles` cut the far field
+    // straight back off. The mesh still ended at the near radius and the
+    // frustum-edge voids survived the gate change unchanged (device
+    // pause-test 2026-07-04). Clamped, a maxzoom-12 cover floors at z=10
+    // and the whole pitched frustum fits comfortably inside the cap.
+    // Never below the tileset minzoom either way: emitting below the
+    // source range creates empty DEM/drape placeholders that look like
+    // beige terrain holes while the main basemap is suppressed by terrain
+    // coverage.
     const double demZoom = util::clamp<double>(
         parameters.transformState.getZoom() + parameters.tileLodZoomShift,
         parameters.transformState.getMinZoom(),
         parameters.transformState.getMaxZoom());
     const int32_t demIdealZoom = util::coveringZoomLevel(demZoom, SourceType::RasterDEM, impl().getTileSize());
+    const int32_t demCoverZoom = std::clamp<int32_t>(demIdealZoom,
+                                                     static_cast<int32_t>(tileset.zoomRange.min),
+                                                     static_cast<int32_t>(tileset.zoomRange.max));
     demParameters.tileLodMinZoom = static_cast<uint8_t>(
-        std::max<int32_t>(tileset.zoomRange.min, demIdealZoom - 2));
+        std::max<int32_t>(tileset.zoomRange.min, demCoverZoom - 2));
 
     // Keep the global `prefetchZoomDelta` (= 4 by default). With the
     // GL-JS-style parent-fallback DEM sampling now in place, a cached
