@@ -71,7 +71,10 @@ public:
 
     void bind() override {
         assert(context.getBackend().getCommandQueue());
-        commandBuffer = NS::RetainPtr(context.getBackend().getCommandQueue()->commandBuffer());
+        // All offscreen passes of a frame share one command buffer (owned by
+        // the Context) so the drape bakes pipeline on the GPU instead of one
+        // committed-and-waited buffer per target.
+        commandBuffer = context.offscreenCommandBuffer();
         colorTexture->create();
 
         renderPassDescriptor = NS::TransferPtr(MTL::RenderPassDescriptor::alloc()->init());
@@ -96,14 +99,21 @@ public:
     void swap() override {
         assert(commandBuffer);
         encodeMipmaps(commandBuffer.get());
-        commandBuffer->commit();
-        commandBuffer->waitUntilCompleted();
+        // No commit and no wait here: the shared buffer is committed once per
+        // frame (Context::flushOffscreenRenderWork) after all targets have
+        // encoded. Same-queue commit order makes every bake visible to the
+        // main pass, which is committed later; only CPU readback needs an
+        // explicit wait (see readStillImage).
         commandBuffer.reset();
         renderPassDescriptor.reset();
     }
 
     PremultipliedImage readStillImage() {
         assert(static_cast<Texture2D*>(colorTexture.get())->getMetalTexture());
+
+        // CPU readback: the pass that rendered this texture may still be
+        // pending in the shared offscreen command buffer, or in flight.
+        context.waitOffscreenRenderWork();
 
         auto data = std::make_unique<uint8_t[]>(colorTexture->getDataSize());
         MTL::Region region = MTL::Region::Make2D(0, 0, size.width, size.height);

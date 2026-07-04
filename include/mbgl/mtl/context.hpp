@@ -54,6 +54,21 @@ public:
     void beginFrame() override;
     void endFrame() override;
 
+    /// The shared command buffer all offscreen (drape) render passes of the
+    /// current frame encode into, created lazily from the backend queue.
+    /// Batching the passes removes the per-target commit + waitUntilCompleted
+    /// round trips; same-queue commit order still guarantees the bakes
+    /// execute before the main pass, which is committed later.
+    const MTLCommandBufferPtr& offscreenCommandBuffer();
+
+    /// Commit the shared offscreen command buffer without waiting.
+    void flushOffscreenRenderWork() override;
+
+    /// Commit the shared offscreen command buffer and block until the GPU has
+    /// executed it. Required before CPU readback of an offscreen texture
+    /// (snapshotter stills, KLATTRA target dumps).
+    void waitOffscreenRenderWork();
+
     std::unique_ptr<gfx::CommandEncoder> createCommandEncoder() override;
 
     /// Create a new buffer object
@@ -161,6 +176,9 @@ public:
 private:
     RendererBackend& backend;
     bool cleanupOnDestruction = true;
+
+    MTLCommandBufferPtr sharedOffscreenCommandBuffer;
+    MTLCommandBufferPtr lastFlushedOffscreenCommandBuffer;
 
     std::optional<BufferResource> emptyBuffer;
     std::optional<BufferResource> tileVertexBuffer;

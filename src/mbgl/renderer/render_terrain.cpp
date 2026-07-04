@@ -1160,8 +1160,32 @@ void RenderTerrain::generateMesh(gfx::Context& context) {
         vertices.size() / 4,
         indices.size(),
         std::move(vertices),
-        std::move(indices)
+        std::move(indices),
+        nullptr, // sharedLayoutVertices, built below
+        nullptr  // sharedIndexes, built below
     };
+
+    // Build the shared per-drawable inputs once. Every tile drawable hands
+    // these same vectors to its builder; the vectors carry their GPU buffer,
+    // so all terrain tiles share one vertex and one index buffer.
+    auto layoutVertices = std::make_shared<gfx::VertexVector<TerrainLayoutVertex>>();
+    layoutVertices->reserve(mesh->vertexCount);
+    const auto& rawVertices = mesh->vertices;
+    for (size_t index = 0; index + 3 < rawVertices.size(); index += 4) {
+        layoutVertices->emplace_back(TerrainLayoutVertex{
+            {rawVertices[index + 0], rawVertices[index + 1]},
+            {rawVertices[index + 2], rawVertices[index + 3]},
+        });
+    }
+    mesh->sharedLayoutVertices = std::move(layoutVertices);
+
+    auto sharedIndexes = std::make_shared<gfx::IndexVector<gfx::Triangles>>();
+    sharedIndexes->reserve(mesh->indexCount);
+    const auto& rawIndices = mesh->indices;
+    for (size_t index = 0; index + 2 < rawIndices.size(); index += 3) {
+        sharedIndexes->emplace_back(rawIndices[index], rawIndices[index + 1], rawIndices[index + 2]);
+    }
+    mesh->sharedIndexes = std::move(sharedIndexes);
 }
 
 std::shared_ptr<gfx::Texture2D> RenderTerrain::getOrCreateEmptyDEMTexture(gfx::Context& context) {
@@ -1256,13 +1280,13 @@ std::unique_ptr<gfx::Drawable> RenderTerrain::createDrawableForTile(gfx::Context
     builder->setEnableDepth(true);
     builder->setIs3D(true);
 
-    auto sharedVertices = std::make_shared<gfx::VertexVector<TerrainLayoutVertex>>();
-    sharedVertices->reserve(terrainMesh.vertexCount);
-    for (size_t index = 0; index + 3 < terrainMesh.vertices.size(); index += 4) {
-        sharedVertices->emplace_back(TerrainLayoutVertex{
-            {terrainMesh.vertices[index + 0], terrainMesh.vertices[index + 1]},
-            {terrainMesh.vertices[index + 2], terrainMesh.vertices[index + 3]},
-        });
+    // The mesh is identical for every tile: hand the builder the shared
+    // vectors built in generateMesh() so all terrain drawables reference one
+    // vertex and one index GPU buffer instead of uploading fresh copies.
+    const auto& sharedVertices = terrainMesh.sharedLayoutVertices;
+    if (!sharedVertices || !terrainMesh.sharedIndexes) {
+        Log::Error(Event::Render, "Terrain mesh shared buffers missing, cannot create drawable");
+        return nullptr;
     }
 
     auto vertexAttributes = context.createVertexAttributeArray();
@@ -1291,8 +1315,7 @@ std::unique_ptr<gfx::Drawable> RenderTerrain::createDrawableForTile(gfx::Context
                           terrainMesh.vertexCount, // vertex count
                           terrainMesh.indexCount); // index count
 
-    std::vector<uint16_t> indexData = terrainMesh.indices;
-    builder->setSegments(gfx::Triangles(), std::move(indexData), segments.data(), segments.size());
+    builder->setSegments(gfx::Triangles(), terrainMesh.sharedIndexes, segments.data(), segments.size());
 
     if (demTexture) {
         builder->setTexture(demTexture, 0); // slot 0 = demTexture

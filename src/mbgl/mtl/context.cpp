@@ -72,7 +72,41 @@ void Context::beginFrame() {
     backend.getThreadPool().runRenderJobs();
 }
 
-void Context::endFrame() {}
+void Context::endFrame() {
+    // Normally committed between the render-target pass and the main pass
+    // (flushOffscreenRenderWork from the renderer). If a frame encoded
+    // offscreen work through some other path, commit it now — dropping an
+    // encoded-but-uncommitted buffer would silently lose bakes that targets
+    // already counted as completed.
+    flushOffscreenRenderWork();
+}
+
+const MTLCommandBufferPtr& Context::offscreenCommandBuffer() {
+    if (!sharedOffscreenCommandBuffer) {
+        if (const auto& queue = backend.getCommandQueue()) {
+            sharedOffscreenCommandBuffer = NS::RetainPtr(queue->commandBuffer());
+        }
+    }
+    return sharedOffscreenCommandBuffer;
+}
+
+void Context::flushOffscreenRenderWork() {
+    if (sharedOffscreenCommandBuffer) {
+        lastFlushedOffscreenCommandBuffer = sharedOffscreenCommandBuffer;
+        sharedOffscreenCommandBuffer.reset();
+        lastFlushedOffscreenCommandBuffer->commit();
+    }
+}
+
+void Context::waitOffscreenRenderWork() {
+    // Covers both a still-pending buffer (commit it first) and one already
+    // committed earlier this frame but possibly still executing.
+    flushOffscreenRenderWork();
+    if (lastFlushedOffscreenCommandBuffer) {
+        lastFlushedOffscreenCommandBuffer->waitUntilCompleted();
+        lastFlushedOffscreenCommandBuffer.reset();
+    }
+}
 
 std::unique_ptr<gfx::CommandEncoder> Context::createCommandEncoder() {
     return std::make_unique<CommandEncoder>(*this);

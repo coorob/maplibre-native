@@ -507,6 +507,10 @@ void Renderer::Impl::render(const RenderTree& renderTree, const std::shared_ptr<
         drawable3DPass();
     }
     drawableTargetsPass();
+    // Submit the batched offscreen (drape) bakes before encoding the main
+    // pass: one commit for all targets, ordered ahead of the main pass by
+    // queue commit order (the main pass buffer is committed at present).
+    context.flushOffscreenRenderWork();
     commonClearPass();
     context.bindGlobalUniformBuffers(*parameters.renderPass);
     drawableOpaquePass();

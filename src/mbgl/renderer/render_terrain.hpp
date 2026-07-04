@@ -6,6 +6,8 @@
 #include <mbgl/tile/tile_id.hpp>
 #include <mbgl/gfx/vertex_buffer.hpp>
 #include <mbgl/gfx/index_buffer.hpp>
+#include <mbgl/gfx/vertex_vector.hpp>
+#include <mbgl/gfx/index_vector.hpp>
 #include <mbgl/renderer/render_terrain_drape_cache.hpp>
 #include <mbgl/renderer/layer_tweaker.hpp>
 #include <mbgl/util/geo.hpp>
@@ -314,6 +316,13 @@ public:
         size_t indexCount;
         std::vector<int16_t> vertices;  // Raw vertex data (x, y pairs as short2)
         std::vector<uint16_t> indices;  // Raw index data
+        // The same mesh drawn by every terrain tile, built once and handed to
+        // every drawable builder so the backend uploads ONE vertex and ONE
+        // index GPU buffer instead of a fresh ~330 KB copy per drawable
+        // (fork review #2 item 8). Type-erased because the layout-vertex
+        // struct is local to render_terrain.cpp.
+        std::shared_ptr<gfx::VertexVectorBase> sharedLayoutVertices;
+        gfx::IndexVectorBasePtr sharedIndexes;
     };
 
     const TerrainMesh& getMesh(gfx::Context& context);

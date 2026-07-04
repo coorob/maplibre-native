@@ -75,6 +75,12 @@ public:
     virtual void beginFrame() = 0;
     virtual void endFrame() = 0;
 
+    /// Submit any pending offscreen (render-to-texture) GPU work for execution
+    /// without blocking. Backends that batch offscreen passes into a shared
+    /// command buffer (Metal) override this; called between the render-target
+    /// pass and the main pass so the batched work is ordered before it.
+    virtual void flushOffscreenRenderWork() {}
+
     /// Called at the end of a frame.
     virtual void performCleanup() = 0;
 
