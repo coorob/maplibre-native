@@ -865,6 +865,23 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
             binding.drapeReady = true;
             binding.drapeID = resolvedDrapeID;
             binding.drapeTexture = drape->getTexture();
+        } else if (const TerrainDrapeTargetPtr own = drapeCache.get(idealOS);
+                   own && own->getCompletedRenderCount() >= minCompletedDrapeRenders() && own->getTexture()) {
+            // No content-ready target anywhere (own, retired, or ancestor).
+            // Readiness requires a CONTENT layer group, so a far/leading-edge
+            // tile whose satellite imagery is still streaming — or a tile with
+            // no draped line crossing it — can sit "not ready" for seconds on
+            // a slow link, and skipping its mesh left a hole to the void
+            // backdrop (2026-07-04 flight telemetry: up to 49 of 112 cover
+            // tiles meshless at once). The tile's own target HAS baked
+            // (background + whatever content exists), so bind that: relief
+            // geometry in basemap colours beats a hole, and when the imagery
+            // lands the target rebakes in place — same texture object — so
+            // the surface sharpens with no rebinding. drapeReady stays false:
+            // the flat main pass is not suppressed by this tile and a
+            // content-ready texture still wins via the normal refresh path.
+            binding.drapeID = idealOS;
+            binding.drapeTexture = own->getTexture();
         }
         if (binding.drapeReady) {
             readyBindings++;
@@ -957,28 +974,43 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
                               " newDrapeReady=" + std::to_string(binding.drapeReady));
             }
             if (!binding.drapeReady) {
-                // The refreshed binding lost its drape — typically a source or
-                // ring upgrade whose new bake hasn't completed. Keep showing
-                // the existing drawable (its textures stay alive through the
-                // drawable's refs) instead of pruning to a hole; the refresh
-                // re-runs on a later frame once the drape is ready.
-                if (traceDrape) {
-                    Log::Info(Event::Render,
-                              "[KLATTRA DRAPE_TRACE] terrain-drawable-hold frame=" +
-                                  std::to_string(drapeTraceFrame) +
-                                  " ideal=" + klattraTileString(idealID) +
-                                  " source=" + klattraTileString(binding.sourceID) +
-                                  " reason=refresh-drape-not-ready");
+                // The refreshed binding lost its content-ready drape —
+                // typically a source or ring upgrade whose new bake hasn't
+                // completed. Keep showing the existing drawable (its textures
+                // stay alive through the drawable's refs) instead of
+                // downgrading to a background-only bake or pruning to a hole;
+                // the refresh re-runs on a later frame once a content-ready
+                // drape is back. Holding is only valid if a drawable actually
+                // EXISTS — a tile that entered the cover not-ready was never
+                // created, and holding its phantom left a permanent silent
+                // hole (the stored binding matched frame after frame, so
+                // creation never re-ran — 2026-07-04 flight telemetry).
+                bool hasExistingDrawable = false;
+                lg->visitDrawables([&](const gfx::Drawable& d) {
+                    if (!hasExistingDrawable && d.getTileID().has_value() && *d.getTileID() == idealID) {
+                        hasExistingDrawable = true;
+                    }
+                });
+                if (hasExistingDrawable) {
+                    if (traceDrape) {
+                        Log::Info(Event::Render,
+                                  "[KLATTRA DRAPE_TRACE] terrain-drawable-hold frame=" +
+                                      std::to_string(drapeTraceFrame) +
+                                      " ideal=" + klattraTileString(idealID) +
+                                      " source=" + klattraTileString(binding.sourceID) +
+                                      " reason=refresh-drape-not-ready");
+                    }
+                    ++drawableHolds;
+                    drawableBackedTiles.insert(idealID);
+                    continue;
                 }
-                ++drawableHolds;
-                drawableBackedTiles.insert(idealID);
-                continue;
+            } else {
+                lg->removeDrawablesIf([&idealID](gfx::Drawable& d) {
+                    return d.getTileID().has_value() && *d.getTileID() == idealID;
+                });
             }
-            lg->removeDrawablesIf([&idealID](gfx::Drawable& d) {
-                return d.getTileID().has_value() && *d.getTileID() == idealID;
-            });
         }
-        if (!binding.drapeReady) {
+        if (!binding.drapeTexture) {
             ++drawableSkipsNotReady;
             klattraTrace("terrain drawable-skip ideal=" + klattraTileString(idealID) +
                          " source=" + klattraTileString(binding.sourceID) +
@@ -1453,8 +1485,11 @@ std::unique_ptr<gfx::Drawable> RenderTerrain::createDrawableForTile(gfx::Context
     // Bind the resolved drape texture as the surface colour input. Usually
     // this is the ideal tile's own target, but during zoom-in it can be a
     // ready ancestor target with binding.drapeTL / binding.drapeScale
-    // remapping the child's UVs into the parent sub-rect.
-    if (binding.drapeReady && binding.drapeTexture) {
+    // remapping the child's UVs into the parent sub-rect. A not-content-ready
+    // texture (own target baked with background only, imagery still
+    // streaming) is intentionally accepted — relief in basemap colours beats
+    // a hole, and the target rebakes in place when content arrives.
+    if (binding.drapeTexture) {
         if (klattraLogDrapeTrace()) {
             auto drape = binding.drapeID ? drapeCache.get(*binding.drapeID) : nullptr;
             Log::Info(Event::Render,
