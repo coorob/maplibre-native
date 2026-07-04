@@ -1207,6 +1207,38 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
         } else if (++stillUpdates >= 3 && !dumpedThisStillness) {
             dumpedThisStillness = true;
             const Size sizePx = state.getSize();
+            // Measure the LIVE frustum: unproject the four far-plane clip
+            // corners through the same inverse projection the tile cover
+            // culls against, and report each corner's ground distance from
+            // the map centre. No theory — this is where the far plane
+            // actually is this frame.
+            std::string farCornersKm;
+            {
+                const mat4& invProj = state.getInvProjectionMatrix();
+                const double worldSize = Projection::worldSize(state.getScale());
+                const double centerLatRad = dumpCenter.latitude() * M_PI / 180.0;
+                const double mPerWorldPx = std::cos(centerLatRad) * 2.0 * M_PI * util::EARTH_RADIUS_M / worldSize;
+                const double centerWX = (dumpCenter.longitude() + 180.0) / 360.0 * worldSize;
+                const double centerWY =
+                    (0.5 - std::log(std::tan(M_PI / 4.0 + centerLatRad / 2.0)) / (2.0 * M_PI)) * worldSize;
+                for (const auto& [cx, cy] : {std::pair<double, double>{-1.0, 1.0},
+                                             std::pair<double, double>{1.0, 1.0},
+                                             std::pair<double, double>{-1.0, -1.0},
+                                             std::pair<double, double>{1.0, -1.0}}) {
+                    const vec4 clip{{cx, cy, 1.0, 1.0}};
+                    vec4 world;
+                    matrix::transformMat4(world, clip, invProj);
+                    if (std::abs(world[3]) < 1e-12) {
+                        farCornersKm += " inf";
+                        continue;
+                    }
+                    const double wx = world[0] / world[3];
+                    const double wy = world[1] / world[3];
+                    const double distKm = std::hypot(wx - centerWX, wy - centerWY) * mPerWorldPx / 1000.0;
+                    if (!farCornersKm.empty()) farCornersKm += ",";
+                    farCornersKm += std::to_string(distKm);
+                }
+            }
             Log::Warning(Event::Render,
                          "[KLATTRA DUMP] begin size=" + std::to_string(sizePx.width) + "x" +
                              std::to_string(sizePx.height) + " zoom=" + std::to_string(state.getZoom()) +
@@ -1215,6 +1247,7 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
                              " lat=" + std::to_string(dumpCenter.latitude()) +
                              " lon=" + std::to_string(dumpCenter.longitude()) +
                              " fov=" + std::to_string(state.getFieldOfView()) +
+                             " farCornersKm=" + farCornersKm +
                              " ideals=" + std::to_string(currentIdealIDs.size()) +
                              " bindings=" + std::to_string(currentBindings.size()) +
                              " drawables=" + std::to_string(lg->getDrawableCount()));
