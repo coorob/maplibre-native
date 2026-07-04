@@ -323,8 +323,15 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
     // mature terrain renderers: show a cached parent immediately, sharpen to
     // the child only after it has completed.
     std::unordered_set<OverscaledTileID> currentDrapeIDs = currentIdealIDs;
+    // Default 1: bake a ring of targets just outside the visible cover so a
+    // moving camera reaches tiles whose drape is already ready. With the
+    // per-target GPU waits gone (perf batch), frames present fast enough to
+    // expose the bake window at the leading edge as black/blurry tiles —
+    // the ring is what hides it. Ring targets rank as far in the
+    // distance-ranked budgets, so they stay at the small end of the size
+    // buckets.
     static const uint32_t drapeOverscanTiles =
-        klattraEnvTilePadding("KLATTRA_DRAPE_OVERSCAN_TILES", 0);
+        klattraEnvTilePadding("KLATTRA_DRAPE_OVERSCAN_TILES", 1);
     klattraAddDrapeOverscan(currentDrapeIDs, currentIdealIDs, drapeOverscanTiles);
     const std::vector<OverscaledTileID> exactAndOverscanDrapeIDs(currentDrapeIDs.begin(),
                                                                  currentDrapeIDs.end());
@@ -917,6 +924,22 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
                               " newDrapeTexture=" + klattraTexturePtrString(binding.drapeTexture) +
                               " oldDrapeReady=" + std::to_string(existing->second.drapeReady) +
                               " newDrapeReady=" + std::to_string(binding.drapeReady));
+            }
+            if (!binding.drapeReady) {
+                // The refreshed binding lost its drape — typically a source or
+                // ring upgrade whose new bake hasn't completed. Keep showing
+                // the existing drawable (its textures stay alive through the
+                // drawable's refs) instead of pruning to a hole; the refresh
+                // re-runs on a later frame once the drape is ready.
+                if (traceDrape) {
+                    Log::Info(Event::Render,
+                              "[KLATTRA DRAPE_TRACE] terrain-drawable-hold frame=" +
+                                  std::to_string(drapeTraceFrame) +
+                                  " ideal=" + klattraTileString(idealID) +
+                                  " source=" + klattraTileString(binding.sourceID) +
+                                  " reason=refresh-drape-not-ready");
+                }
+                continue;
             }
             lg->removeDrawablesIf([&idealID](gfx::Drawable& d) {
                 return d.getTileID().has_value() && *d.getTileID() == idealID;
