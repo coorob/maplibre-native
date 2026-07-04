@@ -558,6 +558,16 @@ std::unique_ptr<RenderTree> RenderOrchestrator::createRenderTree(
         renderTreeParameters->symbolFadeChange = placementController.getPlacement()->symbolFadeChange(
             updateParameters->timePoint);
         renderTreeParameters->needsRepaint = hasTransitions(updateParameters->timePoint);
+        // Drape bakes, cap-deferred resizes, and first-bake texture waits
+        // only progress on rendered frames. Without this, a static camera
+        // (paused flyover) freezes the drape backlog on screen — the holes
+        // stayed until an external event (screenshot flash) forced frames
+        // (2026-07-04 device finding). The flag self-extinguishes once the
+        // backlog drains, so an idle map still idles.
+        if (!renderTreeParameters->needsRepaint && renderTerrain && renderTerrain->isEnabled() &&
+            renderTerrain->hasPendingDrapeWork()) {
+            renderTreeParameters->needsRepaint = true;
+        }
     } else {
         MLN_TRACE_ZONE(placement);
 

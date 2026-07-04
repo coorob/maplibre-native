@@ -485,6 +485,7 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
         // picked up on following frames (0 = uncapped).
         static const uint32_t maxResizesPerFrame = klattraEnvTileCount("KLATTRA_DRAPE_MAX_RESIZES_PER_FRAME", 3);
         uint32_t resizesThisFrame = 0;
+        drapeWorkPending = false;
         for (const auto& tileID : currentDrapeIDs) {
             const int32_t targetSize = drapeTargetSizeForTile(tileID);
             const Size desiredSize{static_cast<uint32_t>(targetSize), static_cast<uint32_t>(targetSize)};
@@ -494,27 +495,32 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
                 // demotions release the big target again — without them, long
                 // pans accumulate near-ring targets until jetsam. The retired
                 // target keeps rendering until its successor bakes.
-                if (existingSize != desiredSize &&
-                    (maxResizesPerFrame == 0 || resizesThisFrame < maxResizesPerFrame)) {
-                    resizesThisFrame++;
-                    auto oldTarget = drapeCache.take(tileID);
-                    if (klattraDrapeTargetReady(oldTarget)) {
-                        retiredDrapeTargetsByTile[tileID] = oldTarget;
+                if (existingSize != desiredSize) {
+                    if (maxResizesPerFrame == 0 || resizesThisFrame < maxResizesPerFrame) {
+                        resizesThisFrame++;
+                        auto oldTarget = drapeCache.take(tileID);
+                        if (klattraDrapeTargetReady(oldTarget)) {
+                            retiredDrapeTargetsByTile[tileID] = oldTarget;
+                        } else {
+                            retiredDrapeTargetsByTile.erase(tileID);
+                        }
+                        if (traceDrape) {
+                            Log::Info(Event::Render,
+                                      "[KLATTRA DRAPE_TRACE] cache-resize frame=" + std::to_string(drapeTraceFrame) +
+                                          " tile=" + klattraTileString(tileID) +
+                                          " oldSize=" + std::to_string(existingSize.width) + "x" +
+                                              std::to_string(existingSize.height) +
+                                          " newSize=" + std::to_string(desiredSize.width) + "x" +
+                                              std::to_string(desiredSize.height) +
+                                          " retiredReady=" + std::to_string(klattraDrapeTargetReady(oldTarget)) +
+                                          " stableFrames=" + std::to_string(stableDrapeCoverFrames));
+                        }
+                        changes.emplace_back(std::make_unique<RemoveRenderTargetRequest>(oldTarget));
                     } else {
-                        retiredDrapeTargetsByTile.erase(tileID);
+                        // Over the per-frame cap — this tile's resize (and
+                        // re-bake) happens on a LATER frame, so one must come.
+                        drapeWorkPending = true;
                     }
-                    if (traceDrape) {
-                        Log::Info(Event::Render,
-                                  "[KLATTRA DRAPE_TRACE] cache-resize frame=" + std::to_string(drapeTraceFrame) +
-                                      " tile=" + klattraTileString(tileID) +
-                                      " oldSize=" + std::to_string(existingSize.width) + "x" +
-                                          std::to_string(existingSize.height) +
-                                      " newSize=" + std::to_string(desiredSize.width) + "x" +
-                                          std::to_string(desiredSize.height) +
-                                      " retiredReady=" + std::to_string(klattraDrapeTargetReady(oldTarget)) +
-                                      " stableFrames=" + std::to_string(stableDrapeCoverFrames));
-                    }
-                    changes.emplace_back(std::make_unique<RemoveRenderTargetRequest>(oldTarget));
                 }
             }
 
@@ -522,6 +528,11 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
             auto target = drapeCache.getOrCreate(context, tileID, desiredSize);
             if (!wasAllocated && target) {
                 changes.emplace_back(std::make_unique<AddRenderTargetRequest>(target));
+            }
+            if (target && target->getCompletedRenderCount() < minCompletedDrapeRenders()) {
+                // Allocated but not yet baked even once — its first bake only
+                // runs on a rendered frame.
+                drapeWorkPending = true;
             }
         }
         // Retain ready out-of-cover ancestors as fallback content, but CAP
@@ -1128,6 +1139,12 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
     // (rendered pyramid): ideals != backed means on-screen holes right now;
     // emptyDEM counts flat placeholder tiles (origin-level slabs after the
     // 2026-07-04 offset fix). Opt out: KLATTRA_LOG_COVER_SUMMARY=0.
+    // Texture-less skips (a tile's first frames before its target's first
+    // bake) resolve only on a rendered frame — keep frames coming.
+    if (drawableSkipsNotReady > 0) {
+        drapeWorkPending = true;
+    }
+
     if (klattraLogCoverSummary()) {
         static std::chrono::steady_clock::time_point lastLog{};
         const auto now = std::chrono::steady_clock::now();
@@ -1146,7 +1163,8 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
                              " drapeFallback=" + std::to_string(fallbackDrapeBindings) +
                              " holds=" + std::to_string(drawableHolds) +
                              " skipsNotReady=" + std::to_string(drawableSkipsNotReady) +
-                             " drawables=" + std::to_string(lg->getDrawableCount()));
+                             " drawables=" + std::to_string(lg->getDrawableCount()) +
+                             " pending=" + std::to_string(drapeWorkPending ? 1 : 0));
         }
     }
 }
@@ -1598,6 +1616,7 @@ void RenderTerrain::clearRenderState(UniqueChangeRequestVec& changes) {
         lg->removeDrawablesIf([](gfx::Drawable&) { return true; });
     }
 
+    drapeWorkPending = false;
     currentBindings.clear();
     demImagesByTile.clear();
     demTexturesByTile.clear();

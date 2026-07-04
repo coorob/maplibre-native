@@ -151,6 +151,16 @@ public:
     bool isEnabled() const;
 
     /**
+     * @brief True while the drape system has work that only progresses on
+     * rendered frames — unbaked targets, cap-deferred resizes, or cover
+     * tiles still waiting for their first drape texture. The orchestrator
+     * folds this into needsRepaint so a static camera cannot freeze the
+     * backlog on screen (paused-flyover voids that only filled when a
+     * screenshot forced frames, 2026-07-04).
+     */
+    bool hasPendingDrapeWork() const noexcept { return drapeWorkPending; }
+
+    /**
      * @brief Get the terrain implementation
      */
     const Immutable<style::Terrain::Impl>& getImpl() const { return impl; }
@@ -440,6 +450,11 @@ private:
     // replacement ideals to become drawable-backed (zoom-level transitions).
     // See the prune block in updateDrapeTargets.
     std::unordered_map<OverscaledTileID, uint32_t> pruneHoldAgeByTile;
+
+    // Set each update: drape work exists that only progresses on rendered
+    // frames (unbaked targets, cap-deferred resizes, texture-less cover
+    // tiles). Read by the orchestrator via hasPendingDrapeWork().
+    bool drapeWorkPending = false;
 
     // Maximum stable-view pixel size of each close-zoom drape target. Moving
     // cameras allocate smaller close targets first and upgrade to this after
