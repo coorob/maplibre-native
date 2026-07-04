@@ -88,6 +88,16 @@ void klattraTrace(const std::string& message) {
     std::fprintf(stderr, "[KLATTRA_TRACE] %s\n", message.c_str());
 }
 
+// Frame-dump emitter: Warning for the device syslog AND the stderr trace
+// path for the simulator, where mbgl Log::Warning never reaches the unified
+// log (2026-07-04 finding: klattraTrace lines flow, Warning lines vanish).
+void klattraDumpEmit(const std::string& message) {
+    Log::Warning(Event::Render, message);
+    if (std::getenv("KLATTRA_TRACE_STDERR") != nullptr) {
+        fprintf(stderr, "[KLATTRA_TRACE] %s\n", message.c_str());
+    }
+}
+
 std::string klattraTileString(const OverscaledTileID& id) {
     return "z" + std::to_string(id.canonical.z) +
            "/" + std::to_string(id.canonical.x) +
@@ -1239,7 +1249,7 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
                     farCornersKm += std::to_string(distKm);
                 }
             }
-            Log::Warning(Event::Render,
+            klattraDumpEmit(
                          "[KLATTRA DUMP] begin size=" + std::to_string(sizePx.width) + "x" +
                              std::to_string(sizePx.height) + " zoom=" + std::to_string(state.getZoom()) +
                              " pitchDeg=" + std::to_string(state.getPitch() * 180.0 / M_PI) +
@@ -1272,8 +1282,7 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
                     maxY = std::max(maxY, sc.y);
                 }
                 const TerrainDrapeTargetPtr dumpTarget = drapeCache.get(idealID);
-                Log::Warning(
-                    Event::Render,
+                klattraDumpEmit(
                     "[KLATTRA DUMP] tile=" + klattraTileString(idealID) +
                         " src=" + klattraTileString(binding.sourceID) +
                         " empty=" + std::to_string(binding.usedEmptyDEM) +
@@ -1290,7 +1299,7 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
                         std::to_string(static_cast<int>(maxY)) +
                         " behind=" + std::to_string(behindCamera ? 1 : 0));
             }
-            Log::Warning(Event::Render, "[KLATTRA DUMP] end");
+            klattraDumpEmit("[KLATTRA DUMP] end");
         }
         if (stillUpdates > 0 && !dumpedThisStillness) {
             // Keep frames alive until the dump for this stillness has fired —
