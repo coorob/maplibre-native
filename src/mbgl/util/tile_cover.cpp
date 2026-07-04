@@ -2,14 +2,18 @@
 #include <mbgl/util/bounding_volumes.hpp>
 #include <mbgl/util/constants.hpp>
 #include <mbgl/util/interpolate.hpp>
+#include <mbgl/util/logging.hpp>
 #include <mbgl/util/projection.hpp>
 #include <mbgl/util/tile_coordinate.hpp>
 #include <mbgl/util/tile_cover.hpp>
 #include <mbgl/util/tile_cover_impl.hpp>
 
 #include <algorithm>
+#include <array>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
+#include <cstdlib>
 #include <functional>
 #include <list>
 #include <unordered_set>
@@ -19,6 +23,27 @@ using namespace std::numbers;
 namespace mbgl {
 
 namespace {
+
+// Once-per-second cap/cover summary at Warning level (the store binary's
+// native log filter passes Warning). Only capped covers log — in practice
+// that is the raster-dem terrain source. Opt out: KLATTRA_LOG_COVER_SUMMARY=0.
+bool klattraLogCoverSummary() {
+    static const bool enabled = [] {
+        const char* v = std::getenv("KLATTRA_LOG_COVER_SUMMARY");
+        return !(v && (*v == '0' || *v == 'f' || *v == 'F'));
+    }();
+    return enabled;
+}
+
+std::string klattraZoomHistogramString(const std::array<uint32_t, 26>& counts) {
+    std::string out;
+    for (std::size_t z = 0; z < counts.size(); ++z) {
+        if (!counts[z]) continue;
+        if (!out.empty()) out += ' ';
+        out += 'z' + std::to_string(z) + ':' + std::to_string(counts[z]);
+    }
+    return out.empty() ? std::string("-") : out;
+}
 
 using ScanLine = const std::function<void(int32_t x0, int32_t x1, int32_t y)>;
 
@@ -409,6 +434,39 @@ std::vector<OverscaledTileID> tileCover(const TileCoverParameters& state,
         ids.reserve(state.tileCoverMaxTiles);
         for (std::size_t i = 0; i < state.tileCoverMaxTiles; ++i) {
             ids.push_back(ranked[i].id);
+        }
+
+        // Cut telemetry: frustum-cover tiles cut = real on-screen holes;
+        // dilation-only cuts are harmless padding. 1 Hz, Warning so the
+        // release log filter passes it.
+        if (klattraLogCoverSummary()) {
+            static std::chrono::steady_clock::time_point lastLog{};
+            const auto now = std::chrono::steady_clock::now();
+            if (now - lastLog >= std::chrono::seconds(1)) {
+                lastLog = now;
+                std::array<uint32_t, 26> keptByZ{};
+                std::array<uint32_t, 26> cutByZ{};
+                uint32_t frustumCut = 0;
+                for (std::size_t i = 0; i < ranked.size(); ++i) {
+                    const auto cz = std::min<std::size_t>(ranked[i].id.canonical.z, keptByZ.size() - 1);
+                    if (i < state.tileCoverMaxTiles) {
+                        ++keptByZ[cz];
+                    } else {
+                        ++cutByZ[cz];
+                        if (!ranked[i].dilationOnly) {
+                            ++frustumCut;
+                        }
+                    }
+                }
+                Log::Warning(Event::Render,
+                             "[KLATTRA COVER] pre=" + std::to_string(ranked.size()) +
+                                 " cap=" + std::to_string(state.tileCoverMaxTiles) +
+                                 " frustumCut=" + std::to_string(frustumCut) +
+                                 " keptByZ=" + klattraZoomHistogramString(keptByZ) +
+                                 " cutByZ=" + klattraZoomHistogramString(cutByZ) +
+                                 " pitchDeg=" + std::to_string(transform.getPitch() * 180.0 / pi) +
+                                 " idealZ=" + std::to_string(static_cast<int>(z)));
+            }
         }
     }
 

@@ -5,10 +5,13 @@
 #include <mbgl/geometry/dem_data.hpp>
 #include <mbgl/renderer/buckets/hillshade_bucket.hpp>
 #include <mbgl/renderer/tile_parameters.hpp>
+#include <mbgl/util/logging.hpp>
 #include <mbgl/util/tile_cover.hpp>
 #include <mbgl/util/math.hpp>
 
 #include <algorithm>
+#include <array>
+#include <chrono>
 #include <cstdlib>
 #include <cstddef>
 #include <numbers>
@@ -54,6 +57,26 @@ double klattraEnvTerrainLodPitchDeg() {
         return 40.0;
     }
     return std::clamp(parsed, 20.0, 60.0);
+}
+
+// Shared with tile_cover.cpp's cut telemetry (each file carries its own
+// copy — anonymous namespace). Opt out: KLATTRA_LOG_COVER_SUMMARY=0.
+bool klattraLogCoverSummary() {
+    static const bool enabled = [] {
+        const char* v = std::getenv("KLATTRA_LOG_COVER_SUMMARY");
+        return !(v && (*v == '0' || *v == 'f' || *v == 'F'));
+    }();
+    return enabled;
+}
+
+std::string klattraZoomHistogramString(const std::array<uint32_t, 26>& counts) {
+    std::string out;
+    for (std::size_t z = 0; z < counts.size(); ++z) {
+        if (!counts[z]) continue;
+        if (!out.empty()) out += ' ';
+        out += 'z' + std::to_string(z) + ':' + std::to_string(counts[z]);
+    }
+    return out.empty() ? std::string("-") : out;
 }
 
 } // namespace
@@ -199,6 +222,34 @@ void RenderRasterDEMSource::updateInternal(const Tileset& tileset,
                            return std::make_unique<RasterDEMTile>(tileID, baseImpl->id, parameters, tileset, observer_);
                        });
     algorithm::updateTileMasks(tilePyramid.getRenderedTiles());
+
+    // 1 Hz rendered-cover summary at Warning (passes the release log
+    // filter). Pairs with [KLATTRA COVER] (emission/cap side) and
+    // [KLATTRA TERRAIN] (drawable side): rendered-vs-kept gaps here mean
+    // tiles requested but not yet (or never) loaded. Opt out:
+    // KLATTRA_LOG_COVER_SUMMARY=0.
+    if (klattraLogCoverSummary()) {
+        static std::chrono::steady_clock::time_point lastLog{};
+        const auto now = std::chrono::steady_clock::now();
+        if (now - lastLog >= std::chrono::seconds(1)) {
+            lastLog = now;
+            std::array<uint32_t, 26> byZ{};
+            std::size_t rendered = 0;
+            for (const auto& [renderedID, tileRef] : tilePyramid.getRenderedTiles()) {
+                (void)tileRef;
+                ++byZ[std::min<std::size_t>(renderedID.canonical.z, byZ.size() - 1)];
+                ++rendered;
+            }
+            Log::Warning(Event::Render,
+                         "[KLATTRA DEM] rendered=" + std::to_string(rendered) +
+                             " byZ=" + klattraZoomHistogramString(byZ) +
+                             " zoom=" + std::to_string(parameters.transformState.getZoom()) +
+                             " pitchDeg=" +
+                             std::to_string(parameters.transformState.getPitch() * 180.0 / std::numbers::pi) +
+                             " lodFloor=" + std::to_string(static_cast<int>(demParameters.tileLodMinZoom)) +
+                             " cap=" + std::to_string(demParameters.tileCoverMaxTiles));
+        }
+    }
 }
 
 void RenderRasterDEMSource::onTileChanged(Tile& tile) {

@@ -38,7 +38,13 @@ struct alignas(16) TerrainDrawableUBO {
     /* 76 */ float meters_per_tile;
     /* 80 */ std::array<float, 2> drape_tl;
     /* 88 */ float drape_scale;
-    /* 92 */ float pad1;
+    // Multiplier on the layer-level elevation_offset: 1 normally, 0 for
+    // empty-DEM placeholder bindings. The offset re-anchors the mesh so the
+    // origin elevation renders at z=0; a no-data tile's flat 0 m plane must
+    // NOT get that shift or it sinks origin×exaggeration below its
+    // neighbors and shows as a black pit from above / beige slab side-on
+    // (fork review 2026-07-03 finding 11).
+    /* 92 */ float elevation_offset_scale;
     /* 96 */
 };
 static_assert(sizeof(TerrainDrawableUBO) == 96);

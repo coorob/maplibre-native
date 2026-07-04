@@ -35,6 +35,8 @@
 #include <mbgl/util/mat4.hpp>
 
 #include <algorithm>
+#include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <cstddef>
@@ -53,6 +55,27 @@ namespace {
 bool klattraLogDrapeTrace() {
     static const bool enabled = std::getenv("KLATTRA_LOG_DRAPE_TRACE") != nullptr;
     return enabled;
+}
+
+// Shared with tile_cover.cpp / render_raster_dem_source.cpp telemetry (each
+// file carries its own copy — anonymous namespace). Opt out:
+// KLATTRA_LOG_COVER_SUMMARY=0.
+bool klattraLogCoverSummary() {
+    static const bool enabled = [] {
+        const char* v = std::getenv("KLATTRA_LOG_COVER_SUMMARY");
+        return !(v && (*v == '0' || *v == 'f' || *v == 'F'));
+    }();
+    return enabled;
+}
+
+std::string klattraZoomHistogramString(const std::array<uint32_t, 26>& counts) {
+    std::string out;
+    for (std::size_t z = 0; z < counts.size(); ++z) {
+        if (!counts[z]) continue;
+        if (!out.empty()) out += ' ';
+        out += 'z' + std::to_string(z) + ':' + std::to_string(counts[z]);
+    }
+    return out.empty() ? std::string("-") : out;
 }
 
 bool klattraTraceStderr() {
@@ -887,6 +910,8 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
     // leaving tile's drawable until the ideals covering it appear here.
     std::unordered_set<OverscaledTileID> drawableBackedTiles;
     drawableBackedTiles.reserve(nextBindings.size());
+    uint32_t drawableHolds = 0;
+    uint32_t drawableSkipsNotReady = 0;
     for (const auto& [idealID, binding] : nextBindings) {
         if (auto existing = currentBindings.find(idealID); existing != currentBindings.end()) {
             if (existing->second.sourceID == binding.sourceID &&
@@ -945,6 +970,7 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
                                   " source=" + klattraTileString(binding.sourceID) +
                                   " reason=refresh-drape-not-ready");
                 }
+                ++drawableHolds;
                 drawableBackedTiles.insert(idealID);
                 continue;
             }
@@ -953,6 +979,7 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
             });
         }
         if (!binding.drapeReady) {
+            ++drawableSkipsNotReady;
             klattraTrace("terrain drawable-skip ideal=" + klattraTileString(idealID) +
                          " source=" + klattraTileString(binding.sourceID) +
                          " emptyDEM=" + std::to_string(binding.usedEmptyDEM) +
@@ -1062,6 +1089,33 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
                       " demTextures=" + std::to_string(demTexturesByTile.size()) +
                       " drapeTargets=" + std::to_string(drapeCache.size()) +
                       " terrainDrawables=" + std::to_string(lg->getDrawableCount()));
+    }
+
+    // 1 Hz drawable-side summary at Warning (passes the release log filter),
+    // pairing with [KLATTRA COVER] (emission/cap) and [KLATTRA DEM]
+    // (rendered pyramid): ideals != backed means on-screen holes right now;
+    // emptyDEM counts flat placeholder tiles (origin-level slabs after the
+    // 2026-07-04 offset fix). Opt out: KLATTRA_LOG_COVER_SUMMARY=0.
+    if (klattraLogCoverSummary()) {
+        static std::chrono::steady_clock::time_point lastLog{};
+        const auto now = std::chrono::steady_clock::now();
+        if (now - lastLog >= std::chrono::seconds(1)) {
+            lastLog = now;
+            std::array<uint32_t, 26> byZ{};
+            for (const auto& idealID : currentIdealIDs) {
+                ++byZ[std::min<std::size_t>(idealID.canonical.z, byZ.size() - 1)];
+            }
+            Log::Warning(Event::Render,
+                         "[KLATTRA TERRAIN] ideals=" + std::to_string(currentIdealIDs.size()) +
+                             " byZ=" + klattraZoomHistogramString(byZ) +
+                             " backed=" + std::to_string(drawableBackedTiles.size()) +
+                             " ready=" + std::to_string(readyBindings) +
+                             " emptyDEM=" + std::to_string(emptyDemBindings) +
+                             " drapeFallback=" + std::to_string(fallbackDrapeBindings) +
+                             " holds=" + std::to_string(drawableHolds) +
+                             " skipsNotReady=" + std::to_string(drawableSkipsNotReady) +
+                             " drawables=" + std::to_string(lg->getDrawableCount()));
+        }
     }
 }
 

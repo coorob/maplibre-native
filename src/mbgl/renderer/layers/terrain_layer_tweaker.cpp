@@ -227,12 +227,19 @@ void TerrainLayerTweaker::execute(LayerGroupBase& layerGroup, const PaintParamet
         float metersPerTile = 1.0f;
         std::array<float, 2> drapeTL{{0.0f, 0.0f}};
         float drapeScale = 1.0f;
+        float elevationOffsetScale = 1.0f;
         if (const auto* binding = terrain->getDEMBinding(*drawable.getTileID())) {
             demTL = binding->demTL;
             demScale = binding->demScale;
             metersPerTile = metersPerTileAtCenter(binding->sourceID.canonical);
             drapeTL = binding->drapeTL;
             drapeScale = binding->drapeScale;
+            // Empty-DEM placeholder: keep the flat plane at origin level
+            // instead of sinking it by the (negative) elevation_offset —
+            // fork review 2026-07-03 finding 11 (black pit / beige slab).
+            if (binding->usedEmptyDEM) {
+                elevationOffsetScale = 0.0f;
+            }
             if (binding->drapeID) {
                 if (auto drape = terrain->getDrapeTarget(*binding->drapeID)) {
                     drape->inspectDebugPixels();
@@ -299,7 +306,7 @@ void TerrainLayerTweaker::execute(LayerGroupBase& layerGroup, const PaintParamet
             .meters_per_tile = metersPerTile,
             .drape_tl = drapeTL,
             .drape_scale = drapeScale,
-            .pad1 = 0.0f
+            .elevation_offset_scale = elevationOffsetScale
         };
 
 #if !MLN_UBO_CONSOLIDATION

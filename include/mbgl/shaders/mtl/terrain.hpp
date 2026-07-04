@@ -23,7 +23,7 @@ struct alignas(16) TerrainDrawableUBO {
     /* 76 */ float meters_per_tile;
     /* 80 */ float2 drape_tl;
     /* 88 */ float drape_scale;
-    /* 92 */ float pad1;
+    /* 92 */ float elevation_offset_scale;
     /* 96 */
 };
 static_assert(sizeof(TerrainDrawableUBO) == 96, "wrong size");
@@ -247,7 +247,8 @@ FragmentStage vertex vertexMain(thread const VertexStage vertx [[stage_in]],
     if (!terrainReliefValidElevation(elevationMeters)) {
         elevationMeters = 0.0;
     }
-    float elevation = elevationMeters * props.exaggeration + props.elevation_offset;
+    float elevation = elevationMeters * props.exaggeration +
+                      props.elevation_offset * drawable.elevation_offset_scale;
     // Drop skirt vertices well below sea level so the perimeter walls
     // reach under the basemap z=0 plane. 5000 m suffices for the entire
     // Sweden coverage's exaggerated mountains.

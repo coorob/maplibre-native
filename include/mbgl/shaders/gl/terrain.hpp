@@ -18,7 +18,7 @@ layout (std140) uniform TerrainDrawableUBO {
     highp float u_meters_per_tile;
     highp vec2 u_drape_tl;
     highp float u_drape_scale;
-    highp float u_pad1_drawable;
+    highp float u_elevation_offset_scale;
 };
 
 layout (std140) uniform TerrainEvaluatedPropsUBO {
@@ -96,7 +96,7 @@ void main() {
     // elevation_offset (in metres) lifts the mesh above z=0 so 2D
     // basemap layers (which render at z=0 in the main pass) don't
     // bleed through the lowest valleys.
-    float elevation = elevationMeters * u_exaggeration + u_elevation_offset;
+    float elevation = elevationMeters * u_exaggeration + u_elevation_offset * u_elevation_offset_scale;
     // Drop skirt vertices well below sea level so the perimeter walls
     // reach under the basemap z=0 plane.
     if (isSkirt) {
