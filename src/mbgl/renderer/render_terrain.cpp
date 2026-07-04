@@ -1167,6 +1167,105 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
                              " pending=" + std::to_string(drapeWorkPending ? 1 : 0));
         }
     }
+
+    // ---- KLATTRA FRAME DUMP -----------------------------------------------
+    // Fires once per camera-stillness period (a paused flyover): one Warning
+    // line per ideal binding with its full state AND its projected screen
+    // rect, plus a header carrying the complete camera state. A user
+    // screenshot taken during the same pause can then be attributed
+    // pixel-for-pixel: any frozen artifact region either maps to a specific
+    // tile line (inspect its state) or to NO tile (cover/frustum gap), and
+    // the header parameters are sufficient to replay the cover math offline.
+    // Statics are acceptable here: one active terrain per style in practice,
+    // and this is a diagnostic aid. Opt out: KLATTRA_FRAME_DUMP=0.
+    static const bool frameDumpEnabled = [] {
+        const char* v = std::getenv("KLATTRA_FRAME_DUMP");
+        return !(v && (*v == '0' || *v == 'f' || *v == 'F'));
+    }();
+    if (frameDumpEnabled) {
+        static double lastZoom = -1.0;
+        static double lastPitch = -1.0;
+        static double lastBearing = 999.0;
+        static double lastLat = 999.0;
+        static double lastLon = 999.0;
+        static uint32_t stillUpdates = 0;
+        static bool dumpedThisStillness = false;
+        const LatLng dumpCenter = state.getLatLng();
+        const bool cameraStill = std::abs(state.getZoom() - lastZoom) < 1e-9 &&
+                                 std::abs(state.getPitch() - lastPitch) < 1e-9 &&
+                                 std::abs(state.getBearing() - lastBearing) < 1e-9 &&
+                                 std::abs(dumpCenter.latitude() - lastLat) < 1e-9 &&
+                                 std::abs(dumpCenter.longitude() - lastLon) < 1e-9;
+        lastZoom = state.getZoom();
+        lastPitch = state.getPitch();
+        lastBearing = state.getBearing();
+        lastLat = dumpCenter.latitude();
+        lastLon = dumpCenter.longitude();
+        if (!cameraStill) {
+            stillUpdates = 0;
+            dumpedThisStillness = false;
+        } else if (++stillUpdates >= 3 && !dumpedThisStillness) {
+            dumpedThisStillness = true;
+            const Size sizePx = state.getSize();
+            Log::Warning(Event::Render,
+                         "[KLATTRA DUMP] begin size=" + std::to_string(sizePx.width) + "x" +
+                             std::to_string(sizePx.height) + " zoom=" + std::to_string(state.getZoom()) +
+                             " pitchDeg=" + std::to_string(state.getPitch() * 180.0 / M_PI) +
+                             " bearing=" + std::to_string(state.getBearing()) +
+                             " lat=" + std::to_string(dumpCenter.latitude()) +
+                             " lon=" + std::to_string(dumpCenter.longitude()) +
+                             " fov=" + std::to_string(state.getFieldOfView()) +
+                             " ideals=" + std::to_string(currentIdealIDs.size()) +
+                             " bindings=" + std::to_string(currentBindings.size()) +
+                             " drawables=" + std::to_string(lg->getDrawableCount()));
+            for (const auto& [idealID, binding] : currentBindings) {
+                const double tilesAtZ = std::ldexp(1.0, idealID.canonical.z);
+                double minX = 1e12, minY = 1e12, maxX = -1e12, maxY = -1e12;
+                bool behindCamera = false;
+                for (int corner = 0; corner < 4; ++corner) {
+                    const double xf = (idealID.canonical.x + (corner % 2)) / tilesAtZ;
+                    const double yf = (idealID.canonical.y + (corner / 2)) / tilesAtZ;
+                    const double lon = xf * 360.0 - 180.0;
+                    const double latRad = std::atan(std::sinh(M_PI * (1.0 - 2.0 * yf)));
+                    vec4 clip;
+                    const ScreenCoordinate sc =
+                        state.latLngToScreenCoordinate(LatLng{latRad * 180.0 / M_PI, lon}, clip);
+                    if (clip[3] <= 0.0) {
+                        behindCamera = true;
+                    }
+                    minX = std::min(minX, sc.x);
+                    maxX = std::max(maxX, sc.x);
+                    minY = std::min(minY, sc.y);
+                    maxY = std::max(maxY, sc.y);
+                }
+                const TerrainDrapeTargetPtr dumpTarget = drapeCache.get(idealID);
+                Log::Warning(
+                    Event::Render,
+                    "[KLATTRA DUMP] tile=" + klattraTileString(idealID) +
+                        " src=" + klattraTileString(binding.sourceID) +
+                        " empty=" + std::to_string(binding.usedEmptyDEM) +
+                        " ready=" + std::to_string(binding.drapeReady) +
+                        " fallback=" + std::to_string(binding.usedDrapeFallback) +
+                        " drape=" + (binding.drapeID ? klattraTileString(*binding.drapeID) : std::string("none")) +
+                        " tex=" + std::to_string(binding.drapeTexture ? 1 : 0) +
+                        " tgtCompleted=" + std::to_string(dumpTarget ? dumpTarget->getCompletedRenderCount() : 0) +
+                        " tgtGroups=" + std::to_string(dumpTarget ? dumpTarget->numLayerGroups() : 0) +
+                        " tgtContent=" + std::to_string(dumpTarget ? dumpTarget->numContentLayerGroups() : 0) +
+                        " scrX=" + std::to_string(static_cast<int>(minX)) + ".." +
+                        std::to_string(static_cast<int>(maxX)) +
+                        " scrY=" + std::to_string(static_cast<int>(minY)) + ".." +
+                        std::to_string(static_cast<int>(maxY)) +
+                        " behind=" + std::to_string(behindCamera ? 1 : 0));
+            }
+            Log::Warning(Event::Render, "[KLATTRA DUMP] end");
+        }
+        if (stillUpdates > 0 && !dumpedThisStillness) {
+            // Keep frames alive until the dump for this stillness has fired —
+            // without this, a pause with no pending drape work idles the loop
+            // before the third still update and the dump never emits.
+            drapeWorkPending = true;
+        }
+    }
 }
 
 float RenderTerrain::getElevation(const UnwrappedTileID& tileID, float x, float y) const {
