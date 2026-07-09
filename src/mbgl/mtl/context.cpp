@@ -257,6 +257,21 @@ MTLSamplerStatePtr Context::createMetalSamplerState(MTLSamplerDescriptorPtr samp
 }
 
 void Context::performCleanup() {
+    // KLATTRA diagnostics (2D black-flash hunt): a one-frame flash where the
+    // land layer stack goes missing shows up as a drawcall dip regardless of
+    // the underlying mechanism (pruned drawables, skipped groups, ...) —
+    // whereas black-CONTENT flashes keep the count flat. Log halvings.
+    if (klattraTraceStderr()) {
+        static int prevDrawCalls = 0;
+        if (prevDrawCalls > 40 && stats.numDrawCalls < prevDrawCalls / 2) {
+            fprintf(stderr,
+                    "[KLATTRA_TRACE] [KLATTRA FRAMEDIP] frame=%llu drawCalls=%d prev=%d\n",
+                    static_cast<unsigned long long>(diagFrameIndex_),
+                    stats.numDrawCalls,
+                    prevDrawCalls);
+        }
+        prevDrawCalls = stats.numDrawCalls;
+    }
     stats.numDrawCalls = 0;
     stats.numFrames++;
     clipMaskUniformsBufferUsed = false;

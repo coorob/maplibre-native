@@ -295,6 +295,23 @@ void Texture2D::bind(RenderPass& renderPass, int32_t location) {
         if (nullBindLogCount.fetch_add(1) < 3) {
             mbgl::Log::Error(mbgl::Event::Render, "Trying to bind null Metal texture!");
         }
+        // KLATTRA diagnostics: a nil-bound sampler slot reads BLACK on Apple
+        // GPUs, and the Log::Error above is swallowed by the simulator. Echo
+        // to stderr with enough identity to correlate with visible flashes.
+        static const bool trace = std::getenv("KLATTRA_TRACE_STDERR") != nullptr;
+        if (trace) {
+            static std::atomic<int> diagNullBudget{400};
+            if (diagNullBudget.fetch_sub(1) > 0) {
+                fprintf(stderr,
+                        "[KLATTRA_TRACE] [KLATTRA TEXBIND] nil-bind name=%s size=%ux%u loc=%d dirty=%d frame=%llu\n",
+                        diagGetName().empty() ? "-" : diagGetName().c_str(),
+                        size.width,
+                        size.height,
+                        location,
+                        textureDirty ? 1 : 0,
+                        static_cast<unsigned long long>(context.diagFrameIndex()));
+            }
+        }
     }
 
     // KLATTRA diagnostics (2D black-flash hunt): a render-target colour
