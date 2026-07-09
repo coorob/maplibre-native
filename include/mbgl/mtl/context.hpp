@@ -187,6 +187,9 @@ private:
     MTLCommandBufferPtr lastFlushedOffscreenCommandBuffer;
     uint64_t diagFrameIndex_ = 0;
     bool offscreenFlushedThisFrame_ = false;
+    uint64_t diagLastCleanupFrame_ = 0;
+    int diagFrameDrawTotal_ = 0;
+    int diagPrevFrameDrawCalls_ = 0;
 
     std::optional<BufferResource> emptyBuffer;
     std::optional<BufferResource> tileVertexBuffer;

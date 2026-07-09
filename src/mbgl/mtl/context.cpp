@@ -260,17 +260,27 @@ void Context::performCleanup() {
     // KLATTRA diagnostics (2D black-flash hunt): a one-frame flash where the
     // land layer stack goes missing shows up as a drawcall dip regardless of
     // the underlying mechanism (pruned drawables, skipped groups, ...) —
-    // whereas black-CONTENT flashes keep the count flat. Log halvings.
+    // whereas black-CONTENT flashes keep the count flat.
+    //
+    // performCleanup can run more than once within a frame index (traska.22
+    // finding: alternating cur=1/prev=N artifact), so aggregate per frame
+    // index and evaluate only when the index advances. All state is
+    // per-instance — a second context must not garble the comparison.
     if (klattraTraceStderr()) {
-        static int prevDrawCalls = 0;
-        if (prevDrawCalls > 40 && stats.numDrawCalls < prevDrawCalls / 2) {
-            fprintf(stderr,
-                    "[KLATTRA_TRACE] [KLATTRA FRAMEDIP] frame=%llu drawCalls=%d prev=%d\n",
-                    static_cast<unsigned long long>(diagFrameIndex_),
-                    stats.numDrawCalls,
-                    prevDrawCalls);
+        if (diagLastCleanupFrame_ != diagFrameIndex_) {
+            if (diagPrevFrameDrawCalls_ > 40 && diagFrameDrawTotal_ < diagPrevFrameDrawCalls_ / 2) {
+                fprintf(stderr,
+                        "[KLATTRA_TRACE] [KLATTRA FRAMEDIP] ctx=%p frame=%llu drawCalls=%d prev=%d\n",
+                        static_cast<void*>(this),
+                        static_cast<unsigned long long>(diagLastCleanupFrame_),
+                        diagFrameDrawTotal_,
+                        diagPrevFrameDrawCalls_);
+            }
+            diagPrevFrameDrawCalls_ = diagFrameDrawTotal_;
+            diagFrameDrawTotal_ = 0;
+            diagLastCleanupFrame_ = diagFrameIndex_;
         }
-        prevDrawCalls = stats.numDrawCalls;
+        diagFrameDrawTotal_ += stats.numDrawCalls;
     }
     stats.numDrawCalls = 0;
     stats.numFrames++;
