@@ -456,6 +456,26 @@ std::unique_ptr<RenderTree> RenderOrchestrator::createRenderTree(
         // Update all layers with their new renderability status, if it changed.
         for (size_t i = 0; i < updateList.size(); i++) {
             if (orderedLayers[i].get().isLayerRenderable() != updateList[i]) {
+                // KLATTRA diagnostics (2D black-flash hunt): every flap of a
+                // layer's renderability removes/re-adds its layer group — a
+                // land-covering layer flapping is a one-frame black flash.
+                // Print the full reason tuple at the moment of the change.
+                static const bool klattraTrace = std::getenv("KLATTRA_TRACE_STDERR") != nullptr;
+                if (klattraTrace) {
+                    RenderLayer& flapped = orderedLayers[i].get();
+                    const bool vis = flapped.baseImpl->visibility != style::VisibilityType::None;
+                    const bool zoomFits = flapped.supportsZoom(zoomHistory.lastZoom);
+                    fprintf(stderr,
+                            "[KLATTRA_TRACE] [KLATTRA LAYERFLAP] layer=%s renderable=%d visible=%d zoomFits=%d "
+                            "lastZoom=%.2f source=%s sourceIterated=%s\n",
+                            flapped.getID().c_str(),
+                            updateList[i] ? 1 : 0,
+                            vis ? 1 : 0,
+                            zoomFits ? 1 : 0,
+                            zoomHistory.lastZoom,
+                            flapped.baseImpl->source.c_str(),
+                            sourceImpl->id.c_str());
+                }
                 orderedLayers[i].get().markLayerRenderable(updateList[i], changes);
             }
         }
