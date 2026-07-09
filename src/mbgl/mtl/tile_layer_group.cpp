@@ -13,6 +13,10 @@
 
 #include <Metal/Metal.hpp>
 
+#include <cstdio>
+#include <cstdlib>
+#include <unordered_map>
+
 namespace mbgl {
 namespace mtl {
 
@@ -36,7 +40,55 @@ void TileLayerGroup::upload(gfx::UploadPass& uploadPass) {
     });
 }
 
+namespace {
+// KLATTRA diagnostics (2D black-flash hunt): log when a layer group that
+// was rendering drawables goes empty or unvisited for a frame — the
+// symptom-level signature of the one-frame black land flash (background +
+// fill groups missing while lines/symbols still draw). First render() call
+// of each frame records; GROUPGAP fires retroactively when a group was not
+// visited at all for one or more frames.
+void klattraDiagGroupPresence(
+    const void* group, const std::string& name, uint64_t frame, std::size_t drawableCount, bool groupEnabled) {
+    static const bool trace = std::getenv("KLATTRA_TRACE_STDERR") != nullptr;
+    if (!trace || frame == 0) return;
+    struct State {
+        uint64_t lastFrame = 0;
+        std::size_t lastCount = 0;
+    };
+    static std::unordered_map<const void*, State> states;
+    auto& st = states[group];
+    if (st.lastFrame && frame != st.lastFrame) {
+        if (frame > st.lastFrame + 1 && st.lastCount > 0) {
+            fprintf(stderr,
+                    "[KLATTRA_TRACE] [KLATTRA GROUPGAP] group=%s unvisitedFrames=%llu-%llu lastDrawables=%zu\n",
+                    name.c_str(),
+                    static_cast<unsigned long long>(st.lastFrame + 1),
+                    static_cast<unsigned long long>(frame - 1),
+                    st.lastCount);
+        }
+        if (st.lastCount > 0 && (drawableCount == 0 || !groupEnabled)) {
+            fprintf(stderr,
+                    "[KLATTRA_TRACE] [KLATTRA GROUPEMPTY] group=%s frame=%llu prevDrawables=%zu count=%zu enabled=%d\n",
+                    name.c_str(),
+                    static_cast<unsigned long long>(frame),
+                    st.lastCount,
+                    drawableCount,
+                    groupEnabled ? 1 : 0);
+        }
+    }
+    if (frame != st.lastFrame) {
+        st.lastFrame = frame;
+        st.lastCount = groupEnabled ? drawableCount : 0;
+    }
+}
+} // namespace
+
 void TileLayerGroup::render(RenderOrchestrator&, PaintParameters& parameters) {
+    klattraDiagGroupPresence(this,
+                             getName(),
+                             static_cast<Context&>(parameters.context).diagFrameIndex(),
+                             getDrawableCount(),
+                             enabled);
     if (!enabled || !getDrawableCount() || !parameters.renderPass) {
         return;
     }

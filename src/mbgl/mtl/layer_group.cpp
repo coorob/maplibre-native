@@ -11,6 +11,10 @@
 #include <mbgl/shaders/mtl/shader_program.hpp>
 #include <mbgl/util/convert.hpp>
 
+#include <cstdio>
+#include <cstdlib>
+#include <unordered_map>
+
 namespace mbgl {
 namespace mtl {
 
@@ -34,7 +38,53 @@ void LayerGroup::upload(gfx::UploadPass& uploadPass) {
     });
 }
 
+namespace {
+// KLATTRA diagnostics (2D black-flash hunt) — own copy per file, see
+// tile_layer_group.cpp for the rationale. Single-drawable groups
+// (background!) matter most here: Robert's flash screenshot lost exactly
+// the background + fill stack while lines/symbols kept drawing.
+void klattraDiagGroupPresence(
+    const void* group, const std::string& name, uint64_t frame, std::size_t drawableCount, bool groupEnabled) {
+    static const bool trace = std::getenv("KLATTRA_TRACE_STDERR") != nullptr;
+    if (!trace || frame == 0) return;
+    struct State {
+        uint64_t lastFrame = 0;
+        std::size_t lastCount = 0;
+    };
+    static std::unordered_map<const void*, State> states;
+    auto& st = states[group];
+    if (st.lastFrame && frame != st.lastFrame) {
+        if (frame > st.lastFrame + 1 && st.lastCount > 0) {
+            fprintf(stderr,
+                    "[KLATTRA_TRACE] [KLATTRA GROUPGAP] group=%s unvisitedFrames=%llu-%llu lastDrawables=%zu\n",
+                    name.c_str(),
+                    static_cast<unsigned long long>(st.lastFrame + 1),
+                    static_cast<unsigned long long>(frame - 1),
+                    st.lastCount);
+        }
+        if (st.lastCount > 0 && (drawableCount == 0 || !groupEnabled)) {
+            fprintf(stderr,
+                    "[KLATTRA_TRACE] [KLATTRA GROUPEMPTY] group=%s frame=%llu prevDrawables=%zu count=%zu enabled=%d\n",
+                    name.c_str(),
+                    static_cast<unsigned long long>(frame),
+                    st.lastCount,
+                    drawableCount,
+                    groupEnabled ? 1 : 0);
+        }
+    }
+    if (frame != st.lastFrame) {
+        st.lastFrame = frame;
+        st.lastCount = groupEnabled ? drawableCount : 0;
+    }
+}
+} // namespace
+
 void LayerGroup::render(RenderOrchestrator&, PaintParameters& parameters) {
+    klattraDiagGroupPresence(this,
+                             getName(),
+                             static_cast<Context&>(parameters.context).diagFrameIndex(),
+                             getDrawableCount(),
+                             enabled);
     if (!enabled || !getDrawableCount() || !parameters.renderPass) {
         return;
     }
