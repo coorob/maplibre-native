@@ -69,6 +69,12 @@ public:
     /// (snapshotter stills, KLATTRA target dumps).
     void waitOffscreenRenderWork();
 
+    /// KLATTRA diagnostics (2D black-flash hunt): monotonically increasing
+    /// frame index and whether this frame's mid-frame offscreen flush point
+    /// has already passed (work encoded after it commits one frame late).
+    uint64_t diagFrameIndex() const { return diagFrameIndex_; }
+    bool offscreenFlushedThisFrame() const { return offscreenFlushedThisFrame_; }
+
     std::unique_ptr<gfx::CommandEncoder> createCommandEncoder() override;
 
     /// Create a new buffer object
@@ -179,6 +185,8 @@ private:
 
     MTLCommandBufferPtr sharedOffscreenCommandBuffer;
     MTLCommandBufferPtr lastFlushedOffscreenCommandBuffer;
+    uint64_t diagFrameIndex_ = 0;
+    bool offscreenFlushedThisFrame_ = false;
 
     std::optional<BufferResource> emptyBuffer;
     std::optional<BufferResource> tileVertexBuffer;

@@ -21,6 +21,7 @@ public:
           type(type_) {
         assert(!size.isEmpty());
         colorTexture = context.createTexture2D();
+        colorTexture->diagEnsureRenderTargetColor("offscreen-rtt");
         colorTexture->setSize(size);
         colorTexture->setFormat(gfx::TexturePixelType::RGBA, type);
         colorTexture->setSamplerConfiguration({.filter = gfx::TextureFilterType::Linear,
@@ -104,6 +105,12 @@ public:
         // encoded. Same-queue commit order makes every bake visible to the
         // main pass, which is committed later; only CPU readback needs an
         // explicit wait (see readStillImage).
+        //
+        // KLATTRA diagnostics: record that this attachment now has encoded
+        // content, and whether the encode happened AFTER this frame's flush
+        // point (such content commits at endFrame — one frame late for
+        // anything that sampled it this frame).
+        colorTexture->diagMarkContentEncoded(context.diagFrameIndex(), context.offscreenFlushedThisFrame());
         commandBuffer.reset();
         renderPassDescriptor.reset();
     }

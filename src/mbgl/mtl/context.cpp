@@ -30,6 +30,8 @@
 #include <Metal/Metal.hpp>
 
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 namespace mbgl {
@@ -68,7 +70,18 @@ Context::~Context() noexcept {
     }
 }
 
+namespace {
+// KLATTRA diagnostics gate (2D black-flash hunt) — stderr because the
+// simulator swallows mbgl Log::Warning.
+bool klattraTraceStderr() {
+    static const bool enabled = std::getenv("KLATTRA_TRACE_STDERR") != nullptr;
+    return enabled;
+}
+} // namespace
+
 void Context::beginFrame() {
+    ++diagFrameIndex_;
+    offscreenFlushedThisFrame_ = false;
     backend.getThreadPool().runRenderJobs();
 }
 
@@ -78,6 +91,13 @@ void Context::endFrame() {
     // offscreen work through some other path, commit it now — dropping an
     // encoded-but-uncommitted buffer would silently lose bakes that targets
     // already counted as completed.
+    if (sharedOffscreenCommandBuffer && klattraTraceStderr()) {
+        // Anything still in this buffer commits AFTER the main pass buffer —
+        // whatever sampled these targets this frame read them one frame early.
+        fprintf(stderr,
+                "[KLATTRA_TRACE] [KLATTRA OFFSCREEN] leftover-commit frame=%llu\n",
+                static_cast<unsigned long long>(diagFrameIndex_));
+    }
     flushOffscreenRenderWork();
 }
 
@@ -85,12 +105,21 @@ const MTLCommandBufferPtr& Context::offscreenCommandBuffer() {
     if (!sharedOffscreenCommandBuffer) {
         if (const auto& queue = backend.getCommandQueue()) {
             sharedOffscreenCommandBuffer = NS::RetainPtr(queue->commandBuffer());
+            if (offscreenFlushedThisFrame_ && klattraTraceStderr()) {
+                // A new offscreen buffer created after this frame's flush
+                // point: its passes can only commit at endFrame, after the
+                // main pass — one frame late by construction.
+                fprintf(stderr,
+                        "[KLATTRA_TRACE] [KLATTRA OFFSCREEN] late-buffer frame=%llu\n",
+                        static_cast<unsigned long long>(diagFrameIndex_));
+            }
         }
     }
     return sharedOffscreenCommandBuffer;
 }
 
 void Context::flushOffscreenRenderWork() {
+    offscreenFlushedThisFrame_ = true;
     if (sharedOffscreenCommandBuffer) {
         lastFlushedOffscreenCommandBuffer = sharedOffscreenCommandBuffer;
         sharedOffscreenCommandBuffer.reset();

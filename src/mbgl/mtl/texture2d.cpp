@@ -5,6 +5,8 @@
 #include <mbgl/util/logging.hpp>
 
 #include <atomic>
+#include <cstdio>
+#include <cstdlib>
 
 #include <Metal/MTLDevice.hpp>
 #include <Metal/MTLRenderCommandEncoder.hpp>
@@ -292,6 +294,37 @@ void Texture2D::bind(RenderPass& renderPass, int32_t location) {
         static std::atomic<int> nullBindLogCount{0};
         if (nullBindLogCount.fetch_add(1) < 3) {
             mbgl::Log::Error(mbgl::Event::Render, "Trying to bind null Metal texture!");
+        }
+    }
+
+    // KLATTRA diagnostics (2D black-flash hunt): a render-target colour
+    // attachment sampled before its pass ever encoded reads UNDEFINED
+    // memory (black), and one whose encode landed after this frame's flush
+    // point commits at endFrame — after the main pass — so this frame reads
+    // it one frame early. Both are exactly one-frame black flashes.
+    if (diagIsRenderTargetColor()) {
+        static const bool trace = std::getenv("KLATTRA_TRACE_STDERR") != nullptr;
+        if (trace) {
+            static std::atomic<int> diagBindLogBudget{200};
+            if (!diagHasContentEncoded()) {
+                if (diagBindLogBudget.fetch_sub(1) > 0) {
+                    fprintf(stderr,
+                            "[KLATTRA_TRACE] [KLATTRA TEXBIND] undefined-sample name=%s size=%ux%u frame=%llu\n",
+                            diagGetName().c_str(),
+                            size.width,
+                            size.height,
+                            static_cast<unsigned long long>(context.diagFrameIndex()));
+                }
+            } else if (diagGetEncodedLateFrame() == context.diagFrameIndex()) {
+                if (diagBindLogBudget.fetch_sub(1) > 0) {
+                    fprintf(stderr,
+                            "[KLATTRA_TRACE] [KLATTRA TEXBIND] late-encode-sample name=%s size=%ux%u frame=%llu\n",
+                            diagGetName().c_str(),
+                            size.width,
+                            size.height,
+                            static_cast<unsigned long long>(context.diagFrameIndex()));
+                }
+            }
         }
     }
 

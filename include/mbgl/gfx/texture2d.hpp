@@ -3,6 +3,8 @@
 #include <mbgl/util/image.hpp>
 
 #include <cstddef>
+#include <cstdint>
+#include <string>
 #include <vector>
 
 namespace mbgl {
@@ -122,6 +124,38 @@ public:
     /// @brief Check whether the texture needs upload
     /// @return bool
     virtual bool needsUpload() const noexcept = 0;
+
+    // --- KLATTRA diagnostics (2D black-flash hunt) -------------------------
+    // Render-target colour attachments have UNDEFINED contents until their
+    // pass first encodes (see the forced-allocate comment in
+    // render_hillshade_layer.cpp — sampling one early is "recoverable" but
+    // renders garbage/black for that frame). These flags let the Metal
+    // sampling bind name every such event under KLATTRA_TRACE_STDERR.
+    void diagEnsureRenderTargetColor(const std::string& name) {
+        if (!diagRenderTargetColor) {
+            diagRenderTargetColor = true;
+            diagName = name;
+        }
+    }
+    /// Overwrite the diagnostic name with something meaningful (e.g. the
+    /// owning RenderTarget's debug name) once it is known.
+    void diagSetName(const std::string& name) {
+        if (!name.empty()) diagName = name;
+    }
+    void diagMarkContentEncoded(uint64_t frameIndex, bool encodedAfterFlush) {
+        diagContentEncoded = true;
+        if (encodedAfterFlush) diagEncodedLateFrame = frameIndex;
+    }
+    bool diagIsRenderTargetColor() const { return diagRenderTargetColor; }
+    bool diagHasContentEncoded() const { return diagContentEncoded; }
+    uint64_t diagGetEncodedLateFrame() const { return diagEncodedLateFrame; }
+    const std::string& diagGetName() const { return diagName; }
+
+private:
+    bool diagRenderTargetColor{false};
+    bool diagContentEncoded{false};
+    uint64_t diagEncodedLateFrame{0};
+    std::string diagName;
 };
 
 } // namespace gfx

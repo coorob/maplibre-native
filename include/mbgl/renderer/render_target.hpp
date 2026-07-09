@@ -48,7 +48,10 @@ public:
     bool hasCompletedRender() const noexcept { return completedRenderCount > 0; }
 
     /// Optional name used by debug tracing to identify offscreen targets.
-    void setDebugName(std::string name_) { debugName = std::move(name_); }
+    /// Defined in the .cpp so the name also reaches the colour attachment's
+    /// KLATTRA diagnostics immediately — sampled-before-rendered trace lines
+    /// must carry the right name even when the target never rendered.
+    void setDebugName(std::string name_);
     const std::string& getDebugName() const noexcept { return debugName; }
 
     /// Enable mipmapped sampling for render targets that will be minified

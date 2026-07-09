@@ -315,6 +315,13 @@ const gfx::Texture2DPtr& RenderTarget::getTexture() {
     return offscreenTexture->getTexture();
 };
 
+void RenderTarget::setDebugName(std::string name_) {
+    debugName = std::move(name_);
+    if (offscreenTexture) {
+        offscreenTexture->getTexture()->diagSetName(debugName);
+    }
+}
+
 Size RenderTarget::getSize() const noexcept {
     return offscreenTexture ? offscreenTexture->getSize() : Size{};
 }
@@ -481,6 +488,11 @@ void RenderTarget::render(RenderOrchestrator& orchestrator, const RenderTree& re
     if (!offscreenTexture || !offscreenTexture->isRenderable()) {
         return;
     }
+
+    // KLATTRA diagnostics: label the colour attachment with the target's
+    // debug name so sampled-before-rendered trace lines identify WHICH
+    // target (hillshade-prep vs drape) was read too early.
+    offscreenTexture->getTexture()->diagSetName(debugName);
 
     // Clear to the style's evaluated background colour (same value the main
     // pass clears with), NOT the member default black: a drape bake whose
