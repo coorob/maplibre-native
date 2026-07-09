@@ -453,13 +453,29 @@ std::unique_ptr<RenderTree> RenderOrchestrator::createRenderTree(
         source->update(sourceImpl, filteredLayersForSource, sourceNeedsRendering, sourceNeedsRelayout, tileParameters);
         filteredLayersForSource.clear();
 
-        // Update all layers with their new renderability status, if it changed.
+        addChanges(changes);
+    }
+
+    // Update all layers with their new renderability status, if it changed.
+    //
+    // This sync MUST run after ALL sources have iterated (2026-07-09,
+    // traska.26): updateList entries are only set true during the owning
+    // source's iteration, so running the sync inside the source loop marked
+    // every layer of a later-iterated source non-renderable during each
+    // earlier source's pass and renderable again during its own — a
+    // remove+add layer-group churn pair for nearly every layer, every
+    // frame (~9/s per layer measured on the traska.25 diag; the 2D "black
+    // flash" hunt). The pairs usually cancel within processChanges, but
+    // any consumer of the intermediate state renders a frame without the
+    // affected layer groups — for land-covering layers that is a black
+    // flash of the whole viewport.
+    {
+        UniqueChangeRequestVec changes;
         for (size_t i = 0; i < updateList.size(); i++) {
             if (orderedLayers[i].get().isLayerRenderable() != updateList[i]) {
-                // KLATTRA diagnostics (2D black-flash hunt): every flap of a
-                // layer's renderability removes/re-adds its layer group — a
-                // land-covering layer flapping is a one-frame black flash.
-                // Print the full reason tuple at the moment of the change.
+                // KLATTRA diagnostics (2D black-flash hunt): after the hoist,
+                // any transition here is a REAL renderability change — rare
+                // enough to log each with its reason tuple.
                 static const bool klattraTrace = std::getenv("KLATTRA_TRACE_STDERR") != nullptr;
                 if (klattraTrace) {
                     RenderLayer& flapped = orderedLayers[i].get();
@@ -467,14 +483,13 @@ std::unique_ptr<RenderTree> RenderOrchestrator::createRenderTree(
                     const bool zoomFits = flapped.supportsZoom(zoomHistory.lastZoom);
                     fprintf(stderr,
                             "[KLATTRA_TRACE] [KLATTRA LAYERFLAP] layer=%s renderable=%d visible=%d zoomFits=%d "
-                            "lastZoom=%.2f source=%s sourceIterated=%s\n",
+                            "lastZoom=%.2f source=%s\n",
                             flapped.getID().c_str(),
                             updateList[i] ? 1 : 0,
                             vis ? 1 : 0,
                             zoomFits ? 1 : 0,
                             zoomHistory.lastZoom,
-                            flapped.baseImpl->source.c_str(),
-                            sourceImpl->id.c_str());
+                            flapped.baseImpl->source.c_str());
                 }
                 orderedLayers[i].get().markLayerRenderable(updateList[i], changes);
             }
