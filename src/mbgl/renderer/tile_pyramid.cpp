@@ -291,14 +291,23 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
     // masked behind the new cover; updateTileMasks dedupes overlap per
     // pixel), and zoom-outs drop instantly when the shallower parent renders.
     // Skipped on relayout — stale-style tiles must not linger.
+    // Age cap: 120 frames (~2 s). A short cap (15) expired whole hold
+    // cohorts mid-gesture — every tile uncovered by the same fragmentation
+    // event ages out on the same frame, a synchronized viewport-wide drop
+    // that IS the flash recurring every cap-interval during continuous
+    // churn (traska.37 device data: dips 7→3 with holds active). The cap
+    // exists only to bound pan-away holds; on-screen holds are retired by
+    // the children-coverage check.
     static const bool coverHoldDisabled = std::getenv("KLATTRA_DISABLE_COVERHOLD") != nullptr;
     static const uint8_t coverHoldMaxFrames = [] {
         const char* v = std::getenv("KLATTRA_COVERHOLD_FRAMES");
         const long parsed = v ? std::strtol(v, nullptr, 10) : 0;
-        return static_cast<uint8_t>((parsed > 0 && parsed < 255) ? parsed : 15);
+        return static_cast<uint8_t>((parsed > 0 && parsed < 255) ? parsed : 120);
     }();
 
     std::size_t coverHeld = 0;
+    std::size_t coverRejectedAge = 0, coverRejectedNotRenderable = 0, coverRetiredCovered = 0;
+    const std::size_t coverRejectedRelayout = needsRelayout ? previouslyRenderedTiles.size() : 0;
     std::map<UnwrappedTileID, uint8_t> nextCoverHoldAges;
     for (auto previouslyRenderedTile : previouslyRenderedTiles) {
         Tile& tile = previouslyRenderedTile.second;
@@ -310,7 +319,11 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
             addRenderTile(previouslyRenderedTile.first, tile);
             continue;
         }
-        if (coverHoldDisabled || needsRelayout || !tile.isRenderable()) {
+        if (coverHoldDisabled || needsRelayout) {
+            continue;
+        }
+        if (!tile.isRenderable()) {
+            ++coverRejectedNotRenderable;
             continue;
         }
         const UnwrappedTileID& previousID = previouslyRenderedTile.first;
@@ -332,11 +345,13 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
             }
         }
         if (covered) {
+            ++coverRetiredCovered;
             continue;
         }
         const auto ageIt = coverHoldAges.find(previousID);
         const uint8_t age = ageIt == coverHoldAges.end() ? 0 : ageIt->second;
         if (age >= coverHoldMaxFrames) {
+            ++coverRejectedAge;
             continue;
         }
         nextCoverHoldAges[previousID] = static_cast<uint8_t>(age + 1);
@@ -357,25 +372,37 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
         if (coverHoldLog) {
             struct State {
                 std::size_t last = SIZE_MAX;
+                std::size_t lastAged = 0;
                 std::chrono::steady_clock::time_point lastLog{};
             };
             static std::unordered_map<const void*, State> states;
             auto& st = states[this];
             const auto now = std::chrono::steady_clock::now();
-            const bool changed = (st.last == SIZE_MAX) ? coverHeld > 0 : coverHeld != st.last;
+            const bool changed = (st.last == SIZE_MAX) ? coverHeld > 0
+                                                       : (coverHeld != st.last || coverRejectedAge != st.lastAged);
             if (changed || (coverHeld > 0 && now - st.lastLog >= std::chrono::seconds(1))) {
                 st.lastLog = now;
                 Log::Warning(Event::Render,
-                             "[KLATTRA COVERHOLD] source=" + sourceImpl.id + " held=" + std::to_string(coverHeld));
+                             "[KLATTRA COVERHOLD] source=" + sourceImpl.id + " held=" + std::to_string(coverHeld) +
+                                 " retired=" + std::to_string(coverRetiredCovered) +
+                                 " aged=" + std::to_string(coverRejectedAge) +
+                                 " notRenderable=" + std::to_string(coverRejectedNotRenderable) +
+                                 " relayout=" + std::to_string(coverRejectedRelayout));
                 static const bool traceStderr = std::getenv("KLATTRA_TRACE_STDERR") != nullptr;
                 if (traceStderr) {
                     fprintf(stderr,
-                            "[KLATTRA_TRACE] [KLATTRA COVERHOLD] source=%s held=%zu\n",
+                            "[KLATTRA_TRACE] [KLATTRA COVERHOLD] source=%s held=%zu retired=%zu aged=%zu "
+                            "notRenderable=%zu relayout=%zu\n",
                             sourceImpl.id.c_str(),
-                            coverHeld);
+                            coverHeld,
+                            coverRetiredCovered,
+                            coverRejectedAge,
+                            coverRejectedNotRenderable,
+                            coverRejectedRelayout);
                 }
             }
             st.last = coverHeld;
+            st.lastAged = coverRejectedAge;
         }
     }
 

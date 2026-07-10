@@ -478,21 +478,36 @@ std::unique_ptr<RenderTree> RenderOrchestrator::createRenderTree(
             if (orderedLayers[i].get().isLayerRenderable() != updateList[i]) {
                 // KLATTRA diagnostics (2D black-flash hunt): after the hoist,
                 // any transition here is a REAL renderability change — rare
-                // enough to log each with its reason tuple.
-                static const bool klattraTrace = std::getenv("KLATTRA_TRACE_STDERR") != nullptr;
-                if (klattraTrace) {
+                // enough to log each with its reason tuple. Promoted to
+                // Warning 2026-07-11 so DEVICE syslog shows it (stderr is
+                // sim-only). Opt out: KLATTRA_LOG_LAYERFLAP=0.
+                static const bool layerFlapLog = [] {
+                    const char* v = std::getenv("KLATTRA_LOG_LAYERFLAP");
+                    return !(v && (*v == '0' || *v == 'f' || *v == 'F'));
+                }();
+                if (layerFlapLog) {
                     RenderLayer& flapped = orderedLayers[i].get();
                     const bool vis = flapped.baseImpl->visibility != style::VisibilityType::None;
                     const bool zoomFits = flapped.supportsZoom(zoomHistory.lastZoom);
-                    fprintf(stderr,
-                            "[KLATTRA_TRACE] [KLATTRA LAYERFLAP] layer=%s renderable=%d visible=%d zoomFits=%d "
-                            "lastZoom=%.2f source=%s\n",
-                            flapped.getID().c_str(),
-                            updateList[i] ? 1 : 0,
-                            vis ? 1 : 0,
-                            zoomFits ? 1 : 0,
-                            zoomHistory.lastZoom,
-                            flapped.baseImpl->source.c_str());
+                    Log::Warning(Event::Render,
+                                 "[KLATTRA LAYERFLAP] layer=" + flapped.getID() +
+                                     " renderable=" + (updateList[i] ? std::string("1") : std::string("0")) +
+                                     " visible=" + (vis ? std::string("1") : std::string("0")) +
+                                     " zoomFits=" + (zoomFits ? std::string("1") : std::string("0")) +
+                                     " lastZoom=" + std::to_string(zoomHistory.lastZoom) +
+                                     " source=" + flapped.baseImpl->source);
+                    static const bool klattraTrace = std::getenv("KLATTRA_TRACE_STDERR") != nullptr;
+                    if (klattraTrace) {
+                        fprintf(stderr,
+                                "[KLATTRA_TRACE] [KLATTRA LAYERFLAP] layer=%s renderable=%d visible=%d zoomFits=%d "
+                                "lastZoom=%.2f source=%s\n",
+                                flapped.getID().c_str(),
+                                updateList[i] ? 1 : 0,
+                                vis ? 1 : 0,
+                                zoomFits ? 1 : 0,
+                                zoomHistory.lastZoom,
+                                flapped.baseImpl->source.c_str());
+                    }
                 }
                 orderedLayers[i].get().markLayerRenderable(updateList[i], changes);
             }
