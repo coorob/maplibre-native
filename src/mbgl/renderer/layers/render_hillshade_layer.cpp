@@ -589,6 +589,17 @@ void RenderHillshadeLayer::update(gfx::ShaderRegistry& shaders,
                                             segments->data(),
                                             segments->size());
             drawable.setTexture(bucket.renderTarget->getTexture(), idHillshadeImageTexture);
+            // KLATTRA (2D black flash, the painted-black half): a freshly
+            // created prepare target is cleared but not yet baked — sampling
+            // it paints the tint BLACK across the tile for the frame(s)
+            // before the prepare pass runs (viewport-wide at boot when every
+            // target is new; per new-tile batch during zoom churn; water
+            // survives because the style re-draws it above the relief).
+            // Keep the main drawable disabled until the bake has completed;
+            // updateExisting runs every frame, so it re-enables immediately
+            // after. The gap shows the style-background clear (matching
+            // paper) instead of black.
+            drawable.setEnabled(bucket.renderTarget && bucket.renderTarget->hasCompletedRender());
 
             return true;
         };
@@ -619,6 +630,9 @@ void RenderHillshadeLayer::update(gfx::ShaderRegistry& shaders,
             }
             drawable->setTileID(tileID);
             drawable->setLayerTweaker(layerTweaker);
+            // See updateExisting above: stay disabled until the prepare
+            // target has baked once, else this paints black tint.
+            drawable->setEnabled(bucket.renderTarget && bucket.renderTarget->hasCompletedRender());
 
             tileLayerGroup->addDrawable(renderPass, tileID, std::move(drawable));
             ++stats.drawablesAdded;
