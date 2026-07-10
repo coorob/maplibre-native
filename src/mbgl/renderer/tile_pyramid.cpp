@@ -243,6 +243,34 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
                                  zoomRange,
                                  maxParentTileOverscaleFactor);
 
+    // KLATTRA cover-hold (2D transition flash): during zoom transitions the
+    // rendered cover can collapse before replacement tiles are renderable
+    // (traska.32 device data: rendered 9→4 while the tiles were still held),
+    // flashing the style background through. Bridge the gap: keep previously
+    // rendered tiles on screen while an ideal tile they overlap is not yet
+    // painted by the new rendered set (itself or an ancestor of it).
+    // updateTileMasks runs after this and dedupes the parent/child overlap
+    // per-pixel. Self-extinguishes once the ideal cover paints; tiles outside
+    // the ideal cover (pans) drop immediately, so the hold is bounded by the
+    // previous cover. Skipped on relayout — stale-style tiles must not linger.
+    std::vector<UnwrappedTileID> unpaintedIdealTiles;
+    if (!needsRelayout && !previouslyRenderedTiles.empty()) {
+        for (const auto& idealTile : idealTiles) {
+            const UnwrappedTileID unwrapped = idealTile.toUnwrapped();
+            bool painted = false;
+            for (const auto& rendered : renderedTiles) {
+                if (rendered.first == unwrapped || unwrapped.isChildOf(rendered.first)) {
+                    painted = true;
+                    break;
+                }
+            }
+            if (!painted) {
+                unpaintedIdealTiles.push_back(unwrapped);
+            }
+        }
+    }
+
+    std::size_t coverHeld = 0;
     for (auto previouslyRenderedTile : previouslyRenderedTiles) {
         Tile& tile = previouslyRenderedTile.second;
         tile.markRenderedPreviously();
@@ -251,6 +279,52 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
             // Don't mark the tile "Required" to avoid triggering a new network request
             retainTileFn(tile, TileNecessity::Optional);
             addRenderTile(previouslyRenderedTile.first, tile);
+            continue;
+        }
+        if (unpaintedIdealTiles.empty() || !tile.isRenderable()) {
+            continue;
+        }
+        const UnwrappedTileID& previousID = previouslyRenderedTile.first;
+        for (const auto& unpainted : unpaintedIdealTiles) {
+            if (previousID == unpainted || previousID.isChildOf(unpainted) || unpainted.isChildOf(previousID)) {
+                retainTileFn(tile, TileNecessity::Optional);
+                addRenderTile(previousID, tile);
+                ++coverHeld;
+                break;
+            }
+        }
+    }
+
+    // KLATTRA diagnostics: cover-hold activity. Logs on change (including the
+    // return to 0) plus a 1 Hz heartbeat while holds are active. Opt out:
+    // KLATTRA_LOG_COVERHOLD=0.
+    {
+        static const bool coverHoldLog = [] {
+            const char* v = std::getenv("KLATTRA_LOG_COVERHOLD");
+            return !(v && (*v == '0' || *v == 'f' || *v == 'F'));
+        }();
+        if (coverHoldLog) {
+            struct State {
+                std::size_t last = SIZE_MAX;
+                std::chrono::steady_clock::time_point lastLog{};
+            };
+            static std::unordered_map<const void*, State> states;
+            auto& st = states[this];
+            const auto now = std::chrono::steady_clock::now();
+            const bool changed = (st.last == SIZE_MAX) ? coverHeld > 0 : coverHeld != st.last;
+            if (changed || (coverHeld > 0 && now - st.lastLog >= std::chrono::seconds(1))) {
+                st.lastLog = now;
+                Log::Warning(Event::Render,
+                             "[KLATTRA COVERHOLD] source=" + sourceImpl.id + " held=" + std::to_string(coverHeld));
+                static const bool traceStderr = std::getenv("KLATTRA_TRACE_STDERR") != nullptr;
+                if (traceStderr) {
+                    fprintf(stderr,
+                            "[KLATTRA_TRACE] [KLATTRA COVERHOLD] source=%s held=%zu\n",
+                            sourceImpl.id.c_str(),
+                            coverHeld);
+                }
+            }
+            st.last = coverHeld;
         }
     }
 
