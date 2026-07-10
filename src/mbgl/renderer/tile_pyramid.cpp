@@ -118,6 +118,7 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
         tiles.clear();
         renderedTiles.clear();
         coverHoldAges.clear();
+        recentIdealTiles.clear();
         cache.deferPendingReleases();
 
         return;
@@ -291,24 +292,45 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
     // masked behind the new cover; updateTileMasks dedupes overlap per
     // pixel), and zoom-outs drop instantly when the shallower parent renders.
     // Skipped on relayout — stale-style tiles must not linger.
-    // Age cap: 120 frames (~2 s). A short cap (15) expired whole hold
-    // cohorts mid-gesture — every tile uncovered by the same fragmentation
-    // event ages out on the same frame, a synchronized viewport-wide drop
-    // that IS the flash recurring every cap-interval during continuous
-    // churn (traska.37 device data: dips 7→3 with holds active). The cap
-    // exists only to bound pan-away holds; on-screen holds are retired by
-    // the children-coverage check.
+    // Expiry (v5): every timer cap turned out to expire whole hold cohorts
+    // mid-gesture — the tiles uncovered by one fragmentation event age in
+    // lockstep and drop on the same frame, a synchronized viewport-wide
+    // flash recurring each cap interval (traska.37: 15 frames; traska.38:
+    // 120 frames, aged>0 exactly on every DIP). A hold now expires when it
+    // stops overlapping the union of ideal tiles seen in the last
+    // coverHoldWindow updates — i.e. when it genuinely leaves the viewport —
+    // with the age cap kept only as a pathological backstop (~10 s).
     static const bool coverHoldDisabled = std::getenv("KLATTRA_DISABLE_COVERHOLD") != nullptr;
-    static const uint8_t coverHoldMaxFrames = [] {
+    static const uint16_t coverHoldMaxFrames = [] {
         const char* v = std::getenv("KLATTRA_COVERHOLD_FRAMES");
         const long parsed = v ? std::strtol(v, nullptr, 10) : 0;
-        return static_cast<uint8_t>((parsed > 0 && parsed < 255) ? parsed : 120);
+        return static_cast<uint16_t>((parsed > 0 && parsed < 65535) ? parsed : 600);
     }();
+    static const uint32_t coverHoldWindow = [] {
+        const char* v = std::getenv("KLATTRA_COVERHOLD_WINDOW");
+        const long parsed = v ? std::strtol(v, nullptr, 10) : 0;
+        return static_cast<uint32_t>((parsed > 0 && parsed < 100000) ? parsed : 90);
+    }();
+
+    ++coverHoldUpdateIndex;
+    if (!coverHoldDisabled) {
+        for (const auto& idealTile : idealTiles) {
+            recentIdealTiles[idealTile.toUnwrapped()] = coverHoldUpdateIndex;
+        }
+        for (auto it = recentIdealTiles.begin(); it != recentIdealTiles.end();) {
+            if (coverHoldUpdateIndex - it->second > coverHoldWindow) {
+                it = recentIdealTiles.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
 
     std::size_t coverHeld = 0;
     std::size_t coverRejectedAge = 0, coverRejectedNotRenderable = 0, coverRetiredCovered = 0;
+    std::size_t coverExpiredOffscreen = 0;
     const std::size_t coverRejectedRelayout = needsRelayout ? previouslyRenderedTiles.size() : 0;
-    std::map<UnwrappedTileID, uint8_t> nextCoverHoldAges;
+    std::map<UnwrappedTileID, uint16_t> nextCoverHoldAges;
     for (auto previouslyRenderedTile : previouslyRenderedTiles) {
         Tile& tile = previouslyRenderedTile.second;
         tile.markRenderedPreviously();
@@ -348,13 +370,25 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
             ++coverRetiredCovered;
             continue;
         }
+        bool inRecentViewport = false;
+        for (const auto& recentIdeal : recentIdealTiles) {
+            const UnwrappedTileID& idealID = recentIdeal.first;
+            if (idealID == previousID || idealID.isChildOf(previousID) || previousID.isChildOf(idealID)) {
+                inRecentViewport = true;
+                break;
+            }
+        }
+        if (!inRecentViewport) {
+            ++coverExpiredOffscreen;
+            continue;
+        }
         const auto ageIt = coverHoldAges.find(previousID);
-        const uint8_t age = ageIt == coverHoldAges.end() ? 0 : ageIt->second;
+        const uint16_t age = ageIt == coverHoldAges.end() ? 0 : ageIt->second;
         if (age >= coverHoldMaxFrames) {
             ++coverRejectedAge;
             continue;
         }
-        nextCoverHoldAges[previousID] = static_cast<uint8_t>(age + 1);
+        nextCoverHoldAges[previousID] = static_cast<uint16_t>(age + 1);
         retainTileFn(tile, TileNecessity::Optional);
         addRenderTile(previousID, tile);
         ++coverHeld;
@@ -386,17 +420,19 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
                              "[KLATTRA COVERHOLD] source=" + sourceImpl.id + " held=" + std::to_string(coverHeld) +
                                  " retired=" + std::to_string(coverRetiredCovered) +
                                  " aged=" + std::to_string(coverRejectedAge) +
+                                 " expiredOff=" + std::to_string(coverExpiredOffscreen) +
                                  " notRenderable=" + std::to_string(coverRejectedNotRenderable) +
                                  " relayout=" + std::to_string(coverRejectedRelayout));
                 static const bool traceStderr = std::getenv("KLATTRA_TRACE_STDERR") != nullptr;
                 if (traceStderr) {
                     fprintf(stderr,
                             "[KLATTRA_TRACE] [KLATTRA COVERHOLD] source=%s held=%zu retired=%zu aged=%zu "
-                            "notRenderable=%zu relayout=%zu\n",
+                            "expiredOff=%zu notRenderable=%zu relayout=%zu\n",
                             sourceImpl.id.c_str(),
                             coverHeld,
                             coverRetiredCovered,
                             coverRejectedAge,
+                            coverExpiredOffscreen,
                             coverRejectedNotRenderable,
                             coverRejectedRelayout);
                 }
@@ -558,6 +594,10 @@ void TilePyramid::handleWrapJump(float lng) {
             newRenderTiles.emplace(newID, tile.second);
         }
         renderedTiles = std::move(newRenderTiles);
+        // Cover-hold bookkeeping is keyed by wrap-bearing ids; remapping is
+        // not worth it for an antimeridian jump — just reset.
+        coverHoldAges.clear();
+        recentIdealTiles.clear();
     }
 }
 
@@ -660,6 +700,7 @@ void TilePyramid::clearAll() {
     tiles.clear();
     renderedTiles.clear();
     coverHoldAges.clear();
+    recentIdealTiles.clear();
     cache.clear();
 }
 
