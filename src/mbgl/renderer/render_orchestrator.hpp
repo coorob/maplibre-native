@@ -4,6 +4,7 @@
 #include <mbgl/actor/scheduler.hpp>
 #include <mbgl/renderer/renderer.hpp>
 #include <mbgl/renderer/render_source_observer.hpp>
+#include <mbgl/util/color.hpp>
 #include <mbgl/renderer/render_light.hpp>
 #include <mbgl/style/image.hpp>
 #include <mbgl/style/source.hpp>
@@ -225,6 +226,11 @@ private:
     PlacementController placementController;
 
     const bool backgroundLayerAsColor;
+    // Sticky framebuffer clear colour: last solid style background seen by
+    // the background-as-color branch. Frames that miss the branch (style
+    // mid-load, background transition, mutation instants) reuse it instead
+    // of clearing to default black (the 2D "black flash" backdrop).
+    std::optional<Color> lastSolidBackgroundColor;
     bool contextLost = false;
     bool placedSymbolDataCollected = false;
     bool tileCacheEnabled = true;

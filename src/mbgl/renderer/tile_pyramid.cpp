@@ -304,7 +304,7 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
     static const uint16_t coverHoldMaxFrames = [] {
         const char* v = std::getenv("KLATTRA_COVERHOLD_FRAMES");
         const long parsed = v ? std::strtol(v, nullptr, 10) : 0;
-        return static_cast<uint16_t>((parsed > 0 && parsed < 65535) ? parsed : 600);
+        return static_cast<uint16_t>((parsed > 0 && parsed < 65535) ? parsed : 3600);
     }();
     static const uint32_t coverHoldWindow = [] {
         const char* v = std::getenv("KLATTRA_COVERHOLD_WINDOW");

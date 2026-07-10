@@ -438,6 +438,7 @@ std::unique_ptr<RenderTree> RenderOrchestrator::createRenderTree(
                     const auto& solidBackground = layer.getSolidBackground();
                     if (solidBackground) {
                         renderTreeParameters->backgroundColor = *solidBackground;
+                        lastSolidBackgroundColor = *solidBackground;
                         continue; // This layer is shown with background color,
                                   // and it shall not be added to render items.
                     }
@@ -513,6 +514,20 @@ std::unique_ptr<RenderTree> RenderOrchestrator::createRenderTree(
             }
         }
         addChanges(changes);
+    }
+
+    // KLATTRA (2D transition flash, the "black" half): the framebuffer clear
+    // colour comes from renderTreeParameters->backgroundColor, which is only
+    // assigned when the background-as-color branch above runs — first layer
+    // is a solid background, style loaded, first source iterating, terrain
+    // off. Any frame that misses the branch (style mid-load at boot, a
+    // background transition, mutation instants) cleared to default BLACK,
+    // turning every content gap into a black flash on a paper-beige map
+    // (device recording 2026-07-10: water/labels painted over pitch-black
+    // land at launch, style background #F4EAD0). Reuse the last known solid
+    // background instead.
+    if (renderTreeParameters->backgroundColor == Color() && lastSolidBackgroundColor) {
+        renderTreeParameters->backgroundColor = *lastSolidBackgroundColor;
     }
 
     // Enable 3D mode if terrain is present
