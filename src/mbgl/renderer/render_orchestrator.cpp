@@ -30,6 +30,9 @@
 #include <mbgl/util/string.hpp>
 #include <mbgl/util/logging.hpp>
 
+#include <atomic>
+#include <chrono>
+
 #include <algorithm>
 
 namespace mbgl {
@@ -1179,6 +1182,26 @@ void RenderOrchestrator::onTileError(RenderSource& source, const OverscaledTileI
 
 void RenderOrchestrator::onTileChanged(RenderSource&, const OverscaledTileID&) {
     MLN_TRACE_FUNC();
+
+    // KLATTRA diagnostics (2D black-flash hunt): tile completions must wake
+    // the renderer; the stuck-black state holds a stale frame while loaded
+    // tiles sit unpainted. Throttled 1 Hz counter at Warning (device
+    // syslog) — its absence while tiles load, or presence while the screen
+    // stays stale, splits the broken link. Opt out: KLATTRA_LOG_WAKE=0.
+    static const bool wakeLog = [] {
+        const char* v = std::getenv("KLATTRA_LOG_WAKE");
+        return !(v && (*v == '0' || *v == 'f' || *v == 'F'));
+    }();
+    if (wakeLog) {
+        static std::atomic<uint64_t> count{0};
+        static std::chrono::steady_clock::time_point lastLog{};
+        const auto n = ++count;
+        const auto now = std::chrono::steady_clock::now();
+        if (now - lastLog >= std::chrono::seconds(1)) {
+            lastLog = now;
+            Log::Warning(Event::Render, "[KLATTRA WAKE] onTileChanged total=" + std::to_string(n));
+        }
+    }
 
     observer->onInvalidate();
 }

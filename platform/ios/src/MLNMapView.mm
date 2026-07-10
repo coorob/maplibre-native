@@ -33,6 +33,10 @@
 #include <mbgl/util/platform.hpp>
 #include <mbgl/util/projection.hpp>
 #include <mbgl/util/run_loop.hpp>
+#include <mbgl/util/logging.hpp>
+
+#include <atomic>
+#include <chrono>
 #include <mbgl/util/string.hpp>
 
 #import "MLNFeature_Private.h"
@@ -1525,6 +1529,19 @@ public:
 // MARK: - Life Cycle -
 
 - (void)updateFromDisplayLink:(CADisplayLink *)displayLink {
+  // KLATTRA diagnostics (2D black-flash hunt): 1 Hz heartbeat proving the
+  // link ticks, with the pending-refresh flag. If this line stops during a
+  // stuck-black period, the link is paused; if it continues with
+  // needsRefresh=0 while tiles load, the wake never reached the view.
+  {
+    static std::chrono::steady_clock::time_point klattraTickLast{};
+    const auto klattraNow = std::chrono::steady_clock::now();
+    if (klattraNow - klattraTickLast >= std::chrono::seconds(1)) {
+      klattraTickLast = klattraNow;
+      mbgl::Log::Warning(mbgl::Event::Render,
+                         "[KLATTRA WAKE] tick needsRefresh=" + std::to_string(self.needsDisplayRefresh ? 1 : 0));
+    }
+  }
   // CADisplayLink's call interval closely matches the that defined by,
   // preferredFramesPerSecond, however it is NOT called on the vsync and
   // can fire some time after the vsync, and the duration can often exceed
@@ -1606,6 +1623,21 @@ public:
 
 - (void)setNeedsRerender {
   MLNAssertIsMainThread();
+
+  // KLATTRA diagnostics (2D black-flash hunt): the view-side wake. 1 Hz
+  // throttled counter at Warning; correlate with [KLATTRA WAKE]
+  // onTileChanged and the displayLink heartbeat to find the dead link in
+  // the tile-arrival -> repaint chain.
+  static std::atomic<uint64_t> klattraWakeCount{0};
+  static std::chrono::steady_clock::time_point klattraWakeLast{};
+  const auto klattraN = ++klattraWakeCount;
+  const auto klattraNow = std::chrono::steady_clock::now();
+  if (klattraNow - klattraWakeLast >= std::chrono::seconds(1)) {
+    klattraWakeLast = klattraNow;
+    mbgl::Log::Warning(mbgl::Event::Render,
+                       "[KLATTRA WAKE] setNeedsRerender total=" + std::to_string(klattraN) +
+                           " linkPaused=" + std::to_string(self.displayLink ? (self.displayLink.paused ? 1 : 0) : -1));
+  }
 
   self.needsDisplayRefresh = YES;
 }
@@ -1893,6 +1925,8 @@ public:
 
 - (void)stopDisplayLink {
   MLNLogDebug(@"[%p]", self);
+  // KLATTRA diagnostics: rare event, unconditional.
+  mbgl::Log::Warning(mbgl::Event::Render, "[KLATTRA WAKE] stopDisplayLink");
   self.displayLink.paused = YES;
   self.needsDisplayRefresh = NO;
   [self processPendingBlocks];
@@ -1932,6 +1966,8 @@ public:
 
 - (void)startDisplayLink {
   MLNLogDebug(@"[%p]", self);
+  // KLATTRA diagnostics: rare event, unconditional.
+  mbgl::Log::Warning(mbgl::Event::Render, "[KLATTRA WAKE] startDisplayLink");
   MLNAssert(self.displayLink, @"");
   MLNAssert([self isVisible], @"Display link should only be started when allowed");
 
