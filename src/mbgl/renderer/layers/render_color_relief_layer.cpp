@@ -50,6 +50,11 @@ RenderColorReliefLayer::RenderColorReliefLayer(Immutable<ColorReliefLayer::Impl>
 
     // Initialize with default color ramp immediately to avoid uninitialized state
     updateColorRamp();
+
+    // KLATTRA diagnostics (2D black-flash hunt): pairs with [KLATTRA STYLEMUT]
+    // — RenderLayer recreation WITH matching style mutations = bridge-driven
+    // remove/add; without = orchestrator-internal churn.
+    Log::Warning(Event::Render, "[KLATTRA RELIEFLIFE] ctor id=" + baseImpl->id);
 }
 
 RenderColorReliefLayer::~RenderColorReliefLayer() = default;

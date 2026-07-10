@@ -7,6 +7,9 @@
 #include <mbgl/style/style.hpp>
 #include <mbgl/style/style_impl.hpp>
 #include <mbgl/util/instrumentation.hpp>
+#include <mbgl/util/logging.hpp>
+
+#include <cstdlib>
 
 namespace mbgl {
 namespace style {
@@ -177,9 +180,29 @@ const Layer* Style::getLayer(const std::string& layerID) const {
     return impl->getLayer(layerID);
 }
 
+namespace {
+// KLATTRA diagnostics (2D black-flash hunt): the color-relief RenderLayer's
+// group is recreated ~3x/frame during pinch zooms (traska.27 LANDDRAW:
+// 1864 fresh instances). Log every style layer mutation at Warning
+// (device-visible) to attribute the churn: bridge-driven remove/add here
+// vs orchestrator-internal recreation. Opt out: KLATTRA_LOG_STYLEMUT=0.
+bool klattraLogStyleMutations() {
+    static const bool enabled = [] {
+        const char* v = std::getenv("KLATTRA_LOG_STYLEMUT");
+        return !(v && (*v == '0' || *v == 'f' || *v == 'F'));
+    }();
+    return enabled;
+}
+} // namespace
+
 void Style::addLayer(std::unique_ptr<Layer> layer, const std::optional<std::string>& before) {
     MLN_TRACE_FUNC();
 
+    if (klattraLogStyleMutations() && layer) {
+        Log::Warning(Event::Style,
+                     "[KLATTRA STYLEMUT] addLayer id=" + layer->getID() +
+                         " before=" + (before ? *before : std::string("-")));
+    }
     impl->mutated = true;
     impl->addLayer(std::move(layer), before);
 }
@@ -187,6 +210,9 @@ void Style::addLayer(std::unique_ptr<Layer> layer, const std::optional<std::stri
 std::unique_ptr<Layer> Style::removeLayer(const std::string& id) {
     MLN_TRACE_FUNC();
 
+    if (klattraLogStyleMutations()) {
+        Log::Warning(Event::Style, "[KLATTRA STYLEMUT] removeLayer id=" + id);
+    }
     impl->mutated = true;
     return impl->removeLayer(id);
 }
