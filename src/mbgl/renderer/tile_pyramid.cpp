@@ -117,6 +117,7 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
 
         tiles.clear();
         renderedTiles.clear();
+        coverHoldAges.clear();
         cache.deferPendingReleases();
 
         return;
@@ -272,34 +273,33 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
                                  zoomRange,
                                  maxParentTileOverscaleFactor);
 
-    // KLATTRA cover-hold (2D transition flash): during zoom transitions the
-    // rendered cover can collapse before replacement tiles are renderable
-    // (traska.32 device data: rendered 9→4 while the tiles were still held),
-    // flashing the style background through. Bridge the gap: keep previously
-    // rendered tiles on screen while an ideal tile they overlap is not yet
-    // painted by the new rendered set (itself or an ancestor of it).
-    // updateTileMasks runs after this and dedupes the parent/child overlap
-    // per-pixel. Self-extinguishes once the ideal cover paints; tiles outside
-    // the ideal cover (pans) drop immediately, so the hold is bounded by the
-    // previous cover. Skipped on relayout — stale-style tiles must not linger.
-    std::vector<UnwrappedTileID> unpaintedIdealTiles;
-    if (!needsRelayout && !previouslyRenderedTiles.empty()) {
-        for (const auto& idealTile : idealTiles) {
-            const UnwrappedTileID unwrapped = idealTile.toUnwrapped();
-            bool painted = false;
-            for (const auto& rendered : renderedTiles) {
-                if (rendered.first == unwrapped || unwrapped.isChildOf(rendered.first)) {
-                    painted = true;
-                    break;
-                }
-            }
-            if (!painted) {
-                unpaintedIdealTiles.push_back(unwrapped);
-            }
-        }
-    }
+    // KLATTRA cover-hold v2 (2D transition flash): mid-gesture the tile cover
+    // legitimately fragments (fractional-zoom flips thrash the ideal zoom and
+    // the cover can be a single column for a few frames — traska.34/.35
+    // device data, ids on tape). Sources with deep cached ancestors bridge
+    // the fragments invisibly; the topo vector source (minzoom ~8, sparse
+    // cache) and the DEM relief often cannot, so their uncovered viewport
+    // area rendered nothing for a frame burst — the black flash. The v1
+    // predicate (hold while overlapping an unpainted IDEAL tile) failed
+    // exactly here: the uncovered screen area has no ideal tile at all when
+    // the ideal list itself is the fragment.
+    //
+    // v2 holds relative to the PREVIOUS cover instead: keep a previously
+    // rendered tile while no same-or-shallower rendered tile covers its area,
+    // for at most coverHoldMaxFrames frames. The age cap makes every hold
+    // self-extinguishing (pans and steady-state zoom-ins age out in ~250 ms,
+    // masked behind the new cover; updateTileMasks dedupes overlap per
+    // pixel), and zoom-outs drop instantly when the shallower parent renders.
+    // Skipped on relayout — stale-style tiles must not linger.
+    static const bool coverHoldDisabled = std::getenv("KLATTRA_DISABLE_COVERHOLD") != nullptr;
+    static const uint8_t coverHoldMaxFrames = [] {
+        const char* v = std::getenv("KLATTRA_COVERHOLD_FRAMES");
+        const long parsed = v ? std::strtol(v, nullptr, 10) : 0;
+        return static_cast<uint8_t>((parsed > 0 && parsed < 255) ? parsed : 15);
+    }();
 
     std::size_t coverHeld = 0;
+    std::map<UnwrappedTileID, uint8_t> nextCoverHoldAges;
     for (auto previouslyRenderedTile : previouslyRenderedTiles) {
         Tile& tile = previouslyRenderedTile.second;
         tile.markRenderedPreviously();
@@ -310,19 +310,32 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
             addRenderTile(previouslyRenderedTile.first, tile);
             continue;
         }
-        if (unpaintedIdealTiles.empty() || !tile.isRenderable()) {
+        if (coverHoldDisabled || needsRelayout || !tile.isRenderable()) {
             continue;
         }
         const UnwrappedTileID& previousID = previouslyRenderedTile.first;
-        for (const auto& unpainted : unpaintedIdealTiles) {
-            if (previousID == unpainted || previousID.isChildOf(unpainted) || unpainted.isChildOf(previousID)) {
-                retainTileFn(tile, TileNecessity::Optional);
-                addRenderTile(previousID, tile);
-                ++coverHeld;
+        bool covered = false;
+        for (const auto& rendered : renderedTiles) {
+            const UnwrappedTileID& r = rendered.first;
+            if (r == previousID || previousID.isChildOf(r)) {
+                covered = true;
                 break;
             }
         }
+        if (covered) {
+            continue;
+        }
+        const auto ageIt = coverHoldAges.find(previousID);
+        const uint8_t age = ageIt == coverHoldAges.end() ? 0 : ageIt->second;
+        if (age >= coverHoldMaxFrames) {
+            continue;
+        }
+        nextCoverHoldAges[previousID] = static_cast<uint8_t>(age + 1);
+        retainTileFn(tile, TileNecessity::Optional);
+        addRenderTile(previousID, tile);
+        ++coverHeld;
     }
+    coverHoldAges = std::move(nextCoverHoldAges);
 
     // KLATTRA diagnostics: cover-hold activity. Logs on change (including the
     // return to 0) plus a 1 Hz heartbeat while holds are active. Opt out:
@@ -610,6 +623,7 @@ void TilePyramid::clearAll() {
     fadingTiles = false;
     tiles.clear();
     renderedTiles.clear();
+    coverHoldAges.clear();
     cache.clear();
 }
 

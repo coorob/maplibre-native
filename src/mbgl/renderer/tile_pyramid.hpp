@@ -79,6 +79,10 @@ private:
     TileCache cache;
 
     std::map<UnwrappedTileID, std::reference_wrapper<Tile>> renderedTiles; // Sorted by tile id.
+    // Cover-hold ages: frames each previously-rendered tile has been kept in
+    // the rendered set while no same-or-shallower rendered tile covers its
+    // area (2D transition flash bridging). Entries expire at the age cap.
+    std::map<UnwrappedTileID, uint8_t> coverHoldAges;
     TileObserver* observer = nullptr;
 
     float prevLng = 0;
