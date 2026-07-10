@@ -434,13 +434,20 @@ std::unique_ptr<RenderTree> RenderOrchestrator::createRenderTree(
                 // colour". When terrain is active, force the slow path so update() runs
                 // and emits drape drawables.
                 const bool terrainActive = renderTerrain && renderTerrain->isEnabled();
-                if (backgroundLayerAsColor && layer.baseImpl == layerImpls->front() && !terrainActive) {
+                if (layer.baseImpl == layerImpls->front()) {
+                    // Populate the clear colour from the front background
+                    // layer UNCONDITIONALLY — with a shared context
+                    // (React Native) backgroundLayerAsColor is false and the
+                    // old gating left the clear at default black, which is
+                    // the backdrop every content gap flashed through.
                     const auto& solidBackground = layer.getSolidBackground();
                     if (solidBackground) {
                         renderTreeParameters->backgroundColor = *solidBackground;
                         lastSolidBackgroundColor = *solidBackground;
-                        continue; // This layer is shown with background color,
-                                  // and it shall not be added to render items.
+                        if (backgroundLayerAsColor && !terrainActive) {
+                            continue; // This layer is shown with background color,
+                                      // and it shall not be added to render items.
+                        }
                     }
                 }
                 renderItemsEmplaceHint = layerRenderItems.emplace_hint(

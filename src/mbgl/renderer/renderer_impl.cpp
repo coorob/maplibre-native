@@ -398,7 +398,15 @@ void Renderer::Impl::render(const RenderTree& renderTree, const std::shared_ptr<
             std::optional<Color> color;
             if (parameters.debugOptions & MapDebugOptions::Overdraw) {
                 color = Color::black();
-            } else if (!backend.contextIsShared()) {
+            } else {
+                // Always clear (KLATTRA, 2D black flash): with a shared
+                // context this used to skip the clear (LoadActionLoad), but
+                // CAMetalLayer drawable contents are UNDEFINED after
+                // presentation, so the frame base loaded garbage/black. Any
+                // frame whose background tile quads miss (cover fragments,
+                // style mid-load at boot) painted over a black base — the
+                // flash. Clearing to the style background makes the base
+                // match the map, and clears are cheaper than loads on TBDR.
                 color = renderTreeParameters.backgroundColor;
             }
             parameters.renderPass = parameters.encoder->createRenderPass(
