@@ -10,7 +10,9 @@
 #include <mbgl/renderer/paint_parameters.hpp>
 #include <mbgl/shaders/mtl/shader_program.hpp>
 #include <mbgl/util/convert.hpp>
+#include <mbgl/util/logging.hpp>
 
+#include <array>
 #include <cstdio>
 #include <cstdlib>
 #include <unordered_map>
@@ -75,6 +77,51 @@ void klattraDiagGroupPresence(
     if (frame != st.lastFrame) {
         st.lastFrame = frame;
         st.lastCount = groupEnabled ? drawableCount : 0;
+    }
+}
+// KLATTRA diagnostics (2D black-flash hunt): device-visible drawn-count
+// tracking — own copy per file, see tile_layer_group.cpp for rationale.
+void klattraDiagLandDraw(const void* group,
+                         const std::string& name,
+                         uint64_t frame,
+                         int pass,
+                         std::size_t drawn,
+                         std::size_t skippedPass,
+                         std::size_t skippedDisabled) {
+    static const bool enabled = [] {
+        const char* v = std::getenv("KLATTRA_LOG_LANDDRAW");
+        return !(v && (*v == '0' || *v == 'f' || *v == 'F'));
+    }();
+    if (!enabled) return;
+    const bool watched = name.find("land") != std::string::npos || name.find("Land") != std::string::npos ||
+                         name.find("topoColorRelief") != std::string::npos ||
+                         name.find("vatten") != std::string::npos || name.find("background") != std::string::npos;
+    if (!watched) return;
+    struct State {
+        std::size_t lastDrawn = SIZE_MAX;
+    };
+    static std::unordered_map<const void*, std::array<State, 4>> states;
+    const std::size_t slot = pass == 1 ? 0 : pass == 2 ? 1 : pass == 4 ? 2 : 3;
+    auto& st = states[group][slot];
+    if (st.lastDrawn != drawn) {
+        Log::Warning(Event::Render,
+                     "[KLATTRA LANDDRAW] group=" + name + " pass=" + std::to_string(pass) + " frame=" +
+                         std::to_string(frame) + " drawn=" + std::to_string(drawn) + " skippedPass=" +
+                         std::to_string(skippedPass) + " skippedDisabled=" + std::to_string(skippedDisabled) +
+                         " prev=" + (st.lastDrawn == SIZE_MAX ? std::string("-") : std::to_string(st.lastDrawn)));
+        static const bool traceStderr = std::getenv("KLATTRA_TRACE_STDERR") != nullptr;
+        if (traceStderr) {
+            fprintf(stderr,
+                    "[KLATTRA_TRACE] [KLATTRA LANDDRAW] group=%s pass=%d frame=%llu drawn=%zu skippedPass=%zu "
+                    "skippedDisabled=%zu\n",
+                    name.c_str(),
+                    pass,
+                    static_cast<unsigned long long>(frame),
+                    drawn,
+                    skippedPass,
+                    skippedDisabled);
+        }
+        st.lastDrawn = drawn;
     }
 }
 } // namespace
@@ -150,8 +197,14 @@ void LayerGroup::render(RenderOrchestrator&, PaintParameters& parameters) {
     }
 
     bool bindUBOs = false;
+    std::size_t drawnCount = 0, skippedPass = 0, skippedDisabled = 0;
     visitDrawables([&](gfx::Drawable& drawable) {
-        if (!drawable.getEnabled() || !drawable.hasRenderPass(parameters.pass)) {
+        if (!drawable.getEnabled()) {
+            ++skippedDisabled;
+            return;
+        }
+        if (!drawable.hasRenderPass(parameters.pass)) {
+            ++skippedPass;
             return;
         }
 
@@ -170,7 +223,19 @@ void LayerGroup::render(RenderOrchestrator&, PaintParameters& parameters) {
         }
 
         drawable.draw(parameters);
+        ++drawnCount;
     });
+
+    // KLATTRA diagnostics (2D black-flash hunt, device-visible): see
+    // tile_layer_group.cpp — the background group lives here, and it is the
+    // bottom of the land stack that goes missing in the flash frame.
+    klattraDiagLandDraw(this,
+                        getName(),
+                        static_cast<Context&>(parameters.context).diagFrameIndex(),
+                        static_cast<int>(parameters.pass),
+                        drawnCount,
+                        skippedPass,
+                        skippedDisabled);
 }
 
 } // namespace mtl

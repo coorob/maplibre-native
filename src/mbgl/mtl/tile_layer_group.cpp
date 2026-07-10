@@ -13,6 +13,7 @@
 
 #include <Metal/Metal.hpp>
 
+#include <array>
 #include <cstdio>
 #include <cstdlib>
 #include <unordered_map>
@@ -79,6 +80,58 @@ void klattraDiagGroupPresence(
     if (frame != st.lastFrame) {
         st.lastFrame = frame;
         st.lastCount = groupEnabled ? drawableCount : 0;
+    }
+}
+} // namespace
+
+namespace {
+// KLATTRA diagnostics (2D black-flash hunt): device-visible drawn-count
+// tracking for the land watchlist. Logs at Warning (passes the release
+// filter and DEVICE syslog, unlike the sim-only stderr probes) whenever a
+// watched group's drawn count changes for a pass. Water is on the list as
+// the control — in the flash frame water draws while land fills do not.
+void klattraDiagLandDraw(const void* group,
+                         const std::string& name,
+                         uint64_t frame,
+                         int pass,
+                         std::size_t drawn,
+                         std::size_t skippedPass,
+                         std::size_t skippedDisabled) {
+    static const bool enabled = [] {
+        const char* v = std::getenv("KLATTRA_LOG_LANDDRAW");
+        return !(v && (*v == '0' || *v == 'f' || *v == 'F'));
+    }();
+    if (!enabled) return;
+    const bool watched = name.find("land") != std::string::npos || name.find("Land") != std::string::npos ||
+                         name.find("topoColorRelief") != std::string::npos ||
+                         name.find("vatten") != std::string::npos || name.find("background") != std::string::npos;
+    if (!watched) return;
+    struct State {
+        std::size_t lastDrawn = SIZE_MAX;
+    };
+    static std::unordered_map<const void*, std::array<State, 4>> states; // per render pass slot
+    // RenderPass values are bit flags (Opaque=1, Translucent=2, Pass3D=4).
+    const std::size_t slot = pass == 1 ? 0 : pass == 2 ? 1 : pass == 4 ? 2 : 3;
+    auto& st = states[group][slot];
+    if (st.lastDrawn != drawn) {
+        Log::Warning(Event::Render,
+                     "[KLATTRA LANDDRAW] group=" + name + " pass=" + std::to_string(pass) + " frame=" +
+                         std::to_string(frame) + " drawn=" + std::to_string(drawn) + " skippedPass=" +
+                         std::to_string(skippedPass) + " skippedDisabled=" + std::to_string(skippedDisabled) +
+                         " prev=" + (st.lastDrawn == SIZE_MAX ? std::string("-") : std::to_string(st.lastDrawn)));
+        static const bool traceStderr = std::getenv("KLATTRA_TRACE_STDERR") != nullptr;
+        if (traceStderr) {
+            fprintf(stderr,
+                    "[KLATTRA_TRACE] [KLATTRA LANDDRAW] group=%s pass=%d frame=%llu drawn=%zu skippedPass=%zu "
+                    "skippedDisabled=%zu\n",
+                    name.c_str(),
+                    pass,
+                    static_cast<unsigned long long>(frame),
+                    drawn,
+                    skippedPass,
+                    skippedDisabled);
+        }
+        st.lastDrawn = drawn;
     }
 }
 } // namespace
@@ -172,8 +225,14 @@ void TileLayerGroup::render(RenderOrchestrator&, PaintParameters& parameters) {
     }
 
     bool bindUBOs = false;
+    std::size_t drawnCount = 0, skippedPass = 0, skippedDisabled = 0;
     visitDrawables([&](gfx::Drawable& drawable) {
-        if (!drawable.getEnabled() || !drawable.hasRenderPass(parameters.pass)) {
+        if (!drawable.getEnabled()) {
+            ++skippedDisabled;
+            return;
+        }
+        if (!drawable.hasRenderPass(parameters.pass)) {
+            ++skippedPass;
             return;
         }
 
@@ -195,7 +254,21 @@ void TileLayerGroup::render(RenderOrchestrator&, PaintParameters& parameters) {
         }
 
         drawable.draw(parameters);
+        ++drawnCount;
     });
+
+    // KLATTRA diagnostics (2D black-flash hunt, device-visible): the flash
+    // frame draws lines/symbols from a tile while the SAME tile's land fill
+    // layers contribute nothing. Log drawn-count changes for the land
+    // watchlist (+ water as the control) at Warning so DEVICE syslog shows
+    // them (stderr probes are sim-only). Opt out: KLATTRA_LOG_LANDDRAW=0.
+    klattraDiagLandDraw(this,
+                        getName(),
+                        static_cast<Context&>(parameters.context).diagFrameIndex(),
+                        static_cast<int>(parameters.pass),
+                        drawnCount,
+                        skippedPass,
+                        skippedDisabled);
 }
 
 } // namespace mtl
