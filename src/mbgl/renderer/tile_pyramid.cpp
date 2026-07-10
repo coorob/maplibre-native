@@ -314,11 +314,20 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
             continue;
         }
         const UnwrappedTileID& previousID = previouslyRenderedTile.first;
-        bool covered = false;
-        for (const auto& rendered : renderedTiles) {
-            const UnwrappedTileID& r = rendered.first;
-            if (r == previousID || previousID.isChildOf(r)) {
-                covered = true;
+        // Same-or-deeper coverage ONLY (v3): a shallower rendered parent can
+        // be feature-empty at coarse zooms (the topo archive carries no land
+        // polygons below ~z10) — it covers the area geometrically while
+        // painting nothing, which IS the flash (traska.36 device data:
+        // z7-z9 parents inside every dip set, holds credited them, land
+        // fills still painted 1-3 tile fragments). A previously rendered
+        // tile is replaced only once all four child quadrants are rendered;
+        // everything else rides the age cap (~250 ms, masked behind newer
+        // tiles by updateTileMasks) — which is also what retires zoom-out
+        // holds, legacy-crossfade style.
+        bool covered = true;
+        for (const auto& child : previousID.children()) {
+            if (renderedTiles.find(child) == renderedTiles.end()) {
+                covered = false;
                 break;
             }
         }
