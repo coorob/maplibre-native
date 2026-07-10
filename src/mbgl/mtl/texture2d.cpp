@@ -320,7 +320,11 @@ void Texture2D::bind(RenderPass& renderPass, int32_t location) {
     // point commits at endFrame — after the main pass — so this frame reads
     // it one frame early. Both are exactly one-frame black flashes.
     if (diagIsRenderTargetColor()) {
-        static const bool trace = std::getenv("KLATTRA_TRACE_STDERR") != nullptr;
+        static const bool trace = [] {
+            if (std::getenv("KLATTRA_TRACE_STDERR") != nullptr) return true;
+            const char* v = std::getenv("KLATTRA_LOG_TEXBIND");
+            return !(v && (*v == '0' || *v == 'f' || *v == 'F'));
+        }();
         if (trace) {
             static std::atomic<int> diagBindLogBudget{200};
             if (!diagHasContentEncoded()) {
@@ -331,6 +335,12 @@ void Texture2D::bind(RenderPass& renderPass, int32_t location) {
                             size.width,
                             size.height,
                             static_cast<unsigned long long>(context.diagFrameIndex()));
+                    // Device syslog too — undefined render-target samples draw
+                    // as black tiles and the stderr line is simulator-only.
+                    mbgl::Log::Warning(mbgl::Event::Render,
+                                       "[KLATTRA TEXBIND] undefined-sample name=" + diagGetName() + " size=" +
+                                           std::to_string(size.width) + "x" + std::to_string(size.height) +
+                                           " frame=" + std::to_string(context.diagFrameIndex()));
                 }
             } else if (diagGetEncodedLateFrame() == context.diagFrameIndex()) {
                 if (diagBindLogBudget.fetch_sub(1) > 0) {

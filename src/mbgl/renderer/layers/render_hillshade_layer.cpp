@@ -1,4 +1,6 @@
 #include <mbgl/renderer/layers/render_hillshade_layer.hpp>
+
+#include <algorithm>
 #include <mbgl/renderer/buckets/hillshade_bucket.hpp>
 #include <mbgl/renderer/render_tile.hpp>
 #include <mbgl/renderer/sources/render_raster_dem_source.hpp>
@@ -186,6 +188,26 @@ void RenderHillshadeLayer::update(gfx::ShaderRegistry& shaders,
                                   const std::shared_ptr<UpdateParameters>&,
                                   [[maybe_unused]] const RenderTree& renderTree,
                                   UniqueChangeRequestVec& changes) {
+    // Prepare targets are one-shot: each renders its DEM→hillshade pass once,
+    // and afterwards only the bucket's texture reference matters. Retire them
+    // from the orchestrator's render list as soon as that pass has run.
+    // Previously they were removed ONLY on renderability transitions, which
+    // (a) leaked every target once the per-frame renderability churn was
+    // fixed (traska.26 hoist; 1,066 live targets with textures = the 3.3 GB
+    // per-process-limit jetsam on pinch-hold, 2026-07-10), and (b) could
+    // remove a target BEFORE its first render when a transition raced the
+    // prepare — an undefined texture that draws as black tiles.
+    activatedRenderTargets.erase(std::remove_if(activatedRenderTargets.begin(),
+                                                activatedRenderTargets.end(),
+                                                [&](const RenderTargetPtr& target) {
+                                                    if (target && target->hasCompletedRender()) {
+                                                        activateRenderTarget(target, false, changes);
+                                                        return true;
+                                                    }
+                                                    return false;
+                                                }),
+                                 activatedRenderTargets.end());
+
     if (!renderTiles || renderTiles->empty()) {
         removeAllDrawables();
         return;
