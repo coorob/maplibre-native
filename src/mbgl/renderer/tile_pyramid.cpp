@@ -74,6 +74,35 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
     // If we're not going to render anything, move our existing tiles into
     // the cache (if they're not stale) or abandon them, and return.
     if (!needsRendering) {
+        // KLATTRA diagnostics (2D transition flash, post-.34): this purge is
+        // the only path that empties renderedTiles without a trace — a
+        // one-frame needsRendering flap here would explain the vector land
+        // pyramids collapsing to fragments with COVERHOLD silent (nothing
+        // left to hold) and SRCTILES only seeing the aftermath as a DIP.
+        // Opt out: KLATTRA_LOG_SRCPURGE=0.
+        if (!renderedTiles.empty()) {
+            static const bool purgeLog = [] {
+                const char* v = std::getenv("KLATTRA_LOG_SRCPURGE");
+                return !(v && (*v == '0' || *v == 'f' || *v == 'F'));
+            }();
+            if (purgeLog) {
+                Log::Warning(Event::Render,
+                             "[KLATTRA SRCPURGE] source=" + sourceImpl.id +
+                                 " droppedRendered=" + std::to_string(renderedTiles.size()) +
+                                 " tilesHeld=" + std::to_string(tiles.size()) +
+                                 " relayout=" + (needsRelayout ? "1" : "0"));
+                static const bool traceStderr = std::getenv("KLATTRA_TRACE_STDERR") != nullptr;
+                if (traceStderr) {
+                    fprintf(stderr,
+                            "[KLATTRA_TRACE] [KLATTRA SRCPURGE] source=%s droppedRendered=%zu tilesHeld=%zu "
+                            "relayout=%d\n",
+                            sourceImpl.id.c_str(),
+                            renderedTiles.size(),
+                            tiles.size(),
+                            needsRelayout ? 1 : 0);
+                }
+            }
+        }
         for (auto& entry : tiles) {
             if (!needsRelayout) {
                 // These tiles are invisible, we set optional necessity
@@ -423,7 +452,8 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
                 Log::Warning(Event::Render,
                              "[KLATTRA SRCTILES] source=" + sourceImpl.id + " rendered=" + std::to_string(rendered) +
                                  " prev=" + (st.last == SIZE_MAX ? std::string("-") : std::to_string(st.last)) +
-                                 " tilesHeld=" + std::to_string(tiles.size()) + (dip ? " DIP" : "") + dipIDs);
+                                 " tilesHeld=" + std::to_string(tiles.size()) +
+                                 " ideal=" + std::to_string(idealTiles.size()) + (dip ? " DIP" : "") + dipIDs);
                 static const bool traceStderr = std::getenv("KLATTRA_TRACE_STDERR") != nullptr;
                 if (traceStderr) {
                     fprintf(stderr,
