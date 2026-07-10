@@ -32,6 +32,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <cstdint>
 #include <cstring>
 
 namespace mbgl {
@@ -309,6 +310,26 @@ gfx::ShaderProgramBasePtr Context::getGenericShader(gfx::ShaderRegistry& shaders
 TileLayerGroupPtr Context::createTileLayerGroup(int32_t layerIndex, std::size_t initialCapacity, std::string name) {
     auto tileLayerGroup = std::make_shared<TileLayerGroup>(layerIndex, initialCapacity, std::move(name));
     tileLayerGroup->setObserver(observer);
+    // KLATTRA diagnostics (2D black-flash hunt): every group creation
+    // funnels through here — capacity fingerprints the call site (main
+    // layer groups use 64, drape blocks 4, hillshade prepare 1). Pairs
+    // with the destroy log in ~TileLayerGroup for leak accounting: the
+    // pinch-hold jetsam died at the 3.3 GB per-process limit.
+    static const bool grouplife = [] {
+        const char* v = std::getenv("KLATTRA_LOG_GROUPLIFE");
+        return !(v && (*v == '0' || *v == 'f' || *v == 'F'));
+    }();
+    if (grouplife) {
+        const auto& n = tileLayerGroup->getName();
+        const bool watched = n.find("land") != std::string::npos || n.find("topoColorRelief") != std::string::npos ||
+                             n.find("vatten") != std::string::npos || n.find("background") != std::string::npos;
+        if (watched) {
+            Log::Warning(Event::Render,
+                         "[KLATTRA GROUPLIFE] create name=" + n + " idx=" + std::to_string(layerIndex) +
+                             " cap=" + std::to_string(initialCapacity) + " grp=" +
+                             std::to_string(reinterpret_cast<uintptr_t>(tileLayerGroup.get())));
+        }
+    }
     return tileLayerGroup;
 }
 

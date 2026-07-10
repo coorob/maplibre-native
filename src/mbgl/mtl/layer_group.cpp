@@ -13,6 +13,7 @@
 #include <mbgl/util/logging.hpp>
 
 #include <array>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <unordered_map>
@@ -105,7 +106,8 @@ void klattraDiagLandDraw(const void* group,
     auto& st = states[group][slot];
     if (st.lastDrawn != drawn) {
         Log::Warning(Event::Render,
-                     "[KLATTRA LANDDRAW] group=" + name + " pass=" + std::to_string(pass) + " frame=" +
+                     "[KLATTRA LANDDRAW] group=" + name + " grp=" + std::to_string(reinterpret_cast<uintptr_t>(group)) +
+                         " pass=" + std::to_string(pass) + " frame=" +
                          std::to_string(frame) + " drawn=" + std::to_string(drawn) + " skippedPass=" +
                          std::to_string(skippedPass) + " skippedDisabled=" + std::to_string(skippedDisabled) +
                          " prev=" + (st.lastDrawn == SIZE_MAX ? std::string("-") : std::to_string(st.lastDrawn)));

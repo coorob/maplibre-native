@@ -22,7 +22,8 @@ class RenderPass;
 class TileLayerGroup : public mbgl::TileLayerGroup {
 public:
     TileLayerGroup(int32_t layerIndex, std::size_t initialCapacity, std::string name);
-    ~TileLayerGroup() override {}
+    // Out of line for the KLATTRA GROUPLIFE destroy log (leak accounting).
+    ~TileLayerGroup() override;
 
     void upload(gfx::UploadPass&) override;
     void render(RenderOrchestrator&, PaintParameters&) override;

@@ -14,6 +14,7 @@
 #include <Metal/Metal.hpp>
 
 #include <array>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <unordered_map>
@@ -23,6 +24,26 @@ namespace mtl {
 
 TileLayerGroup::TileLayerGroup(int32_t layerIndex_, std::size_t initialCapacity, std::string name_)
     : mbgl::TileLayerGroup(layerIndex_, initialCapacity, std::move(name_)) {}
+
+TileLayerGroup::~TileLayerGroup() {
+    // KLATTRA diagnostics (2D black-flash hunt): pairs with the create log
+    // in Context::createTileLayerGroup — create-without-destroy imbalance
+    // during pinch churn is the 3.3 GB jetsam's leak accounting.
+    static const bool grouplife = [] {
+        const char* v = std::getenv("KLATTRA_LOG_GROUPLIFE");
+        return !(v && (*v == '0' || *v == 'f' || *v == 'F'));
+    }();
+    if (grouplife) {
+        const auto& n = getName();
+        const bool watched = n.find("land") != std::string::npos || n.find("topoColorRelief") != std::string::npos ||
+                             n.find("vatten") != std::string::npos || n.find("background") != std::string::npos;
+        if (watched) {
+            Log::Warning(Event::Render,
+                         "[KLATTRA GROUPLIFE] destroy name=" + n + " grp=" +
+                             std::to_string(reinterpret_cast<uintptr_t>(this)));
+        }
+    }
+}
 
 void TileLayerGroup::upload(gfx::UploadPass& uploadPass) {
     if (!enabled || !getDrawableCount()) {
@@ -115,7 +136,8 @@ void klattraDiagLandDraw(const void* group,
     auto& st = states[group][slot];
     if (st.lastDrawn != drawn) {
         Log::Warning(Event::Render,
-                     "[KLATTRA LANDDRAW] group=" + name + " pass=" + std::to_string(pass) + " frame=" +
+                     "[KLATTRA LANDDRAW] group=" + name + " grp=" + std::to_string(reinterpret_cast<uintptr_t>(group)) +
+                         " pass=" + std::to_string(pass) + " frame=" +
                          std::to_string(frame) + " drawn=" + std::to_string(drawn) + " skippedPass=" +
                          std::to_string(skippedPass) + " skippedDisabled=" + std::to_string(skippedDisabled) +
                          " prev=" + (st.lastDrawn == SIZE_MAX ? std::string("-") : std::to_string(st.lastDrawn)));
