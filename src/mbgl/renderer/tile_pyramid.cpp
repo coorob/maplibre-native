@@ -408,10 +408,22 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
             const bool dip = st.last != SIZE_MAX && rendered + 2 <= st.last;
             if (dip || now - st.lastLog >= std::chrono::seconds(1)) {
                 st.lastLog = now;
+                // On a dip, name the surviving rendered tiles so the log can
+                // be diffed against TILEPAINT's painted-tile ids.
+                std::string dipIDs;
+                if (dip) {
+                    dipIDs = " ids=";
+                    for (const auto& entry : renderedTiles) {
+                        if (dipIDs.size() > 5) dipIDs += ' ';
+                        dipIDs += std::to_string(entry.first.canonical.z) + ":" +
+                                  std::to_string(entry.first.canonical.x) + "," +
+                                  std::to_string(entry.first.canonical.y);
+                    }
+                }
                 Log::Warning(Event::Render,
                              "[KLATTRA SRCTILES] source=" + sourceImpl.id + " rendered=" + std::to_string(rendered) +
                                  " prev=" + (st.last == SIZE_MAX ? std::string("-") : std::to_string(st.last)) +
-                                 " tilesHeld=" + std::to_string(tiles.size()) + (dip ? " DIP" : ""));
+                                 " tilesHeld=" + std::to_string(tiles.size()) + (dip ? " DIP" : "") + dipIDs);
                 static const bool traceStderr = std::getenv("KLATTRA_TRACE_STDERR") != nullptr;
                 if (traceStderr) {
                     fprintf(stderr,

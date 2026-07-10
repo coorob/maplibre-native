@@ -13,11 +13,15 @@
 
 #include <Metal/Metal.hpp>
 
+#include <mbgl/tile/tile_id.hpp>
+
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <unordered_map>
+#include <vector>
 
 namespace mbgl {
 namespace mtl {
@@ -156,6 +160,66 @@ void klattraDiagLandDraw(const void* group,
         st.lastDrawn = drawn;
     }
 }
+
+// KLATTRA diagnostics (2D transition flash, post-.33): the rendered TILE SET
+// stays geometrically covered through the flash (COVERHOLD ≈ silent on .33)
+// yet land drawables still vanish — so the gap is between renderedTiles and
+// what actually paints. Log the DISTINCT tile IDs drawn by the watched land
+// group whenever the set changes; diff against the SRCTILES DIP id list to
+// name the rendered-but-unpainted tiles. Opt out: KLATTRA_LOG_TILEPAINT=0.
+bool klattraTilePaintEnabled() {
+    static const bool enabled = [] {
+        const char* v = std::getenv("KLATTRA_LOG_TILEPAINT");
+        return !(v && (*v == '0' || *v == 'f' || *v == 'F'));
+    }();
+    return enabled;
+}
+
+void klattraDiagTilePaint(const void* group,
+                          const std::string& name,
+                          uint64_t frame,
+                          int pass,
+                          std::size_t drawn,
+                          const std::vector<OverscaledTileID>& paintedIDs) {
+    struct State {
+        std::vector<OverscaledTileID> last;
+        std::size_t maxSeen = 0;
+        bool logged = false;
+    };
+    static std::unordered_map<const void*, std::array<State, 4>> states;
+    const std::size_t slot = pass == 1 ? 0 : pass == 2 ? 1 : pass == 4 ? 2 : 3;
+    auto& st = states[group][slot];
+    st.maxSeen = std::max(st.maxSeen, paintedIDs.size());
+    // Skip the single-drawable prepare/drape groups that share the layer name;
+    // once a group has ever painted >1 tile, follow every change (including
+    // the collapse to 1 or 0).
+    if (st.maxSeen <= 1) return;
+    if (st.logged && st.last == paintedIDs) return;
+    st.last = paintedIDs;
+    st.logged = true;
+    std::string ids;
+    for (const auto& id : paintedIDs) {
+        if (!ids.empty()) ids += ' ';
+        ids += std::to_string(id.canonical.z) + ":" + std::to_string(id.canonical.x) + "," +
+               std::to_string(id.canonical.y);
+    }
+    Log::Warning(Event::Render,
+                 "[KLATTRA TILEPAINT] group=" + name + " grp=" + std::to_string(reinterpret_cast<uintptr_t>(group)) +
+                     " pass=" + std::to_string(pass) + " frame=" + std::to_string(frame) +
+                     " tiles=" + std::to_string(paintedIDs.size()) + " drawn=" + std::to_string(drawn) +
+                     " ids=" + ids);
+    static const bool traceStderr = std::getenv("KLATTRA_TRACE_STDERR") != nullptr;
+    if (traceStderr) {
+        fprintf(stderr,
+                "[KLATTRA_TRACE] [KLATTRA TILEPAINT] group=%s pass=%d frame=%llu tiles=%zu drawn=%zu ids=%s\n",
+                name.c_str(),
+                pass,
+                static_cast<unsigned long long>(frame),
+                paintedIDs.size(),
+                drawn,
+                ids.c_str());
+    }
+}
 } // namespace
 
 void TileLayerGroup::render(RenderOrchestrator&, PaintParameters& parameters) {
@@ -248,6 +312,11 @@ void TileLayerGroup::render(RenderOrchestrator&, PaintParameters& parameters) {
 
     bool bindUBOs = false;
     std::size_t drawnCount = 0, skippedPass = 0, skippedDisabled = 0;
+    const bool tilePaintWatched = klattraTilePaintEnabled() &&
+                                  (getName().find("topoColorRelief") != std::string::npos ||
+                                   getName().find("land") != std::string::npos ||
+                                   getName().find("Land") != std::string::npos);
+    std::vector<OverscaledTileID> paintedIDs;
     visitDrawables([&](gfx::Drawable& drawable) {
         if (!drawable.getEnabled()) {
             ++skippedDisabled;
@@ -256,6 +325,10 @@ void TileLayerGroup::render(RenderOrchestrator&, PaintParameters& parameters) {
         if (!drawable.hasRenderPass(parameters.pass)) {
             ++skippedPass;
             return;
+        }
+        if (tilePaintWatched && drawable.getTileID() &&
+            std::find(paintedIDs.begin(), paintedIDs.end(), *drawable.getTileID()) == paintedIDs.end()) {
+            paintedIDs.push_back(*drawable.getTileID());
         }
 
         if (!bindUBOs) {
@@ -291,6 +364,16 @@ void TileLayerGroup::render(RenderOrchestrator&, PaintParameters& parameters) {
                         drawnCount,
                         skippedPass,
                         skippedDisabled);
+
+    if (tilePaintWatched) {
+        std::sort(paintedIDs.begin(), paintedIDs.end());
+        klattraDiagTilePaint(this,
+                             getName(),
+                             static_cast<Context&>(parameters.context).diagFrameIndex(),
+                             static_cast<int>(parameters.pass),
+                             drawnCount,
+                             paintedIDs);
+    }
 }
 
 } // namespace mtl
