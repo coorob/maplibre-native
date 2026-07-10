@@ -25,6 +25,8 @@
 #include <mbgl/gfx/drawable_builder.hpp>
 #include <mbgl/gfx/drawable_impl.hpp>
 #include <mbgl/gfx/hillshade_prepare_drawable_data.hpp>
+
+#include <cstring>
 #include <mbgl/gfx/shader_group.hpp>
 #include <mbgl/gfx/shader_registry.hpp>
 
@@ -342,6 +344,23 @@ void RenderHillshadeLayer::update(gfx::ShaderRegistry& shaders,
         return hillshadePrepareVertexAttrs;
     };
 
+    // Flat-neutral prepared texture: RG=128 decodes to deriv=0 in the
+    // hillshade shader, so a tile whose prepare target has not baked yet
+    // shades exactly like flat terrain — instead of sampling undefined
+    // (black) memory (the launch/churn black flash) or blinking off
+    // entirely (the .42 enable-gate).
+    if (!neutralPrepareTexture) {
+        auto img = std::make_shared<PremultipliedImage>(Size{2, 2});
+        constexpr uint8_t flatPixel[4] = {128, 128, 0, 255};
+        for (std::size_t i = 0; i + 3 < img->bytes(); i += 4) {
+            std::memcpy(img->data.get() + i, flatPixel, 4);
+        }
+        neutralPrepareTexture = context.createTexture2D();
+        if (neutralPrepareTexture) {
+            neutralPrepareTexture->setImage(std::move(img));
+        }
+    }
+
     for (const RenderTile& tile : *renderTiles) {
         const auto& tileID = tile.getOverscaledTileID();
 
@@ -588,18 +607,19 @@ void RenderHillshadeLayer::update(gfx::ShaderRegistry& shaders,
                                             std::move(indices),
                                             segments->data(),
                                             segments->size());
-            drawable.setTexture(bucket.renderTarget->getTexture(), idHillshadeImageTexture);
             // KLATTRA (2D black flash, the painted-black half): a freshly
-            // created prepare target is cleared but not yet baked — sampling
-            // it paints the tint BLACK across the tile for the frame(s)
-            // before the prepare pass runs (viewport-wide at boot when every
-            // target is new; per new-tile batch during zoom churn; water
-            // survives because the style re-draws it above the relief).
-            // Keep the main drawable disabled until the bake has completed;
-            // updateExisting runs every frame, so it re-enables immediately
-            // after. The gap shows the style-background clear (matching
-            // paper) instead of black.
-            drawable.setEnabled(bucket.renderTarget && bucket.renderTarget->hasCompletedRender());
+            // created prepare target holds UNDEFINED memory until its bake
+            // runs — sampling it painted the tile black (viewport-wide at
+            // boot when every target is new; per new-tile batch during zoom
+            // churn; water survives because the style re-draws it above the
+            // relief). Until the bake completes, sample the flat-neutral
+            // texture instead — the tile shades like flat terrain, and the
+            // real shading swaps in the frame after the bake (updateExisting
+            // runs every frame).
+            const bool prepared = bucket.renderTarget && bucket.renderTarget->hasCompletedRender();
+            drawable.setTexture(prepared ? bucket.renderTarget->getTexture() : neutralPrepareTexture,
+                                idHillshadeImageTexture);
+            drawable.setEnabled(prepared || neutralPrepareTexture != nullptr);
 
             return true;
         };
@@ -615,7 +635,9 @@ void RenderHillshadeLayer::update(gfx::ShaderRegistry& shaders,
         hillshadeBuilder->setVertexAttributes(buildVertexAttributes());
         hillshadeBuilder->setRawVertices({}, vertices->elements(), gfx::AttributeDataType::Short2);
         hillshadeBuilder->setSegments(gfx::Triangles(), indices->vector(), segments->data(), segments->size());
-        hillshadeBuilder->setTexture(bucket.renderTarget->getTexture(), idHillshadeImageTexture);
+        const bool bucketPrepared = bucket.renderTarget && bucket.renderTarget->hasCompletedRender();
+        hillshadeBuilder->setTexture(
+            bucketPrepared ? bucket.renderTarget->getTexture() : neutralPrepareTexture, idHillshadeImageTexture);
 
         hillshadeBuilder->flush(context);
 
@@ -630,9 +652,8 @@ void RenderHillshadeLayer::update(gfx::ShaderRegistry& shaders,
             }
             drawable->setTileID(tileID);
             drawable->setLayerTweaker(layerTweaker);
-            // See updateExisting above: stay disabled until the prepare
-            // target has baked once, else this paints black tint.
-            drawable->setEnabled(bucket.renderTarget && bucket.renderTarget->hasCompletedRender());
+            // See updateExisting above: neutral texture until baked.
+            drawable->setEnabled(bucketPrepared || neutralPrepareTexture != nullptr);
 
             tileLayerGroup->addDrawable(renderPass, tileID, std::move(drawable));
             ++stats.drawablesAdded;

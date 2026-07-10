@@ -5,6 +5,7 @@
 #include <mbgl/style/layers/hillshade_layer_impl.hpp>
 #include <mbgl/style/layers/hillshade_layer_properties.hpp>
 #include <mbgl/tile/tile_id.hpp>
+#include <mbgl/gfx/texture2d.hpp>
 
 #include <unordered_map>
 
@@ -62,6 +63,10 @@ private:
     std::shared_ptr<HillshadeVertexVector> staticDataSharedVertices;
 
     LayerTweakerPtr prepareLayerTweaker;
+    // Flat-neutral prepared texture (RG=128 -> deriv 0): sampled by main
+    // drawables whose prepare target has not baked yet, so fresh tiles shade
+    // like flat terrain instead of undefined (black) memory.
+    gfx::Texture2DPtr neutralPrepareTexture;
 
     // Phase 2 drape routing: per-drape-target HillshadeLayerTweakers. One
     // entry per overlapping DEM drape RenderTarget, each rebinding the
