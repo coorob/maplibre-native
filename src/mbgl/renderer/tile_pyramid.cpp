@@ -15,7 +15,11 @@
 
 #include <mapbox/geometry/envelope.hpp>
 
+#include <chrono>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <unordered_map>
 #include <algorithm>
 
 namespace mbgl {
@@ -305,6 +309,47 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
                 continue;
             }
             tile.usedByRenderedLayers |= tile.layerPropertiesUpdated(layerProperties);
+        }
+    }
+
+    // KLATTRA diagnostics (2D black-flash hunt): rendered-set continuity.
+    // land-open DRAWABLES collapse 6→1→6 across zoom transitions (traska.31
+    // device data); this tells whether the TILE SET dips with them (cover/
+    // retention side) or holds (drawable-culling side). Logs on any ≥2 dip
+    // plus a 1 Hz heartbeat. Opt out: KLATTRA_LOG_SRCTILES=0.
+    {
+        static const bool srcTilesLog = [] {
+            const char* v = std::getenv("KLATTRA_LOG_SRCTILES");
+            return !(v && (*v == '0' || *v == 'f' || *v == 'F'));
+        }();
+        if (srcTilesLog) {
+            struct State {
+                std::size_t last = SIZE_MAX;
+                std::chrono::steady_clock::time_point lastLog{};
+            };
+            static std::unordered_map<const void*, State> states;
+            auto& st = states[this];
+            const std::size_t rendered = renderedTiles.size();
+            const auto now = std::chrono::steady_clock::now();
+            const bool dip = st.last != SIZE_MAX && rendered + 2 <= st.last;
+            if (dip || now - st.lastLog >= std::chrono::seconds(1)) {
+                st.lastLog = now;
+                Log::Warning(Event::Render,
+                             "[KLATTRA SRCTILES] source=" + sourceImpl.id + " rendered=" + std::to_string(rendered) +
+                                 " prev=" + (st.last == SIZE_MAX ? std::string("-") : std::to_string(st.last)) +
+                                 " tilesHeld=" + std::to_string(tiles.size()) + (dip ? " DIP" : ""));
+                static const bool traceStderr = std::getenv("KLATTRA_TRACE_STDERR") != nullptr;
+                if (traceStderr) {
+                    fprintf(stderr,
+                            "[KLATTRA_TRACE] [KLATTRA SRCTILES] source=%s rendered=%zu prev=%zu tilesHeld=%zu%s\n",
+                            sourceImpl.id.c_str(),
+                            rendered,
+                            st.last == SIZE_MAX ? 0 : st.last,
+                            tiles.size(),
+                            dip ? " DIP" : "");
+                }
+            }
+            st.last = rendered;
         }
     }
 
