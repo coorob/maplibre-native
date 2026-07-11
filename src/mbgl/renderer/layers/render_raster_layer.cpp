@@ -54,6 +54,14 @@ bool klattraKeepStaleRasterDrape() {
     return enabled;
 }
 
+// .57: drape drawables render the full tile extent instead of the
+// main-pass mask geometry, with drawPriority = canonical z for painter's
+// order. Kill switch reverts to masked drape geometry for A/B.
+bool klattraDrapeFullQuad() {
+    static const bool enabled = std::getenv("KLATTRA_DISABLE_DRAPE_FULLQUAD") == nullptr;
+    return enabled;
+}
+
 std::string klattraDrapeIDString(const OverscaledTileID& id) {
     return "z" + std::to_string(static_cast<int>(id.canonical.z)) + "/" +
            std::to_string(id.canonical.x) + "/" + std::to_string(id.canonical.y);
@@ -226,7 +234,8 @@ void RenderRasterLayer::update(gfx::ShaderRegistry& shaders,
             gfx::Drawable* drawable,
             const RasterBucket& bucket,
             bool freshIndexBuffer = false,
-            bool localVertexBuffers = false) {
+            bool localVertexBuffers = false,
+            bool fullTileQuad = false) {
             // The bucket may later add, remove, or change masking.  In that case, the tile's
             // shared data and segments are not updated, and it needs to be re-created.
             if (drawable && bucket.sharedVertices->isModifiedAfter(drawable->createTime)) {
@@ -235,7 +244,17 @@ void RenderRasterLayer::update(gfx::ShaderRegistry& shaders,
 
             // The bucket only fills in geometry for masked tiles,
             // otherwise the standard tile extent geometry should be used.
-            const bool shared = (!bucket.sharedVertices->empty() && !bucket.sharedTriangles->empty() &&
+            // .57: drape drawables force the full-extent quad. The mask is a
+            // MAIN-pass overdraw optimisation computed against the global
+            // rendered set — inside a drape canvas it left every masked-out
+            // parent region unwritten whenever the corresponding child's
+            // drape drawable wasn't in THIS canvas yet, and unwritten canvas
+            // pixels render the style-background fallback (the flyover's
+            // green patches). Painter's order (drawPriority = z, set at the
+            // emit site) keeps coarse under fine, so full-quad overdraw is
+            // visually correct and costs one extra textured quad per parent.
+            const bool shared = !fullTileQuad &&
+                                (!bucket.sharedVertices->empty() && !bucket.sharedTriangles->empty() &&
                                  !bucket.segments.empty());
             const auto& vertices = shared ? bucket.sharedVertices : staticDataVertices;
             const auto& indices = shared ? bucket.sharedTriangles : staticDataIndices;
@@ -656,26 +675,44 @@ void RenderRasterLayer::update(gfx::ShaderRegistry& shaders,
                                         /*drawable=*/nullptr,
                                         bucket,
                                         /*freshIndexBuffer=*/true,
-                                        /*localVertexBuffers=*/true);
+                                        /*localVertexBuffers=*/true,
+                                        /*fullTileQuad=*/klattraDrapeFullQuad());
                         drapeBuilder->flush(context);
 
                         auto freshDrawables = drapeBuilder->clearDrawables();
                         if (!freshDrawables.empty() && klattraKeepStaleRasterDrape()) {
-                            // .55 supersede: replacement content is here —
-                            // NOW drop stale kept drawables whose ground this
-                            // tile re-covers. Only stale (left the raster
-                            // cover) drawables are eligible: current-cover
-                            // tiles at other zooms legitimately coexist in
-                            // one canvas and must not be evicted.
+                            // .55 supersede, tightened in .57: drop a stale
+                            // (left-the-raster-cover) drawable only when the
+                            // fresh tile covers AT LEAST everything the
+                            // stale one painted in this canvas — otherwise a
+                            // fresh quarter-tile could evict a full-canvas
+                            // parent and reopen background holes. Stale
+                            // footprint in the canvas is the deeper of
+                            // (stale, canvas); the fresh tile covers it iff
+                            // it is at same-or-coarser zoom and overlaps it.
                             drapeGroup->removeDrawablesIf([&](gfx::Drawable& drawable) {
                                 const auto& dID = drawable.getTileID();
-                                return dID && *dID != tileID && !hasRenderTile(*dID) &&
-                                       LayerTweaker::tilesOverlap(*dID, tileID);
+                                if (!dID || *dID == tileID || hasRenderTile(*dID) ||
+                                    !LayerTweaker::tilesOverlap(*dID, tileID)) {
+                                    return false;
+                                }
+                                if (dID->canonical.z <= drapeID.canonical.z) {
+                                    // Stale painted the whole canvas: fresh
+                                    // must cover the whole canvas too.
+                                    return tileID.canonical.z <= drapeID.canonical.z;
+                                }
+                                // Stale painted a sub-region (its own
+                                // footprint): fresh must contain it.
+                                return tileID.canonical.z <= dID->canonical.z;
                             });
                         }
                         for (auto& drapeDrawable : freshDrawables) {
                             drapeDrawable->setTileID(tileID);
                             drapeDrawable->setLayerTweaker(tw);
+                            // .57 painter's order inside the canvas: coarse
+                            // parents draw first, fine tiles over them —
+                            // required once drawables are full-extent quads.
+                            drapeDrawable->setDrawPriority(static_cast<gfx::DrawPriority>(tileID.canonical.z));
                             drapeGroup->addDrawable(renderPass, tileID, std::move(drapeDrawable));
                             ++stats.drawablesAdded;
                             ++probeAdded;
