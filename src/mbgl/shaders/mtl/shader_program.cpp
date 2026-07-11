@@ -84,12 +84,6 @@ MTLRenderPipelineStatePtr ShaderProgram::getRenderPipelineState(const gfx::Rende
                                                                 const MTLVertexDescriptorPtr& vertexDescriptor,
                                                                 const gfx::ColorMode& colorMode,
                                                                 const std::optional<std::size_t> reuseHash) const {
-    if (reuseHash.has_value()) {
-        // we'd like to reuse a previous value
-        if (auto it = renderPipelineStateCache.find(reuseHash.value()); it != renderPipelineStateCache.end())
-            return it->second;
-    }
-
     auto pool = NS::TransferPtr(NS::AutoreleasePool::alloc()->init());
 
     const auto& renderableResource = renderable.getResource<RenderableResource>();
@@ -113,6 +107,23 @@ MTLRenderPipelineStatePtr ShaderProgram::getRenderPipelineState(const gfx::Rende
                 stencilFormat = tex->pixelFormat();
             }
         }
+    }
+
+    // .59: fold the ATTACHMENT FORMATS into the reuse key. The caller's hash
+    // covers colour mode + vertex layout only, so one shader serving passes
+    // with different attachment formats (the main BGRA8 framebuffer vs
+    // RGBA8 near-ring drape targets vs packed-565 mid/far targets) had a
+    // single cache slot: whichever target drew first poisoned the pipeline
+    // for the rest, and Metal rasterised 32-bit output straight into 16-bit
+    // memory — the .58 flyover's saturated-red terrain.
+    std::optional<std::size_t> effectiveHash = reuseHash;
+    if (effectiveHash.has_value()) {
+        effectiveHash = mbgl::util::hash(reuseHash.value(),
+                                         static_cast<uint64_t>(colorFormat),
+                                         static_cast<uint64_t>(depthFormat.value_or(MTL::PixelFormatInvalid)),
+                                         static_cast<uint64_t>(stencilFormat.value_or(MTL::PixelFormatInvalid)));
+        if (auto it = renderPipelineStateCache.find(effectiveHash.value()); it != renderPipelineStateCache.end())
+            return it->second;
     }
 
     auto desc = NS::TransferPtr(MTL::RenderPipelineDescriptor::alloc()->init());
@@ -171,9 +182,9 @@ MTLRenderPipelineStatePtr ShaderProgram::getRenderPipelineState(const gfx::Rende
         assert(false);
     }
 
-    if (reuseHash.has_value()) {
-        // store the value for future reuse
-        renderPipelineStateCache[reuseHash.value()] = rps;
+    if (effectiveHash.has_value()) {
+        // store the value for future reuse (key includes attachment formats)
+        renderPipelineStateCache[effectiveHash.value()] = rps;
     }
 
     return rps;

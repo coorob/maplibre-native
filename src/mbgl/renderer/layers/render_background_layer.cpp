@@ -40,6 +40,17 @@ bool klattraLogDrapeStale() {
     return std::getenv("KLATTRA_LOG_DRAPE_STALE") != nullptr;
 }
 
+// .59 horizon void: with terrain active the background's content is already
+// draped into every canvas; the flat z=0 main-pass quads only ever SHOW
+// beyond the terrain mesh, where they painted the style background over the
+// sky-toned clear (the surviving dark-green void band at the top of flyover
+// frames). Suppress them under terrain so the retinted clear is the
+// backdrop. Kill switch reverts.
+bool klattraSuppressBgMainUnderTerrain() {
+    static const bool enabled = std::getenv("KLATTRA_KEEP_BG_MAIN_PASS") == nullptr;
+    return enabled;
+}
+
 bool klattraDisableBackgroundDrape() {
     static const bool disabled = std::getenv("KLATTRA_DISABLE_BACKGROUND_DRAPE") != nullptr;
     return disabled;
@@ -218,7 +229,19 @@ void RenderBackgroundLayer::update(gfx::ShaderRegistry& shaders,
         return drawable.getTileID() && (std::ranges::find(tileCover, *drawable.getTileID()) == tileCover.end());
     });
 
+    // .59: under active terrain the main-pass backdrop quads are suppressed
+    // (see klattraSuppressBgMainUnderTerrain above) — their content lives in
+    // the drape canvases, and on screen they only appeared beyond the mesh
+    // as the dark-green void band. Terrain off next frame → quads rebuild.
+    const bool suppressMainPass = activeTerrain && klattraSuppressBgMainUnderTerrain() &&
+                                  !klattraDisableBackgroundDrape();
+    if (suppressMainPass) {
+        stats.drawablesRemoved +=
+            tileLayerGroup->removeDrawablesIf([](gfx::Drawable&) -> bool { return true; });
+    }
+
     // For each tile in the cover set, add a tile drawable if one doesn't already exist.
+    if (!suppressMainPass)
     for (const auto& tileID : tileCover) {
         // If we already have drawables for this tile, skip.
         // If a drawable needs to be updated, that's handled in the layer tweaker.
