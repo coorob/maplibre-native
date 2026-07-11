@@ -61,12 +61,9 @@ bool klattraLogDrapeTrace() {
 // file carries its own copy — anonymous namespace). Opt out:
 // KLATTRA_LOG_COVER_SUMMARY=0.
 bool klattraLogCoverSummary() {
-    // .48-diag: default ON in this file only (the ideals/backed "holes"
-    // summary — the beige localisation instrument). tile_cover.cpp and
-    // render_raster_dem_source.cpp keep their quiet opt-in defaults.
     static const bool enabled = [] {
         const char* v = std::getenv("KLATTRA_LOG_COVER_SUMMARY");
-        return !(v && (*v == '0' || *v == 'f' || *v == 'F'));
+        return v && !(*v == '0' || *v == 'f' || *v == 'F');
     }();
     return enabled;
 }
@@ -106,10 +103,9 @@ void klattraDumpEmit(const std::string& message) {
 // klattraDumpEmit (Warning + stderr) with a per-second budget so a flight
 // cannot flood the syslog. Render-thread only — plain statics.
 bool klattraFlyDiag() {
-    // .48-diag: default ON again for the beige-localisation flight.
     static const bool enabled = [] {
         const char* v = std::getenv("KLATTRA_FLYDIAG");
-        return !(v && (*v == '0' || *v == 'f' || *v == 'F'));
+        return v && !(*v == '0' || *v == 'f' || *v == 'F');
     }();
     return enabled;
 }
@@ -521,7 +517,12 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
         static const int32_t midSize = klattraEnvTargetSize("KLATTRA_DRAPE_TARGET_SIZE_MID", 1024);
         static const int32_t farSize = klattraEnvTargetSize("KLATTRA_DRAPE_TARGET_SIZE_FAR", 512);
         static const uint32_t nearTiles = klattraEnvTileCount("KLATTRA_DRAPE_NEAR_TILES", 12);
-        static const uint32_t midTiles = klattraEnvTileCount("KLATTRA_DRAPE_MID_TILES", 24);
+        // .49: 24 -> 48. At flyover pitch the visible mid-screen spans ranks
+        // ~30-70, which under the old split wore 512² far-tier canvases —
+        // Robert's "blur so bad I can't see the trail". The .47 population
+        // cap freed the memory (322 -> ~200 canvases); spend part of it
+        // widening the 1024² ring (~+130 MB incl. mipmaps).
+        static const uint32_t midTiles = klattraEnvTileCount("KLATTRA_DRAPE_MID_TILES", 48);
         static const uint32_t ringSlack = klattraEnvTileCount("KLATTRA_DRAPE_RING_SLACK", 6);
 
         const auto drapeTargetSizeForTile = [&](const OverscaledTileID& tileID) -> int32_t {
@@ -718,20 +719,54 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
     // hidden/zoomed-out style layers can stay baked into the terrain texture.
     {
         std::unordered_set<int32_t> activeDrapeLayerIndices;
+        std::unordered_set<std::string> activeDrapeLayerNames;
         for (const auto& item : renderTree.getLayerRenderItemMap()) {
             activeDrapeLayerIndices.insert(item.layer.get().getLayerIndex());
+            activeDrapeLayerNames.insert(item.layer.get().getID());
         }
+        // .49 (the topo-plate fix): match by layer NAME as well as index.
+        // Layer indices are positional — after a style swap the new style
+        // occupies overlapping indices, so the old style's groups survived
+        // an index-only prune and their canvases kept showing the previous
+        // style's bake (device 2026-07-11: topo paper/vegetation mosaics
+        // mid-satellite-flyover). Group names carry the layer ID (drape
+        // variants add a "-drape" suffix); a group whose name matches no
+        // active layer is from a dead style and goes, which in turn lets
+        // the zero-content-group eviction below drop the stale canvas.
+        const auto layerNameActive = [&](const std::string& groupName) {
+            if (activeDrapeLayerNames.find(groupName) != activeDrapeLayerNames.end()) {
+                return true;
+            }
+            // Drape group names = layer ID + a routing suffix (fill/line/
+            // hillshade/background use "-drape", raster uses
+            // "-raster-drape"). Strip whichever matches before the lookup.
+            static const std::array<std::string, 2> drapeSuffixes = {std::string("-raster-drape"),
+                                                                     std::string("-drape")};
+            for (const auto& suffix : drapeSuffixes) {
+                if (groupName.size() > suffix.size() &&
+                    groupName.compare(groupName.size() - suffix.size(), suffix.size(), suffix) == 0) {
+                    if (activeDrapeLayerNames.find(groupName.substr(0, groupName.size() - suffix.size())) !=
+                        activeDrapeLayerNames.end()) {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        };
 
         std::size_t removedGroups = 0;
         std::vector<OverscaledTileID> staleBakeIDs;
         drapeCache.visitAll([&](const OverscaledTileID& drapeID, const TerrainDrapeTargetPtr& target) {
             if (!target) return;
             const auto removed = target->removeLayerGroupsIf(
-                [&](const int32_t layerIndex, const LayerGroupBase&) {
+                [&](const int32_t layerIndex, const LayerGroupBase& group) {
                     if (layerIndex == std::numeric_limits<int32_t>::max()) {
                         return false;
                     }
-                    return activeDrapeLayerIndices.find(layerIndex) == activeDrapeLayerIndices.end();
+                    if (activeDrapeLayerIndices.find(layerIndex) == activeDrapeLayerIndices.end()) {
+                        return true;
+                    }
+                    return !layerNameActive(group.getName());
                 });
             removedGroups += removed;
             if (removed > 0 && target->hasCompletedRender()) {
