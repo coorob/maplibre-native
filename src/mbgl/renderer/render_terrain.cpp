@@ -213,6 +213,21 @@ uint32_t klattraEnvTilePadding(const char* name, uint32_t fallback) {
     return static_cast<uint32_t>(std::clamp<unsigned long>(parsed, 0, 2));
 }
 
+double klattraEnvSeconds(const char* name, double fallback) {
+    const char* value = std::getenv(name);
+    if (!value) return fallback;
+    char* end = nullptr;
+    const double parsed = std::strtod(value, &end);
+    if (end == value) return fallback;
+    return std::clamp(parsed, 0.0, 10.0);
+}
+
+bool klattraLookaheadDisabled() {
+    static const bool disabled = std::getenv("KLATTRA_DISABLE_LOOKAHEAD") != nullptr;
+    return disabled;
+}
+
+
 void klattraAddDrapeOverscan(std::unordered_set<OverscaledTileID>& drapeIDs,
                              const std::unordered_set<OverscaledTileID>& idealIDs,
                              uint32_t padding) {
@@ -416,6 +431,109 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
         }
     }
 
+    // .51 velocity-biased drape lookahead: a canvas is created only when its
+    // tile ENTERS the cover, then needs routing + a bake before it shows real
+    // imagery. At flight speed that latency lands on screen as the leading-
+    // edge smear band (ancestor-fallback bindings) and background-only
+    // plates (measured on the cabled .48 flight: 30-45 canvases perpetually
+    // unready with all tile data local — fetch exonerated). Estimate the
+    // camera's ground velocity from the recent update history and pre-insert
+    // a forward strip of ideal-zoom drape tiles along the projected path so
+    // they exist-and-bake BEFORE their tiles become visible. Velocity-based,
+    // not path-based: works for any sustained motion — flyover, inertial pan
+    // — and idles to a no-op via the crossing-rate gate below.
+    const LatLng cameraCenter = state.getLatLng();
+    const double centerX = (cameraCenter.longitude() + 180.0) / 360.0;
+    const double drapeCenterLatRad = cameraCenter.latitude() * M_PI / 180.0;
+    const double centerY = 0.5 - std::log(std::tan(M_PI / 4.0 + drapeCenterLatRad / 2.0)) / (2.0 * M_PI);
+    double drapeProjX = centerX;
+    double drapeProjY = centerY;
+    uint32_t lookaheadStripAdded = 0;
+    double lookaheadSpanTiles = 0.0;
+    {
+        const auto nowTime = std::chrono::steady_clock::now();
+        drapeCameraSamples.push_back({centerX, centerY, nowTime});
+        constexpr std::size_t velocityWindowUpdates = 10;
+        while (drapeCameraSamples.size() > velocityWindowUpdates) {
+            drapeCameraSamples.pop_front();
+        }
+        double velX = 0.0;
+        double velY = 0.0;
+        if (drapeCameraSamples.size() >= 2) {
+            const auto& oldest = drapeCameraSamples.front();
+            const double dt = std::chrono::duration<double>(nowTime - oldest.time).count();
+            // A long span means renders were sparse (idle map) — the window
+            // says nothing about current motion, so treat it as standstill.
+            if (dt > 0.0 && dt < 2.0) {
+                velX = (centerX - oldest.x) / dt;
+                velY = (centerY - oldest.y) / dt;
+            }
+        }
+        static const double lookaheadSeconds = klattraEnvSeconds("KLATTRA_DRAPE_LOOKAHEAD_S", 3.0);
+        if (!klattraLookaheadDisabled() && lookaheadSeconds > 0.0 && !currentIdealIDs.empty()) {
+            // The strip bakes at the finest LOD present in the cover — the
+            // zoom tiles enter at on the leading edge, where the smear lives.
+            uint8_t stripZoom = 0;
+            for (const auto& idealID : currentIdealIDs) {
+                stripZoom = std::max(stripZoom, idealID.canonical.z);
+            }
+            const auto worldSizeI = int64_t{1} << stripZoom;
+            const double worldTiles = static_cast<double>(worldSizeI);
+            const double speed = std::hypot(velX, velY); // mercator units/s
+            const double aheadTilesExact = speed * lookaheadSeconds * worldTiles;
+            // Sustained-motion gate: only project when the camera will cross
+            // into new tile territory within the lookahead horizon. Slow
+            // gestures and idle stay exactly on the pre-.51 path. The cap
+            // bounds canvas minting under a violent fling.
+            static const double maxAheadTiles =
+                static_cast<double>(klattraEnvTileCount("KLATTRA_DRAPE_LOOKAHEAD_MAX_TILES", 6));
+            if (aheadTilesExact >= 0.75 && maxAheadTiles > 0.0) {
+                const double aheadTiles = std::min(aheadTilesExact, maxAheadTiles);
+                lookaheadSpanTiles = aheadTiles;
+                const double dirX = velX / speed;
+                const double dirY = velY / speed;
+                drapeProjX = centerX + dirX * aheadTiles / worldTiles;
+                drapeProjY = centerY + dirY * aheadTiles / worldTiles;
+                const double perpX = -dirY;
+                const double perpY = dirX;
+                // Three lanes (centre, ±1 tile lateral), sampled every half
+                // tile along the corridor so no tile the path crosses is
+                // skipped between samples.
+                for (double s = 0.0; s <= aheadTiles + 1e-9; s += 0.5) {
+                    for (int32_t lane = -1; lane <= 1; ++lane) {
+                        const double px = centerX + (dirX * s + perpX * lane) / worldTiles;
+                        const double py = centerY + (dirY * s + perpY * lane) / worldTiles;
+                        const auto uy = static_cast<int64_t>(std::floor(py * worldTiles));
+                        if (uy < 0 || uy >= worldSizeI) {
+                            continue;
+                        }
+                        const auto ux = static_cast<int64_t>(std::floor(px * worldTiles));
+                        const UnwrappedTileID aheadTile(stripZoom, ux, uy);
+                        if (currentDrapeIDs.emplace(stripZoom, aheadTile.wrap, aheadTile.canonical).second) {
+                            lookaheadStripAdded++;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Pre-bake variants measured and REJECTED on-sim 2026-07-12 — do not
+    // rebuild without new evidence (see the .51 handover):
+    //  - LOD-boundary pre-child (mint maxZ children of next-coarser ideals):
+    //    every candidate child is already in currentDrapeIDs via the ideal /
+    //    overscan structure — the ideal set interleaves z11 and z12 slots
+    //    over the same ground, so there is no boundary to lead. prechild
+    //    counter stayed 0 across 40+ in-flight samples with the reach limit
+    //    at 16 tiles.
+    //  - Pending-DEM pre-mint (canvases for requested-not-yet-renderable DEM
+    //    tiles): RenderTile.id is already the IDEAL id while the actual tile
+    //    is a fallback parent, so pending slots already have canvases; the
+    //    lead time equals what the overscan ring provides (~7 s at tour
+    //    speed) and the `.48` deficit is a route+bake THROUGHPUT ceiling,
+    //    not a lead-time gap (constant 30-45 backlog; `.50b` fetch warmer
+    //    "no difference"; 2026-07-04 overscan-2 "no visible gain").
+
     const bool drapeCoverStable = currentIdealIDs == previousIdealIDs;
     const bool cameraChanging = state.isChanging() || state.isGestureInProgress();
     if (!cameraChanging && drapeCoverStable) {
@@ -455,25 +573,36 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
     {
         // Distance-ranked drape budgets: spend texture memory where the user
         // is looking instead of by tile zoom. Every drape tile is ranked by
-        // its centre's mercator distance to the camera centre; the nearest
-        // KLATTRA_DRAPE_NEAR_TILES bake at nearSize even while the camera
-        // moves (the old moving/still split made gestures soft, then popped
-        // sharp on settle), the next KLATTRA_DRAPE_MID_TILES at midSize, and
-        // the rest at farSize. Worst-case GPU memory is bounded by the ring
-        // counts regardless of zoom or pitch — the per-zoom-bucket budgets
-        // this replaces let a pitched 72-tile cover jetsam the app when the
-        // z10 bucket was raised to 2048 (measured 3.3 GB on an iPhone 16 Pro).
-        const LatLng cameraCenter = state.getLatLng();
-        const double centerX = (cameraCenter.longitude() + 180.0) / 360.0;
-        const double centerLatRad = cameraCenter.latitude() * M_PI / 180.0;
-        const double centerY = 0.5 - std::log(std::tan(M_PI / 4.0 + centerLatRad / 2.0)) / (2.0 * M_PI);
+        // its centre's mercator distance to the camera PATH — the segment
+        // from the current centre to the +lookahead projected centre — so
+        // under sustained motion the ahead strip ranks like near tiles and
+        // the total cap sheds far-BEHIND tiles first. At standstill the
+        // segment collapses to the camera centre and ranking is exactly the
+        // pre-.51 behaviour. The nearest KLATTRA_DRAPE_NEAR_TILES bake at
+        // nearSize even while the camera moves (the old moving/still split
+        // made gestures soft, then popped sharp on settle), the next
+        // KLATTRA_DRAPE_MID_TILES at midSize, and the rest at farSize.
+        // Worst-case GPU memory is bounded by the ring counts regardless of
+        // zoom or pitch — the per-zoom-bucket budgets this replaces let a
+        // pitched 72-tile cover jetsam the app when the z10 bucket was
+        // raised to 2048 (measured 3.3 GB on an iPhone 16 Pro).
+        const double segX = drapeProjX - centerX;
+        const double segY = drapeProjY - centerY;
+        const double segLen2 = segX * segX + segY * segY;
         std::vector<std::pair<double, OverscaledTileID>> rankedDrapeIDs;
         rankedDrapeIDs.reserve(currentDrapeIDs.size());
         for (const auto& tileID : currentDrapeIDs) {
             const double scale = static_cast<double>(1u << tileID.canonical.z);
             const double dx = (tileID.canonical.x + 0.5) / scale + tileID.wrap - centerX;
             const double dy = (tileID.canonical.y + 0.5) / scale - centerY;
-            rankedDrapeIDs.emplace_back(dx * dx + dy * dy, tileID);
+            double rx = dx;
+            double ry = dy;
+            if (segLen2 > 0.0) {
+                const double t = std::clamp((dx * segX + dy * segY) / segLen2, 0.0, 1.0);
+                rx = dx - segX * t;
+                ry = dy - segY * t;
+            }
+            rankedDrapeIDs.emplace_back(rx * rx + ry * ry, tileID);
         }
         std::sort(rankedDrapeIDs.begin(), rankedDrapeIDs.end(), [](const auto& a, const auto& b) {
             return a.first < b.first;
@@ -1323,6 +1452,8 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
         const auto nowTp = std::chrono::steady_clock::now();
         if (nowTp - lastEmit >= std::chrono::seconds(1)) {
             lastEmit = nowTp;
+            // ahead= strip tiles added this update; aheadSpan10= corridor
+            // length in TENTHS of a tile (0 = lookahead gate closed).
             klattraDumpEmit("[KLATTRA FLYDIAG] terrain bindings=" + std::to_string(currentBindings.size()) +
                             " ready=" + std::to_string(readyBindings) +
                             " fallback=" + std::to_string(fallbackDrapeBindings) +
@@ -1331,7 +1462,9 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
                             " unbound=" + std::to_string(unboundBindings) +
                             " parked=" + std::to_string(retiredDrapeTargetsByTile.size()) +
                             " targets=" + std::to_string(drapeCache.size()) +
-                            " demTex=" + std::to_string(demTexturesByTile.size()));
+                            " demTex=" + std::to_string(demTexturesByTile.size()) +
+                            " ahead=" + std::to_string(lookaheadStripAdded) +
+                            " aheadSpan10=" + std::to_string(static_cast<int64_t>(std::lround(lookaheadSpanTiles * 10.0))));
         }
     }
     if (traceDrape) {

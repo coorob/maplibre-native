@@ -12,6 +12,8 @@
 #include <mbgl/renderer/layer_tweaker.hpp>
 #include <mbgl/util/geo.hpp>
 
+#include <chrono>
+#include <deque>
 #include <memory>
 #include <map>
 #include <string>
@@ -463,6 +465,18 @@ private:
     // frames (unbaked targets, cap-deferred resizes, texture-less cover
     // tiles). Read by the orchestrator via hasPendingDrapeWork().
     bool drapeWorkPending = false;
+
+    // Recent camera centres in global mercator [0,1) units. The displacement
+    // across this short window is the ground-velocity estimate that drives
+    // the forward drape pre-bake strip (the lookahead block in update()).
+    // Using window displacement rather than per-frame deltas means jittery
+    // back-and-forth gestures net out to ~zero and produce no strip.
+    struct DrapeCameraSample {
+        double x;
+        double y;
+        std::chrono::steady_clock::time_point time;
+    };
+    std::deque<DrapeCameraSample> drapeCameraSamples;
 
     // Maximum stable-view pixel size of each close-zoom drape target. Moving
     // cameras allocate smaller close targets first and upgrade to this after
