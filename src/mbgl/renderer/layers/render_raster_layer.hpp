@@ -7,6 +7,7 @@
 #include <mbgl/gfx/context.hpp>
 #include <mbgl/tile/tile_id.hpp>
 
+#include <array>
 #include <unordered_map>
 
 namespace mbgl {
@@ -78,8 +79,11 @@ private:
     // update() can reach past the render set into the full tile pyramid
     // (active + cache) when a live canvas has no raster content to route.
     RenderSource* drapeGapfillSource = nullptr;
-    // Cumulative gap-fill telemetry for the 1 Hz STAGE probe.
+    // Cumulative gap-fill telemetry for the 1 Hz STAGE probe. Histogram
+    // buckets by (canvas z − fill z): [0]=child(+1), [1]=equal, [2..4]=
+    // ancestor 1..3 levels coarser, [5]=4+ levels (the "green mush" tail).
     std::size_t drapeGapfillFilled = 0;
+    std::array<std::size_t, 6> drapeGapfillDzHist{};
 };
 
 } // namespace mbgl

@@ -21,6 +21,7 @@
 #include <mbgl/renderer/update_parameters.hpp>
 #include <mbgl/shaders/shader_program_base.hpp>
 
+#include <algorithm>
 #include <cstdlib>
 #include <cstring>
 #include <unordered_set>
@@ -786,25 +787,13 @@ void RenderRasterLayer::update(gfx::ShaderRegistry& shaders,
                     if (!b.hasData() || (!b.image && !b.texture2d)) return;
                     candidates.emplace_back(tid, &b);
                 });
-                for (auto& [drapeID, drapeTarget] : gaps) {
-                    // Deepest ancestor-or-equal candidate: full-canvas
-                    // coverage from ONE drawable, no partial-fill holes.
-                    RasterBucket* bestBucket = nullptr;
-                    std::optional<OverscaledTileID> bestID;
-                    for (auto& [tid, candidateBucket] : candidates) {
-                        if (tid.canonical.z > drapeID.canonical.z) continue;
-                        if (!LayerTweaker::tilesOverlap(tid, drapeID)) continue;
-                        if (bestID && tid.canonical.z <= bestID->canonical.z) continue;
-                        bestID = tid;
-                        bestBucket = candidateBucket;
-                    }
-                    if (!bestBucket) {
-                        probeGapDryNow++;
-                        continue;
-                    }
-
-                    // Mirror of the phase-2 emit above, minus the supersede
-                    // scan (an empty group has nothing to supersede).
+                // Mirror of the phase-2 emit above, minus the supersede
+                // scan (an empty group has nothing to supersede). Returns
+                // false only on builder/texture failure.
+                const auto emitGapDrawable = [&](const OverscaledTileID& drapeID,
+                                                 TerrainDrapeTargetPtr& drapeTarget,
+                                                 const OverscaledTileID& tileID,
+                                                 RasterBucket& bucket) {
                     auto& tw = drapeLayerTweakers[drapeID];
                     if (!tw) {
                         tw = std::make_shared<RasterLayerTweaker>(getID() + "-drape", evaluatedProperties, drapeID);
@@ -813,34 +802,103 @@ void RenderRasterLayer::update(gfx::ShaderRegistry& shaders,
                     if (!drapeGroup) {
                         auto newGroup = context.createTileLayerGroup(
                             layerIndex, /*initialCapacity=*/4, getID() + "-raster-drape");
-                        if (!newGroup) continue;
+                        if (!newGroup) return false;
                         newGroup->addLayerTweaker(tw);
                         drapeTarget->addLayerGroup(newGroup, /*replace=*/false);
                         drapeGroup = newGroup.get();
                     }
                     auto gapBuilder = createBuilder();
-                    if (!gapBuilder) continue;
-                    setTextures(gapBuilder, *bestBucket);
+                    if (!gapBuilder) return false;
+                    setTextures(gapBuilder, bucket);
                     if (!gapBuilder->getTexture(idRasterImage0Texture) ||
                         !gapBuilder->getTexture(idRasterImage1Texture)) {
-                        probeGapDryNow++;
-                        continue;
+                        return false;
                     }
                     buildVertexData(gapBuilder,
                                     /*drawable=*/nullptr,
-                                    *bestBucket,
+                                    bucket,
                                     /*freshIndexBuffer=*/true,
                                     /*localVertexBuffers=*/true,
                                     /*fullTileQuad=*/klattraDrapeFullQuad());
                     gapBuilder->flush(context);
+                    bool added = false;
                     for (auto& gapDrawable : gapBuilder->clearDrawables()) {
-                        gapDrawable->setTileID(*bestID);
+                        gapDrawable->setTileID(tileID);
                         gapDrawable->setLayerTweaker(tw);
-                        gapDrawable->setDrawPriority(static_cast<gfx::DrawPriority>(bestID->canonical.z));
-                        drapeGroup->addDrawable(renderPass, *bestID, std::move(gapDrawable));
+                        gapDrawable->setDrawPriority(static_cast<gfx::DrawPriority>(tileID.canonical.z));
+                        drapeGroup->addDrawable(renderPass, tileID, std::move(gapDrawable));
                         ++stats.drawablesAdded;
                         ++probeGapFilledNow;
-                        activeTerrain->diagNoteRasterRouted(drapeID, bestID->canonical.z);
+                        activeTerrain->diagNoteRasterRouted(drapeID, tileID.canonical.z);
+                        // Cumulative fill-resolution histogram: c1 = child
+                        // (sharper than the canvas), eq = exact zoom, aN =
+                        // ancestor N levels coarser (the .63 flight's
+                        // "green mush" = a3+/a4p fills — phone-63 named the
+                        // class but not the resolution; this does).
+                        const int dz = static_cast<int>(drapeID.canonical.z) -
+                                       static_cast<int>(tileID.canonical.z);
+                        drapeGapfillDzHist[static_cast<std::size_t>(std::clamp(dz + 1, 0, 5))]++;
+                        added = true;
+                    }
+                    // A few named routes per second: WHERE got WHAT
+                    // resolution (complements the dz histogram).
+                    if (added && RenderTerrain::stageDiagEnabled()) {
+                        static std::chrono::steady_clock::time_point lastRouteEmit{};
+                        const auto nowR = std::chrono::steady_clock::now();
+                        if (nowR - lastRouteEmit >= std::chrono::seconds(1)) {
+                            lastRouteEmit = nowR;
+                            klattraGapfillEmit("[KLATTRA STAGE] gapfillRoute canvas=" + klattraDrapeIDString(drapeID) +
+                                               " from=" + klattraDrapeIDString(tileID) + " layer=" + getID());
+                        }
+                    }
+                    return added;
+                };
+
+                for (auto& [drapeID, drapeTarget] : gaps) {
+                    // Underlay: deepest ancestor-or-equal candidate —
+                    // full-canvas coverage from ONE drawable, no
+                    // partial-fill holes.
+                    RasterBucket* underlayBucket = nullptr;
+                    std::optional<OverscaledTileID> underlayID;
+                    // .64: sharpening children — canvas z+1 tiles (≤4) from
+                    // the reservoir draw OVER the underlay via painter
+                    // order. Behind-camera canvases usually have their
+                    // exact/child tiles in the cache (they rendered moments
+                    // ago), so the .63 coarse-underlay-only fill smeared
+                    // z8–z9 mush over regions whose native imagery was
+                    // sitting right there (Robert's ".63 green" verdict).
+                    std::vector<std::pair<OverscaledTileID, RasterBucket*>> childFills;
+                    for (auto& [tid, candidateBucket] : candidates) {
+                        if (!LayerTweaker::tilesOverlap(tid, drapeID)) continue;
+                        if (tid.canonical.z <= drapeID.canonical.z) {
+                            if (!underlayID || tid.canonical.z > underlayID->canonical.z) {
+                                underlayID = tid;
+                                underlayBucket = candidateBucket;
+                            }
+                        } else if (tid.canonical.z == drapeID.canonical.z + 1u) {
+                            childFills.emplace_back(tid, candidateBucket);
+                        }
+                    }
+                    // Without an underlay, a partial child set would leave
+                    // unwritten canvas pixels (per-pixel background — the
+                    // .57 lesson). All four children = full coverage.
+                    const bool childrenCover = childFills.size() >= 4;
+                    if (!underlayBucket && !childrenCover) {
+                        probeGapDryNow++;
+                        continue;
+                    }
+                    // The underlay always emits when present — one drawable
+                    // buys guaranteed coverage even if a child emit fails
+                    // (gap-fill is one-shot; a hole quarter would persist).
+                    bool anyRouted = false;
+                    if (underlayBucket && underlayID) {
+                        anyRouted |= emitGapDrawable(drapeID, drapeTarget, *underlayID, *underlayBucket);
+                    }
+                    for (auto& [childID, childBucket] : childFills) {
+                        anyRouted |= emitGapDrawable(drapeID, drapeTarget, childID, *childBucket);
+                    }
+                    if (!anyRouted) {
+                        probeGapDryNow++;
                     }
                 }
             }
@@ -859,7 +917,13 @@ void RenderRasterLayer::update(gfx::ShaderRegistry& shaders,
                     klattraGapfillEmit("[KLATTRA STAGE] gapfill layer=" + getID() +
                                        " gaps=" + std::to_string(probeGapsNow) +
                                        " filled=" + std::to_string(drapeGapfillFilled) +
-                                       " dry=" + std::to_string(probeGapDryNow));
+                                       " dry=" + std::to_string(probeGapDryNow) +
+                                       " dz=c1:" + std::to_string(drapeGapfillDzHist[0]) +
+                                       ",eq:" + std::to_string(drapeGapfillDzHist[1]) +
+                                       ",a1:" + std::to_string(drapeGapfillDzHist[2]) +
+                                       ",a2:" + std::to_string(drapeGapfillDzHist[3]) +
+                                       ",a3:" + std::to_string(drapeGapfillDzHist[4]) +
+                                       ",a4p:" + std::to_string(drapeGapfillDzHist[5]));
                 }
             }
         }
