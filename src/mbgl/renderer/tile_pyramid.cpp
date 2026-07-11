@@ -29,6 +29,28 @@ using namespace style;
 namespace {
 TileObserver nullObserver;
 const std::map<OverscaledTileID, std::unique_ptr<Tile>> emptyPrefetchedTiles;
+
+// .66: raster sources feed the terrain drape gap-fill from this cache —
+// a demotion-resized canvas behind the camera can only regain NATIVE-res
+// imagery if its exact/child tiles are still retained. The conservative
+// viewport-derived size (~57 tiles on the soak phone) evicted the
+// corridor's exacts within a minute, so 74% of the phone-64 flight's
+// gap-fills fell back to z10-into-z12 ancestors — the flat green mush.
+// Raster tiles are cheap (256² ≈ 0.25 MB uploaded), so scale the cache
+// for raster sources only (DEM/vector keep the conservative size).
+// KLATTRA_RASTER_CACHE_SCALE=1 reverts.
+size_t klattraRasterCacheScale() {
+    static const size_t scale = [] {
+        const char* v = std::getenv("KLATTRA_RASTER_CACHE_SCALE");
+        if (v && *v) {
+            char* end = nullptr;
+            const unsigned long parsed = std::strtoul(v, &end, 10);
+            if (end != v) return static_cast<size_t>(std::clamp<unsigned long>(parsed, 1, 16));
+        }
+        return static_cast<size_t>(4);
+    }();
+    return scale;
+}
 } // namespace
 
 TilePyramid::TilePyramid(const TaggedScheduler& threadPool_)
@@ -447,6 +469,11 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
             std::max(static_cast<double>(parameters.transformState.getSize().width) / tileSize, 1.0) *
             std::max(static_cast<double>(parameters.transformState.getSize().height) / tileSize, 1.0) *
             (parameters.transformState.getMaxZoom() - parameters.transformState.getMinZoom() + 1) * 0.5);
+        // .66: see klattraRasterCacheScale above — the drape gap-fill's
+        // candidate reservoir must outlive the flight corridor.
+        if (type == SourceType::Raster) {
+            conservativeCacheSize *= klattraRasterCacheScale();
+        }
         cache.setSize(conservativeCacheSize);
     } else {
         cache.setSize(0);
