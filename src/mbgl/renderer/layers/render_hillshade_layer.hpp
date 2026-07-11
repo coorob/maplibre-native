@@ -68,6 +68,15 @@ private:
     // like flat terrain instead of undefined (black) memory.
     gfx::Texture2DPtr neutralPrepareTexture;
 
+    // Last completed bake per tile, carried across bucket re-parses: a
+    // re-parse recreates the prepare target, which holds nothing until its
+    // bake runs — binding the previous bake for that window keeps the
+    // tile's relief instead of blinking flat for a frame (the churn
+    // shading-pop). Refreshed whenever a completed bake is seen, pruned
+    // against the current render-tile cover, so it stays cover-sized and
+    // extends a texture's lifetime only for the re-parse window itself.
+    std::unordered_map<OverscaledTileID, gfx::Texture2DPtr> carriedBakeTextures;
+
     // Phase 2 drape routing: per-drape-target HillshadeLayerTweakers. One
     // entry per overlapping DEM drape RenderTarget, each rebinding the
     // hillshade quad's matrix into that target's space.

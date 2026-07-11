@@ -59,6 +59,11 @@ bool klattraHillshadeDrapeSameZoomOnly() {
     return enabled;
 }
 
+bool klattraDisableBakeCarry() {
+    static const bool disabled = std::getenv("KLATTRA_DISABLE_BAKE_CARRY") != nullptr;
+    return disabled;
+}
+
 std::string klattraDrapeIDString(const OverscaledTileID& id) {
     return "z" + std::to_string(static_cast<int>(id.canonical.z)) + "/" +
            std::to_string(id.canonical.x) + "/" + std::to_string(id.canonical.y);
@@ -211,6 +216,7 @@ void RenderHillshadeLayer::update(gfx::ShaderRegistry& shaders,
                                  activatedRenderTargets.end());
 
     if (!renderTiles || renderTiles->empty()) {
+        carriedBakeTextures.clear();
         removeAllDrawables();
         return;
     }
@@ -251,6 +257,15 @@ void RenderHillshadeLayer::update(gfx::ShaderRegistry& shaders,
 
     stats.drawablesRemoved += tileLayerGroup->removeDrawablesIf(
         [&](gfx::Drawable& drawable) { return drawable.getTileID() && !hasRenderTile(*drawable.getTileID()); });
+
+    // Drop carried bakes for tiles that left the cover.
+    for (auto it = carriedBakeTextures.begin(); it != carriedBakeTextures.end();) {
+        if (!hasRenderTile(it->first)) {
+            it = carriedBakeTextures.erase(it);
+        } else {
+            ++it;
+        }
+    }
 
     // When terrain is active, drop main-pass hillshade drawables for tiles
     // with DEM coverage — they would render at z=0 and bleed past the
@@ -391,6 +406,14 @@ void RenderHillshadeLayer::update(gfx::ShaderRegistry& shaders,
         }
         setRenderTileBucketID(tileID, bucket.getID());
 
+        // Carry the completed bake for this tile. On a re-parse frame the
+        // fresh bucket's target is unbaked, so the entry still holds the
+        // previous bucket's bake until the replacement completes and
+        // overwrites it here.
+        if (!klattraDisableBakeCarry() && bucket.renderTarget && bucket.renderTarget->hasCompletedRender()) {
+            carriedBakeTextures[tileID] = bucket.renderTarget->getTexture();
+        }
+
         if (!bucket.renderTargetPrepared) {
             // Set up tile render target
             const uint16_t tilesize = bucket.getDEMData().dim;
@@ -456,6 +479,17 @@ void RenderHillshadeLayer::update(gfx::ShaderRegistry& shaders,
                     bucket.getDEMData().stride, bucket.getDEMData().encoding, maxzoom));
                 singleTileLayerGroup->addDrawable(renderPass, tileID, std::move(drawable));
                 ++stats.drawablesAdded;
+            }
+        }
+
+        // While this tile's target bakes (fresh tile, or a bucket re-parse
+        // that recreated it), sample the carried previous bake if there is
+        // one, else the flat-neutral texture.
+        gfx::Texture2DPtr unbakedFallback = neutralPrepareTexture;
+        if (!klattraDisableBakeCarry()) {
+            if (const auto carried = carriedBakeTextures.find(tileID);
+                carried != carriedBakeTextures.end() && carried->second) {
+                unbakedFallback = carried->second;
             }
         }
 
@@ -612,14 +646,14 @@ void RenderHillshadeLayer::update(gfx::ShaderRegistry& shaders,
             // runs — sampling it painted the tile black (viewport-wide at
             // boot when every target is new; per new-tile batch during zoom
             // churn; water survives because the style re-draws it above the
-            // relief). Until the bake completes, sample the flat-neutral
-            // texture instead — the tile shades like flat terrain, and the
-            // real shading swaps in the frame after the bake (updateExisting
-            // runs every frame).
+            // relief). Until the bake completes, sample the carried previous
+            // bake (bucket re-parse) or the flat-neutral texture (fresh
+            // tile); the real shading swaps in the frame after the bake
+            // (updateExisting runs every frame).
             const bool prepared = bucket.renderTarget && bucket.renderTarget->hasCompletedRender();
-            drawable.setTexture(prepared ? bucket.renderTarget->getTexture() : neutralPrepareTexture,
+            drawable.setTexture(prepared ? bucket.renderTarget->getTexture() : unbakedFallback,
                                 idHillshadeImageTexture);
-            drawable.setEnabled(prepared || neutralPrepareTexture != nullptr);
+            drawable.setEnabled(prepared || unbakedFallback != nullptr);
 
             return true;
         };
@@ -637,7 +671,7 @@ void RenderHillshadeLayer::update(gfx::ShaderRegistry& shaders,
         hillshadeBuilder->setSegments(gfx::Triangles(), indices->vector(), segments->data(), segments->size());
         const bool bucketPrepared = bucket.renderTarget && bucket.renderTarget->hasCompletedRender();
         hillshadeBuilder->setTexture(
-            bucketPrepared ? bucket.renderTarget->getTexture() : neutralPrepareTexture, idHillshadeImageTexture);
+            bucketPrepared ? bucket.renderTarget->getTexture() : unbakedFallback, idHillshadeImageTexture);
 
         hillshadeBuilder->flush(context);
 
@@ -652,8 +686,8 @@ void RenderHillshadeLayer::update(gfx::ShaderRegistry& shaders,
             }
             drawable->setTileID(tileID);
             drawable->setLayerTweaker(layerTweaker);
-            // See updateExisting above: neutral texture until baked.
-            drawable->setEnabled(bucketPrepared || neutralPrepareTexture != nullptr);
+            // See updateExisting above: carried/neutral texture until baked.
+            drawable->setEnabled(bucketPrepared || unbakedFallback != nullptr);
 
             tileLayerGroup->addDrawable(renderPass, tileID, std::move(drawable));
             ++stats.drawablesAdded;
