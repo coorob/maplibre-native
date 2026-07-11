@@ -6,6 +6,8 @@
 #include <mbgl/renderer/renderer_observer.hpp>
 #include <mbgl/renderer/render_source.hpp>
 #include <mbgl/renderer/render_layer.hpp>
+#include <mbgl/renderer/render_target.hpp>
+#include <mbgl/style/layers/hillshade_layer_impl.hpp>
 #include <mbgl/renderer/render_static_data.hpp>
 #include <mbgl/renderer/render_tree.hpp>
 #include <mbgl/renderer/render_terrain.hpp>
@@ -981,6 +983,33 @@ bool RenderOrchestrator::isLoaded() const {
     }
 
     return true;
+}
+
+bool RenderOrchestrator::hillshadeBakesPending() const {
+    MLN_TRACE_FUNC();
+
+    // A target that has not completed its first bake samples as neutral
+    // (or carried) shading this frame — the relief is still settling.
+    for (const auto& renderTarget : renderTargets) {
+        if (renderTarget && !renderTarget->hasCompletedRender()) {
+            return true;
+        }
+    }
+
+    // A hillshade layer whose source is still fetching its cover will keep
+    // creating fresh prepare targets as tiles land.
+    for (const auto& entry : renderLayers) {
+        const auto& layer = entry.second;
+        if (!layer || layer->baseImpl->getTypeInfo() != style::HillshadeLayer::Impl::staticTypeInfo()) {
+            continue;
+        }
+        const auto source = renderSources.find(layer->baseImpl->source);
+        if (source != renderSources.end() && source->second->isEnabled() && !source->second->isLoaded()) {
+            return true;
+        }
+    }
+
+    return false;
 }
 
 void RenderOrchestrator::clearData() {

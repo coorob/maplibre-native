@@ -64,6 +64,15 @@ private:
 
     RenderState renderState = RenderState::Never;
 
+    // KLATTRA prebake gate (launch shading settle): before the first map
+    // content is shown, present clear-only "paper" frames while the initial
+    // relief cover bakes, so the map never appears flat-shaded and then
+    // pops into relief. Opens once — settled, timed out, or not
+    // applicable — and never holds again.
+    bool prebakeGateOpen = false;
+    std::optional<double> prebakeGateStart;
+    uint64_t prebakeGateHeldFrames = 0;
+
     uint64_t frameCount = 0;
 
 #if MLN_RENDER_BACKEND_METAL

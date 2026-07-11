@@ -20,6 +20,9 @@
 #include <mbgl/util/logging.hpp>
 #include <mbgl/util/instrumentation.hpp>
 
+#include <cstdio>
+#include <cstdlib>
+
 #include <mbgl/gfx/drawable_tweaker.hpp>
 #include <mbgl/renderer/layer_tweaker.hpp>
 #include <mbgl/renderer/render_target.hpp>
@@ -52,6 +55,31 @@ namespace {
 RendererObserver& nullObserver() {
     static RendererObserver observer;
     return observer;
+}
+
+bool klattraDisablePrebakeGate() {
+    static const bool disabled = std::getenv("KLATTRA_DISABLE_PREBAKE_GATE") != nullptr;
+    return disabled;
+}
+
+// Warning for the device syslog AND the stderr trace path for the
+// simulator, where mbgl Log::Warning never reaches the unified log.
+void klattraPrebakeEmit(const std::string& message) {
+    Log::Warning(Event::Render, message);
+    static const bool stderrTrace = std::getenv("KLATTRA_TRACE_STDERR") != nullptr;
+    if (stderrTrace) {
+        std::fprintf(stderr, "[KLATTRA_TRACE] %s\n", message.c_str());
+    }
+}
+
+double klattraPrebakeGateTimeoutMs() {
+    static const double ms = [] {
+        if (const char* v = std::getenv("KLATTRA_PREBAKE_GATE_TIMEOUT_MS")) {
+            return std::strtod(v, nullptr);
+        }
+        return 2500.0;
+    }();
+    return ms;
 }
 
 } // namespace
@@ -510,7 +538,38 @@ void Renderer::Impl::render(const RenderTree& renderTree, const std::shared_ptr<
         }
     };
 
-    if (parameters.staticData.has3D) {
+    // KLATTRA prebake gate (launch shading settle): until the initial
+    // relief cover has baked, present clear-only "paper" frames. The
+    // prepare targets still render and flush below, so bakes land while
+    // nothing half-shaded is ever shown; the first content frame then
+    // arrives with relief already bound. Launch-window only: the gate
+    // opens once — settled, timed out, or not applicable — and never
+    // holds again.
+    bool holdMapContent = false;
+    if (!prebakeGateOpen) {
+        if (renderTreeParameters.mapMode != MapMode::Continuous || klattraDisablePrebakeGate()) {
+            prebakeGateOpen = true;
+        } else {
+            const double nowSeconds = util::MonotonicTimer::now().count();
+            if (!prebakeGateStart) {
+                prebakeGateStart = nowSeconds;
+            }
+            const double elapsedMs = (nowSeconds - *prebakeGateStart) * 1000.0;
+            const bool pending = !updateParameters->styleLoaded || orchestrator.hillshadeBakesPending();
+            if (!pending || elapsedMs >= klattraPrebakeGateTimeoutMs()) {
+                prebakeGateOpen = true;
+                klattraPrebakeEmit("[KLATTRA PREBAKE] gate-open reason=" +
+                                   std::string(pending ? "timeout" : "settled") +
+                                   " heldFrames=" + util::toString(prebakeGateHeldFrames) +
+                                   " elapsedMs=" + util::toString(static_cast<uint64_t>(elapsedMs)));
+            } else {
+                holdMapContent = true;
+                ++prebakeGateHeldFrames;
+            }
+        }
+    }
+
+    if (parameters.staticData.has3D && !holdMapContent) {
         common3DPass();
         drawable3DPass();
     }
@@ -521,10 +580,12 @@ void Renderer::Impl::render(const RenderTree& renderTree, const std::shared_ptr<
     context.flushOffscreenRenderWork();
     commonClearPass();
     context.bindGlobalUniformBuffers(*parameters.renderPass);
-    drawableOpaquePass();
-    drawableTranslucentPass();
-    drawableTerrainPass();
-    drawableDebugOverlays();
+    if (!holdMapContent) {
+        drawableOpaquePass();
+        drawableTranslucentPass();
+        drawableTerrainPass();
+        drawableDebugOverlays();
+    }
 
     // Give the layers a chance to do cleanup
     orchestrator.visitLayerGroups([&](LayerGroupBase& layerGroup) { layerGroup.postRender(orchestrator, parameters); });
@@ -558,7 +619,10 @@ void Renderer::Impl::render(const RenderTree& renderTree, const std::shared_ptr<
 
     observer->onDidFinishRenderingFrame(
         renderTreeParameters.loaded ? RendererObserver::RenderMode::Full : RendererObserver::RenderMode::Partial,
-        renderTreeParameters.needsRepaint,
+        // Held paper frames must keep the render loop alive: nothing else
+        // is guaranteed to invalidate between the last bake completing and
+        // the gate opening (or timing out).
+        renderTreeParameters.needsRepaint || holdMapContent,
         renderTreeParameters.placementChanged,
         context.threadSafeCopyRenderingStats());
 

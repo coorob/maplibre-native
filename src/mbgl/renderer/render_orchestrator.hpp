@@ -171,6 +171,12 @@ public:
 
     RenderTerrain* getRenderTerrain() const { return renderTerrain.get(); }
 
+    /// KLATTRA prebake gate (launch shading settle): true while the relief
+    /// is still settling — a live prepare/render target has not completed
+    /// its first bake, or a hillshade layer's source is still loading its
+    /// cover. Drives the first-present hold in Renderer::Impl::render.
+    bool hillshadeBakesPending() const;
+
 private:
     bool isLoaded() const;
     bool hasTransitions(TimePoint) const;
