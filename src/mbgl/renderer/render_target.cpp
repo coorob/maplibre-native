@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cerrno>
 #include <chrono>
@@ -30,6 +31,39 @@ namespace {
 bool klattraLogDrapeTrace() {
     static const bool enabled = std::getenv("KLATTRA_LOG_DRAPE_TRACE") != nullptr;
     return enabled;
+}
+
+// .46-diag (flyover campaign): device-visible flight diagnostics, default
+// ON in this diag dist (KLATTRA_FLYDIAG=0 disables). Warning for the phone
+// syslog + stderr for the simulator; per-second budget caps the flood.
+// Render-thread only — plain statics.
+bool klattraFlyDiag() {
+    static const bool enabled = [] {
+        const char* v = std::getenv("KLATTRA_FLYDIAG");
+        return !(v && (*v == '0' || *v == 'f' || *v == 'F'));
+    }();
+    return enabled;
+}
+
+bool klattraFlyDiagBudget() {
+    static int64_t windowStart = 0;
+    static uint32_t count = 0;
+    const int64_t now =
+        std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now().time_since_epoch())
+            .count();
+    if (now != windowStart) {
+        windowStart = now;
+        count = 0;
+    }
+    return count++ < 40;
+}
+
+void klattraFlyDiagEmit(const std::string& message) {
+    Log::Warning(Event::Render, message);
+    static const bool stderrTrace = std::getenv("KLATTRA_TRACE_STDERR") != nullptr;
+    if (stderrTrace) {
+        std::fprintf(stderr, "[KLATTRA_TRACE] %s\n", message.c_str());
+    }
 }
 
 std::string klattraColorString(const Color& color) {
@@ -504,6 +538,20 @@ void RenderTarget::render(RenderOrchestrator& orchestrator, const RenderTree& re
     // basemap colour as the floor, a contentless bake reads as unloaded
     // basemap instead of a void.
     const Color drapeClearColor = renderTree.getParameters().backgroundColor;
+
+    // .46-diag: the first bakes are where flicker windows live — log the
+    // ACTUAL clear colour + group population for every target's first few
+    // bakes. A paper-beige clear during a satellite flight is the stale
+    // sticky-background bug; groups=0 is a raw clear plate.
+    if (klattraFlyDiag() && !debugName.empty() && completedRenderCount < 3 && klattraFlyDiagBudget()) {
+        std::size_t diagDrawables = 0;
+        visitLayerGroups([&](LayerGroupBase& layerGroup) { diagDrawables += layerGroup.getDrawableCount(); });
+        klattraFlyDiagEmit("[KLATTRA FLYDIAG] bake target=" + debugName +
+                           " completed=" + std::to_string(completedRenderCount) +
+                           " groups=" + std::to_string(numLayerGroups()) +
+                           " drawables=" + std::to_string(diagDrawables) +
+                           " clear=" + klattraColorString(drapeClearColor));
+    }
 
     if (klattraLogDrapeTrace() && !debugName.empty()) {
         const auto size = offscreenTexture->getSize();

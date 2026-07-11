@@ -98,6 +98,31 @@ void klattraDumpEmit(const std::string& message) {
     }
 }
 
+// .46-diag (flyover campaign): device-visible flight diagnostics, default
+// ON in this diag dist (KLATTRA_FLYDIAG=0 disables). Emitted via
+// klattraDumpEmit (Warning + stderr) with a per-second budget so a flight
+// cannot flood the syslog. Render-thread only — plain statics.
+bool klattraFlyDiag() {
+    static const bool enabled = [] {
+        const char* v = std::getenv("KLATTRA_FLYDIAG");
+        return !(v && (*v == '0' || *v == 'f' || *v == 'F'));
+    }();
+    return enabled;
+}
+
+bool klattraFlyDiagBudget() {
+    static int64_t windowStart = 0;
+    static uint32_t count = 0;
+    const int64_t now =
+        std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now().time_since_epoch())
+            .count();
+    if (now != windowStart) {
+        windowStart = now;
+        count = 0;
+    }
+    return count++ < 40;
+}
+
 std::string klattraTileString(const OverscaledTileID& id) {
     return "z" + std::to_string(id.canonical.z) +
            "/" + std::to_string(id.canonical.x) +
@@ -525,6 +550,13 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
                                           " retiredReady=" + std::to_string(klattraDrapeTargetReady(oldTarget)) +
                                           " stableFrames=" + std::to_string(stableDrapeCoverFrames));
                         }
+                        if (klattraFlyDiag() && klattraFlyDiagBudget()) {
+                            klattraDumpEmit(
+                                "[KLATTRA FLYDIAG] resize tile=" + klattraTileString(tileID) +
+                                " old=" + std::to_string(existingSize.width) +
+                                " new=" + std::to_string(desiredSize.width) +
+                                " retiredReady=" + std::to_string(klattraDrapeTargetReady(oldTarget)));
+                        }
                         changes.emplace_back(std::make_unique<RemoveRenderTargetRequest>(oldTarget));
                     } else {
                         // Over the per-frame cap — this tile's resize (and
@@ -537,6 +569,10 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
             const bool wasAllocated = drapeCache.get(tileID) != nullptr;
             auto target = drapeCache.getOrCreate(context, tileID, desiredSize);
             if (!wasAllocated && target) {
+                if (klattraFlyDiag() && klattraFlyDiagBudget()) {
+                    klattraDumpEmit("[KLATTRA FLYDIAG] create tile=" + klattraTileString(tileID) +
+                                    " size=" + std::to_string(targetSize));
+                }
                 changes.emplace_back(std::make_unique<AddRenderTargetRequest>(target));
             }
             if (target && target->getCompletedRenderCount() < minCompletedDrapeRenders()) {
@@ -803,6 +839,13 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
     std::size_t readyBindings = 0;
     std::size_t emptyDemBindings = 0;
     std::size_t fallbackDrapeBindings = 0;
+    // .46-diag: flicker-window classes. bgOnly = own baked canvas bound with
+    // no content-ready canvas anywhere (renders as the drape clear + basemap
+    // groups only); zeroGroup = that canvas had NO layer groups at all (raw
+    // clear plate — the .17-era class); unbound = no drape texture at all.
+    std::size_t bgOnlyBindings = 0;
+    std::size_t bgOnlyZeroGroupBindings = 0;
+    std::size_t unboundBindings = 0;
     for (const auto& idealOS : terrainMeshIDs) {
         std::optional<OverscaledTileID> resolvedSourceID;
         std::shared_ptr<gfx::Texture2D> resolvedTexture;
@@ -903,6 +946,13 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
             // content-ready texture still wins via the normal refresh path.
             binding.drapeID = idealOS;
             binding.drapeTexture = own->getTexture();
+            bgOnlyBindings++;
+            if (own->numLayerGroups() == 0) {
+                bgOnlyZeroGroupBindings++;
+            }
+        }
+        if (!binding.drapeTexture) {
+            unboundBindings++;
         }
         if (binding.drapeReady) {
             readyBindings++;
@@ -1132,9 +1182,32 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
                  " ready=" + std::to_string(readyBindings) +
                  " emptyDEM=" + std::to_string(emptyDemBindings) +
                  " drapeFallback=" + std::to_string(fallbackDrapeBindings) +
+                 " bgOnly=" + std::to_string(bgOnlyBindings) +
+                 " bgOnlyZeroGroup=" + std::to_string(bgOnlyZeroGroupBindings) +
+                 " unbound=" + std::to_string(unboundBindings) +
+                 " parked=" + std::to_string(retiredDrapeTargetsByTile.size()) +
                  " demTextures=" + std::to_string(demTexturesByTile.size()) +
                  " drapeTargets=" + std::to_string(drapeCache.size()) +
                  " terrainDrawables=" + std::to_string(lg->getDrawableCount()));
+    // .46-diag: 1 Hz device-visible summary — the per-class bind counts are
+    // the flicker signature (any sustained bgOnly/zeroGroup/unbound during a
+    // flight = meshes showing clear/basemap plates instead of imagery).
+    if (klattraFlyDiag()) {
+        static std::chrono::steady_clock::time_point lastEmit{};
+        const auto nowTp = std::chrono::steady_clock::now();
+        if (nowTp - lastEmit >= std::chrono::seconds(1)) {
+            lastEmit = nowTp;
+            klattraDumpEmit("[KLATTRA FLYDIAG] terrain bindings=" + std::to_string(currentBindings.size()) +
+                            " ready=" + std::to_string(readyBindings) +
+                            " fallback=" + std::to_string(fallbackDrapeBindings) +
+                            " bgOnly=" + std::to_string(bgOnlyBindings) +
+                            " zeroGroup=" + std::to_string(bgOnlyZeroGroupBindings) +
+                            " unbound=" + std::to_string(unboundBindings) +
+                            " parked=" + std::to_string(retiredDrapeTargetsByTile.size()) +
+                            " targets=" + std::to_string(drapeCache.size()) +
+                            " demTex=" + std::to_string(demTexturesByTile.size()));
+        }
+    }
     if (traceDrape) {
         Log::Info(Event::Render,
                   "[KLATTRA DRAPE_TRACE] update-end frame=" + std::to_string(drapeTraceFrame) +
