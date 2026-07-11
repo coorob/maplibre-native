@@ -101,12 +101,15 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
         // one-frame needsRendering flap here would explain the vector land
         // pyramids collapsing to fragments with COVERHOLD silent (nothing
         // left to hold) and SRCTILES only seeing the aftermath as a DIP.
-        // Opt out: KLATTRA_LOG_SRCPURGE=0.
+        // RasterDEM defaults on in .68; opt out with KLATTRA_LOG_SRCPURGE=0.
         if (!renderedTiles.empty()) {
-            static const bool purgeLog = [] {
+            static const int8_t purgeLogMode = [] {
                 const char* v = std::getenv("KLATTRA_LOG_SRCPURGE");
-                return v && !(*v == '0' || *v == 'f' || *v == 'F');
+                if (!v) return int8_t{-1};
+                return (*v == '0' || *v == 'f' || *v == 'F') ? int8_t{0} : int8_t{1};
             }();
+            const bool purgeLog = purgeLogMode > 0 ||
+                                  (purgeLogMode < 0 && sourceImpl.type == SourceType::RasterDEM);
             if (purgeLog) {
                 Log::Warning(Event::Render,
                              "[KLATTRA SRCPURGE] source=" + sourceImpl.id +
@@ -322,19 +325,14 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
     // stops overlapping the union of ideal tiles seen in the last
     // coverHoldWindow updates — i.e. when it genuinely leaves the viewport —
     // with the age cap kept only as a pathological backstop (~10 s).
-    // .67: the custom cover hold exists to bridge flat 2D source-cover
-    // fragmentation, but a RasterDEM tile is also a displaced 3D surface.
-    // Holding its parent alongside replacement children makes RenderTerrain
-    // create overlapping parent/child meshes with different drape textures;
-    // their depth intersections appear as hard organic islands of coarse or
-    // background-green imagery. Terrain already owns a separate, bounded
-    // transition hold plus DEM parent fallback, so never apply the global 2D
-    // hold to RasterDEM. KLATTRA_ENABLE_DEM_COVERHOLD restores the old path for
-    // a controlled diagnostic build only.
-    static const bool coverHoldDisabledByEnv = std::getenv("KLATTRA_DISABLE_COVERHOLD") != nullptr;
-    const bool coverHoldDisabled = coverHoldDisabledByEnv ||
-                                   (type == SourceType::RasterDEM &&
-                                    std::getenv("KLATTRA_ENABLE_DEM_COVERHOLD") == nullptr);
+    // .68: RasterDEM needs this hold too. Disabling it in .67 removed the
+    // overlapping green surfaces only when the raw source happened to become
+    // disjoint, but exposed the original fragmented-cover hole as a pure-black
+    // frame (95 bindings immediately after resume versus the normal 112).
+    // RenderTerrain now expands updateTileMasks into disjoint terrain leaves,
+    // so held parents fill only uncovered child regions instead of drawing a
+    // second full displaced surface underneath them.
+    static const bool coverHoldDisabled = std::getenv("KLATTRA_DISABLE_COVERHOLD") != nullptr;
     static const uint16_t coverHoldMaxFrames = [] {
         const char* v = std::getenv("KLATTRA_COVERHOLD_FRAMES");
         const long parsed = v ? std::strtol(v, nullptr, 10) : 0;
@@ -430,13 +428,17 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
     coverHoldAges = std::move(nextCoverHoldAges);
 
     // KLATTRA diagnostics: cover-hold activity. Logs on change (including the
-    // return to 0) plus a 1 Hz heartbeat while holds are active. Opt out:
-    // KLATTRA_LOG_COVERHOLD=0.
+    // return to 0) plus a 1 Hz heartbeat while holds are active. RasterDEM is
+    // default-on in .68 because held coverage is the black-hole referee;
+    // other sources remain opt-in. KLATTRA_LOG_COVERHOLD=0 disables it.
     {
-        static const bool coverHoldLog = [] {
+        static const int8_t coverHoldLogMode = [] {
             const char* v = std::getenv("KLATTRA_LOG_COVERHOLD");
-            return v && !(*v == '0' || *v == 'f' || *v == 'F');
+            if (!v) return int8_t{-1};
+            return (*v == '0' || *v == 'f' || *v == 'F') ? int8_t{0} : int8_t{1};
         }();
+        const bool coverHoldLog = coverHoldLogMode > 0 ||
+                                  (coverHoldLogMode < 0 && type == SourceType::RasterDEM);
         if (coverHoldLog) {
             struct State {
                 std::size_t last = SIZE_MAX;
@@ -448,10 +450,14 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
             const auto now = std::chrono::steady_clock::now();
             const bool changed = (st.last == SIZE_MAX) ? coverHeld > 0
                                                        : (coverHeld != st.last || coverRejectedAge != st.lastAged);
-            if (changed || (coverHeld > 0 && now - st.lastLog >= std::chrono::seconds(1))) {
+            const bool heartbeat = coverHeld > 0 || type == SourceType::RasterDEM;
+            if (changed || (heartbeat && now - st.lastLog >= std::chrono::seconds(1))) {
                 st.lastLog = now;
                 Log::Warning(Event::Render,
-                             "[KLATTRA COVERHOLD] source=" + sourceImpl.id + " held=" + std::to_string(coverHeld) +
+                             "[KLATTRA COVERHOLD] source=" + sourceImpl.id +
+                                 " ideal=" + std::to_string(idealTiles.size()) +
+                                 " rendered=" + std::to_string(renderedTiles.size()) +
+                                 " held=" + std::to_string(coverHeld) +
                                  " retired=" + std::to_string(coverRetiredCovered) +
                                  " aged=" + std::to_string(coverRejectedAge) +
                                  " expiredOff=" + std::to_string(coverExpiredOffscreen) +
@@ -460,9 +466,12 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
                 static const bool traceStderr = std::getenv("KLATTRA_TRACE_STDERR") != nullptr;
                 if (traceStderr) {
                     fprintf(stderr,
-                            "[KLATTRA_TRACE] [KLATTRA COVERHOLD] source=%s held=%zu retired=%zu aged=%zu "
+                            "[KLATTRA_TRACE] [KLATTRA COVERHOLD] source=%s ideal=%zu rendered=%zu "
+                            "held=%zu retired=%zu aged=%zu "
                             "expiredOff=%zu notRenderable=%zu relayout=%zu\n",
                             sourceImpl.id.c_str(),
+                            idealTiles.size(),
+                            renderedTiles.size(),
                             coverHeld,
                             coverRetiredCovered,
                             coverRejectedAge,
@@ -543,12 +552,16 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
     // land-open DRAWABLES collapse 6→1→6 across zoom transitions (traska.31
     // device data); this tells whether the TILE SET dips with them (cover/
     // retention side) or holds (drawable-culling side). Logs on any ≥2 dip
-    // plus a 1 Hz heartbeat. Opt out: KLATTRA_LOG_SRCTILES=0.
+    // plus a 1 Hz heartbeat. RasterDEM defaults on in .68; opt out with
+    // KLATTRA_LOG_SRCTILES=0.
     {
-        static const bool srcTilesLog = [] {
+        static const int8_t srcTilesLogMode = [] {
             const char* v = std::getenv("KLATTRA_LOG_SRCTILES");
-            return v && !(*v == '0' || *v == 'f' || *v == 'F');
+            if (!v) return int8_t{-1};
+            return (*v == '0' || *v == 'f' || *v == 'F') ? int8_t{0} : int8_t{1};
         }();
+        const bool srcTilesLog = srcTilesLogMode > 0 ||
+                                 (srcTilesLogMode < 0 && type == SourceType::RasterDEM);
         if (srcTilesLog) {
             struct State {
                 std::size_t last = SIZE_MAX;

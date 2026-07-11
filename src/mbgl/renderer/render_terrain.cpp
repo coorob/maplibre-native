@@ -1,4 +1,5 @@
 #include <mbgl/renderer/render_terrain.hpp>
+#include <mbgl/algorithm/update_tile_masks.hpp>
 #include <mbgl/renderer/update_parameters.hpp>
 #include <mbgl/renderer/render_source.hpp>
 #include <mbgl/renderer/render_tile.hpp>
@@ -47,6 +48,7 @@
 #include <cstdio>
 #include <iterator>
 #include <limits>
+#include <map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -203,6 +205,29 @@ bool klattraDrapeHasRasterContent(const TerrainDrapeTargetPtr& target) {
 
 bool klattraIsAncestorOf(const OverscaledTileID& ancestor, const OverscaledTileID& child) {
     return ancestor.canonical.z < child.canonical.z && LayerTweaker::tilesOverlap(ancestor, child);
+}
+
+// Terrain cannot draw the full geometry for every entry in the source's raw
+// render set: stock fade retention, parent fallback, and Traska's fragmented-
+// cover hold intentionally keep ancestors beside descendants. Flat layers use
+// TileMask to make that set spatially disjoint. .68 applies the same partition
+// to terrain by turning each uncovered mask cell into its own ideal mesh.
+struct KlattraTerrainMaskEntry {
+    bool usedByRenderedLayers = true;
+    TileMask mask{{0, 0, 0}};
+
+    void setMask(TileMask&& value) { mask = std::move(value); }
+};
+
+OverscaledTileID klattraAbsoluteMaskLeaf(const UnwrappedTileID& base, const CanonicalTileID& relative) {
+    const uint8_t leafZ = static_cast<uint8_t>(base.canonical.z + relative.z);
+    const uint64_t scale = uint64_t{1} << relative.z;
+    return OverscaledTileID(leafZ,
+                            base.wrap,
+                            CanonicalTileID(
+                                leafZ,
+                                static_cast<uint32_t>(base.canonical.x * scale + relative.x),
+                                static_cast<uint32_t>(base.canonical.y * scale + relative.y)));
 }
 
 std::pair<std::array<float, 2>, float> klattraSubrectForChildInAncestor(const OverscaledTileID& child,
@@ -464,26 +489,45 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
                  " previousDrapeTargets=" + std::to_string(drapeCache.size()) +
                  " terrainDrawables=" + std::to_string(lg->getDrawableCount()));
 
-    // Build two sets up-front:
-    //
-    //  - `currentIdealIDs`: the IDEAL OverscaledTileID for each cover slot,
-    //    constructed from `renderTile.id` (the UnwrappedTileID handed to
-    //    `renderTileFn` in `algorithm::updateRenderables`). Used as the key
-    //    for terrain mesh drawables. Distinct from the actual tile's id,
-    //    which can be a parent in fallback. There's one drawable per ideal
-    //    so a single z=10 parent feeding 16 z=12 ideals produces 16
-    //    drawables — each at z=12 mesh density — sharing the parent's
-    //    DEM texture via a UV sub-rect.
-    //
-    // Drape targets are keyed by ideal tile, not by DEM source tile. DEM
-    // parent fallback is fine for elevation, but visible topo colour must
-    // stay at the tile LOD the camera is actually drawing; otherwise a coarse
-    // source parent can stretch low-zoom drape pixels across a close view.
+    // The raw render set intentionally contains overlapping IDs: available
+    // children, a parent fallback for missing siblings, stock fade-held tiles,
+    // and Traska's fragmented-cover hold. Flat raster/DEM drawing consumes the
+    // TileMask generated for that set. Terrain used to discard the mask and
+    // build a full displaced surface for every raw key, which is the broad
+    // green/coarse island defect measured in .67.
+    std::unordered_set<OverscaledTileID> rawIdealIDs;
+    rawIdealIDs.reserve(renderTiles->size());
+    std::map<UnwrappedTileID, KlattraTerrainMaskEntry> terrainMasks;
+    for (const auto& renderTile : *renderTiles) {
+        rawIdealIDs.emplace(renderTile.id.canonical.z, renderTile.id.wrap, renderTile.id.canonical);
+        terrainMasks.try_emplace(renderTile.id);
+    }
+    algorithm::updateTileMasks(terrainMasks);
+
+    // Expand every uncovered relative mask cell into an absolute ideal mesh.
+    // The resulting leaves exactly partition the union of the raw render set:
+    // no parent/child surfaces overlap, while a held parent still contributes
+    // geometry in every child quadrant the replacement cover has not supplied.
     std::unordered_set<OverscaledTileID> currentIdealIDs;
     currentIdealIDs.reserve(renderTiles->size());
-    for (const auto& renderTile : *renderTiles) {
-        currentIdealIDs.emplace(renderTile.id.canonical.z, renderTile.id.wrap, renderTile.id.canonical);
+    std::size_t terrainMaskRoots = 0;
+    std::size_t terrainMaskLeaves = 0;
+    uint8_t terrainMaskMaxDepth = 0;
+    for (const auto& [baseID, entry] : terrainMasks) {
+        if (entry.mask.empty()) {
+            continue; // this raw root is completely covered by descendants
+        }
+        ++terrainMaskRoots;
+        for (const auto& relative : entry.mask) {
+            currentIdealIDs.insert(klattraAbsoluteMaskLeaf(baseID, relative));
+            ++terrainMaskLeaves;
+            terrainMaskMaxDepth = std::max(terrainMaskMaxDepth, relative.z);
+        }
     }
+
+    // Drape targets are keyed by the disjoint ideal leaves, not by the actual
+    // DEM source tile. A leaf backed by a parent DEM/drape samples the correct
+    // ancestor sub-rectangle through the existing UV remap.
 
     // Exact drape targets give the final sharp topo texture. Coarser parent
     // targets give fast-moving cameras something stable to sample while new
@@ -504,15 +548,21 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
     klattraAddDrapeOverscan(currentDrapeIDs, currentIdealIDs, drapeOverscanTiles);
     const std::vector<OverscaledTileID> exactAndOverscanDrapeIDs(currentDrapeIDs.begin(),
                                                                  currentDrapeIDs.end());
-    // Terrain meshes stay tied to the DEM source cover so every raised tile
-    // can resolve real elevation data (or a source-provided parent fallback).
-    // The DEM source itself expands its pitched cover; drape targets can still
-    // overscan further so satellite colour is ready before the mesh arrives.
-    const std::unordered_set<OverscaledTileID>& terrainMeshIDs = currentIdealIDs;
-    // .67 referee: parent+child DEM IDs are overlapping displaced surfaces,
-    // not harmless 2D fallback tiles. The global TilePyramid cover-hold used
-    // to feed dozens of these pairs into RenderTerrain simultaneously; their
-    // depth intersections select different drape textures in organic islands.
+    // Raw source IDs are allowed to overlap: parent fallback, stock fade
+    // retention, and the cover-fragment hold all need those ancestors. The
+    // terrain geometry is partitioned into masked leaves before drape
+    // allocation, with an atomic previous-cover hold below if any new leaf is
+    // unbound. Keep this raw count as a diagnostic; it may stay non-zero while
+    // the post-mask mesh overlap must be zero.
+    std::size_t rawSourceOverlapPairs = 0;
+    for (auto a = rawIdealIDs.begin(); a != rawIdealIDs.end(); ++a) {
+        for (auto b = std::next(a); b != rawIdealIDs.end(); ++b) {
+            if (klattraIsAncestorOf(*a, *b) || klattraIsAncestorOf(*b, *a)) {
+                ++rawSourceOverlapPairs;
+            }
+        }
+    }
+    std::unordered_set<OverscaledTileID> terrainMeshIDs = currentIdealIDs;
     std::size_t sourceMeshOverlapPairs = 0;
     for (auto a = terrainMeshIDs.begin(); a != terrainMeshIDs.end(); ++a) {
         for (auto b = std::next(a); b != terrainMeshIDs.end(); ++b) {
@@ -1434,6 +1484,112 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
         nextBindings.emplace(idealOS, std::move(binding));
     }
 
+    const std::size_t candidateBindingCount = nextBindings.size();
+    const std::size_t candidateReadyBindings = readyBindings;
+    const std::size_t candidateUnboundBindings = unboundBindings;
+    const std::size_t candidateOwnRasterEmpty = rasterEmptyBindings;
+    const std::size_t candidateOwnRasterPartial = rasterPartialBindings;
+
+    // A mask is only a coverage guarantee if every emitted leaf can actually
+    // draw. If a newly-partitioned cover has an unbound drape leaf, swapping
+    // piecemeal would mask out its paintable parent and recreate .67's black
+    // hole. Keep the previous disjoint cover atomically for this update while
+    // the new targets continue baking; switch all leaves together once every
+    // binding has a texture. This hold never mixes the old and new covers.
+    std::unordered_set<OverscaledTileID> previousDrawableIDs;
+    lg->visitDrawables([&](const gfx::Drawable& drawable) {
+        if (const auto& tileID = drawable.getTileID()) {
+            previousDrawableIDs.insert(*tileID);
+        }
+    });
+    bool previousCoverDrawableBacked = !currentBindings.empty();
+    for (const auto& [tileID, binding] : currentBindings) {
+        if (!binding.drapeTexture || previousDrawableIDs.find(tileID) == previousDrawableIDs.end()) {
+            previousCoverDrawableBacked = false;
+            break;
+        }
+    }
+    bool terrainAtomicHold = false;
+    if (candidateUnboundBindings > 0 && previousCoverDrawableBacked) {
+        terrainAtomicHold = true;
+        terrainMeshIDs.clear();
+        terrainMeshIDs.reserve(currentBindings.size());
+        for (const auto& [tileID, binding] : currentBindings) {
+            (void)binding;
+            terrainMeshIDs.insert(tileID);
+        }
+        nextBindings = currentBindings;
+    }
+
+    // The counters accumulated above describe the candidate cover. Recompute
+    // the visible binding classes after the optional atomic hold so STAGE does
+    // not attribute a rejected child's state to the old cover on screen.
+    readyBindings = 0;
+    emptyDemBindings = 0;
+    fallbackDrapeBindings = 0;
+    bgOnlyBindings = 0;
+    bgOnlyZeroGroupBindings = 0;
+    unboundBindings = 0;
+    std::size_t boundRasterEmptyBindings = 0;
+    std::size_t boundRasterPartialBindings = 0;
+    std::size_t boundRasterUnknownBindings = 0;
+    for (const auto& [idealID, binding] : nextBindings) {
+        if (binding.drapeReady) ++readyBindings;
+        if (binding.usedEmptyDEM) ++emptyDemBindings;
+        if (binding.usedDrapeFallback) ++fallbackDrapeBindings;
+        if (!binding.drapeTexture) {
+            ++unboundBindings;
+            continue;
+        }
+        if (!binding.drapeReady && !binding.usedDrapeFallback) {
+            ++bgOnlyBindings;
+        }
+
+        TerrainDrapeTargetPtr boundTarget;
+        if (binding.drapeID) {
+            if (auto live = drapeCache.get(*binding.drapeID);
+                live && live->getTexture() == binding.drapeTexture) {
+                boundTarget = live;
+            } else if (auto retired = retiredDrapeTargetsByTile.find(*binding.drapeID);
+                       retired != retiredDrapeTargetsByTile.end() && retired->second &&
+                       retired->second->getTexture() == binding.drapeTexture) {
+                boundTarget = retired->second;
+            }
+        }
+        if (!boundTarget) {
+            drapeCache.visitAll([&](const OverscaledTileID&, const TerrainDrapeTargetPtr& candidate) {
+                if (!boundTarget && candidate && candidate->getTexture() == binding.drapeTexture) {
+                    boundTarget = candidate;
+                }
+            });
+        }
+        if (!boundTarget) {
+            for (const auto& [retiredID, retired] : retiredDrapeTargetsByTile) {
+                (void)retiredID;
+                if (retired && retired->getTexture() == binding.drapeTexture) {
+                    boundTarget = retired;
+                    break;
+                }
+            }
+        }
+        if (!boundTarget) {
+            ++boundRasterUnknownBindings;
+            continue;
+        }
+        if (!binding.drapeReady && !binding.usedDrapeFallback && boundTarget->numLayerGroups() == 0) {
+            ++bgOnlyZeroGroupBindings;
+        }
+        if (!boundTarget->requiresRasterDrapeContent()) {
+            continue;
+        }
+        const bool hasAnyRaster = klattraDrapeHasRasterContent(boundTarget);
+        if (!hasAnyRaster) {
+            ++boundRasterEmptyBindings;
+        } else if (!boundTarget->hasRasterDrawableCoveringTile(idealID)) {
+            ++boundRasterPartialBindings;
+        }
+    }
+
     // Create or refresh terrain drawables, one per IDEAL tile. Recreate
     // when the source DEM tile changes (typically an upgrade from a
     // parent-fallback texture to the exact-zoom texture, or empty
@@ -1619,21 +1775,81 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
         }
     }
 
-    // Count the meshes the GPU will actually draw after pruning. This catches
-    // both source-level overlaps and any terrain-local retained predecessor;
-    // `meshOverlap=0` is the hard referee for the .67 flight.
+    // Count the meshes the GPU will actually draw after pruning. Raw overlap
+    // is now expected while held parents bridge cover fragmentation; both the
+    // mask-leaf and actual drawable overlap must remain zero in .68.
     std::unordered_set<OverscaledTileID> drawableMeshIDs;
+    std::size_t terrainLayerDrawableCount = 0;
+    std::size_t drawableMeshCount = 0;
     lg->visitDrawables([&](const gfx::Drawable& drawable) {
+        ++terrainLayerDrawableCount;
         if (const auto& tileID = drawable.getTileID()) {
+            ++drawableMeshCount;
             drawableMeshIDs.insert(*tileID);
         }
     });
+    const std::size_t drawableMeshDuplicates = drawableMeshCount - drawableMeshIDs.size();
+    const std::size_t drawableMeshNoTile = terrainLayerDrawableCount - drawableMeshCount;
     std::size_t drawableMeshOverlapPairs = 0;
     for (auto a = drawableMeshIDs.begin(); a != drawableMeshIDs.end(); ++a) {
         for (auto b = std::next(a); b != drawableMeshIDs.end(); ++b) {
             if (klattraIsAncestorOf(*a, *b) || klattraIsAncestorOf(*b, *a)) {
                 ++drawableMeshOverlapPairs;
             }
+        }
+    }
+    std::size_t drawableMeshMissing = 0;
+    for (const auto& tileID : terrainMeshIDs) {
+        if (drawableMeshIDs.find(tileID) == drawableMeshIDs.end()) {
+            ++drawableMeshMissing;
+        }
+    }
+    std::size_t drawableMeshExtra = 0;
+    for (const auto& tileID : drawableMeshIDs) {
+        if (terrainMeshIDs.find(tileID) == terrainMeshIDs.end()) {
+            ++drawableMeshExtra;
+        }
+    }
+
+    // Sub-second defects cannot rely on the 1 Hz STAGE sample. Emit the first
+    // bad frame immediately, a 1 Hz heartbeat while it persists, and a recovery
+    // edge. This captures a one-frame black/green flash without FLYDIAG env.
+    const bool badFrame = sourceMeshOverlapPairs > 0 || drawableMeshOverlapPairs > 0 ||
+                          drawableMeshDuplicates > 0 || drawableMeshNoTile > 0 ||
+                          drawableMeshMissing > 0 || drawableMeshExtra > 0 || unboundBindings > 0 ||
+                          boundRasterEmptyBindings > 0 || boundRasterPartialBindings > 0 ||
+                          boundRasterUnknownBindings > 0;
+    {
+        static bool wasBad = false;
+        static std::chrono::steady_clock::time_point lastBadEmit{};
+        const auto now = std::chrono::steady_clock::now();
+        if (badFrame && (!wasBad || now - lastBadEmit >= std::chrono::seconds(1))) {
+            lastBadEmit = now;
+            klattraDumpEmit(
+                "[KLATTRA BADFRAME] leafOverlap=" + std::to_string(sourceMeshOverlapPairs) +
+                " meshOverlap=" + std::to_string(drawableMeshOverlapPairs) +
+                " duplicates=" + std::to_string(drawableMeshDuplicates) +
+                " noTile=" + std::to_string(drawableMeshNoTile) +
+                " missing=" + std::to_string(drawableMeshMissing) +
+                " extra=" + std::to_string(drawableMeshExtra) +
+                " unbound=" + std::to_string(unboundBindings) +
+                " rasterEmpty=" + std::to_string(boundRasterEmptyBindings) +
+                " rasterPartial=" + std::to_string(boundRasterPartialBindings) +
+                " rasterUnknown=" + std::to_string(boundRasterUnknownBindings) +
+                " atomicHold=" + std::to_string(terrainAtomicHold));
+        } else if (!badFrame && wasBad) {
+            klattraDumpEmit("[KLATTRA BADFRAME] recovered");
+        }
+        wasBad = badFrame;
+    }
+    {
+        static bool previousAtomicHold = false;
+        if (terrainAtomicHold != previousAtomicHold) {
+            klattraDumpEmit("[KLATTRA TRANSITION] atomicHold=" + std::to_string(terrainAtomicHold) +
+                            " candidateBindings=" + std::to_string(candidateBindingCount) +
+                            " candidateUnbound=" + std::to_string(candidateUnboundBindings) +
+                            " activeBindings=" + std::to_string(nextBindings.size()));
+            previousAtomicHold = terrainAtomicHold;
         }
     }
 
@@ -1646,6 +1862,28 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
                  " bgOnly=" + std::to_string(bgOnlyBindings) +
                  " bgOnlyZeroGroup=" + std::to_string(bgOnlyZeroGroupBindings) +
                  " unbound=" + std::to_string(unboundBindings) +
+                 " rawOverlap=" + std::to_string(rawSourceOverlapPairs) +
+                 " leafOverlap=" + std::to_string(sourceMeshOverlapPairs) +
+                 " meshOverlap=" + std::to_string(drawableMeshOverlapPairs) +
+                 " meshDuplicates=" + std::to_string(drawableMeshDuplicates) +
+                 " meshNoTile=" + std::to_string(drawableMeshNoTile) +
+                 " meshMissing=" + std::to_string(drawableMeshMissing) +
+                 " meshExtra=" + std::to_string(drawableMeshExtra) +
+                 " rawIDs=" + std::to_string(rawIdealIDs.size()) +
+                 " maskRoots=" + std::to_string(terrainMaskRoots) +
+                 " maskLeaves=" + std::to_string(terrainMaskLeaves) +
+                 " leafIDs=" + std::to_string(currentIdealIDs.size()) +
+                 " maskDepth=" + std::to_string(terrainMaskMaxDepth) +
+                 " atomicHold=" + std::to_string(terrainAtomicHold) +
+                 " atomicEligible=" + std::to_string(previousCoverDrawableBacked) +
+                 " candidateBindings=" + std::to_string(candidateBindingCount) +
+                 " candidateReady=" + std::to_string(candidateReadyBindings) +
+                 " candidateUnbound=" + std::to_string(candidateUnboundBindings) +
+                 " candidateOwnRasterEmpty=" + std::to_string(candidateOwnRasterEmpty) +
+                 " candidateOwnRasterPartial=" + std::to_string(candidateOwnRasterPartial) +
+                 " boundRasterEmpty=" + std::to_string(boundRasterEmptyBindings) +
+                 " boundRasterPartial=" + std::to_string(boundRasterPartialBindings) +
+                 " boundRasterUnknown=" + std::to_string(boundRasterUnknownBindings) +
                  " parked=" + std::to_string(retiredDrapeTargetsByTile.size()) +
                  " demTextures=" + std::to_string(demTexturesByTile.size()) +
                  " drapeTargets=" + std::to_string(drapeCache.size()) +
@@ -1669,8 +1907,24 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
                             " parked=" + std::to_string(retiredDrapeTargetsByTile.size()) +
                             " targets=" + std::to_string(drapeCache.size()) +
                             " demTex=" + std::to_string(demTexturesByTile.size()) +
-                            " sourceOverlap=" + std::to_string(sourceMeshOverlapPairs) +
+                            " rawOverlap=" + std::to_string(rawSourceOverlapPairs) +
+                            " leafOverlap=" + std::to_string(sourceMeshOverlapPairs) +
                             " meshOverlap=" + std::to_string(drawableMeshOverlapPairs) +
+                            " meshDuplicates=" + std::to_string(drawableMeshDuplicates) +
+                            " meshNoTile=" + std::to_string(drawableMeshNoTile) +
+                            " meshMissing=" + std::to_string(drawableMeshMissing) +
+                            " meshExtra=" + std::to_string(drawableMeshExtra) +
+                            " rawIDs=" + std::to_string(rawIdealIDs.size()) +
+                            " maskRoots=" + std::to_string(terrainMaskRoots) +
+                            " maskLeaves=" + std::to_string(terrainMaskLeaves) +
+                            " leafIDs=" + std::to_string(currentIdealIDs.size()) +
+                            " maskDepth=" + std::to_string(terrainMaskMaxDepth) +
+                            " atomicHold=" + std::to_string(terrainAtomicHold) +
+                            " candidateBindings=" + std::to_string(candidateBindingCount) +
+                            " candidateUnbound=" + std::to_string(candidateUnboundBindings) +
+                            " boundRasterEmpty=" + std::to_string(boundRasterEmptyBindings) +
+                            " boundRasterPartial=" + std::to_string(boundRasterPartialBindings) +
+                            " boundRasterUnknown=" + std::to_string(boundRasterUnknownBindings) +
                             " ahead=" + std::to_string(lookaheadStripAdded) +
                             " aheadSpan10=" + std::to_string(static_cast<int64_t>(std::lround(lookaheadSpanTiles * 10.0))));
         }
@@ -1769,10 +2023,28 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
                 " fallback=" + std::to_string(fallbackDrapeBindings) +
                 " ready=" + std::to_string(readyBindings) +
                 " bindings=" + std::to_string(currentBindings.size()) +
-                " sourceOverlap=" + std::to_string(sourceMeshOverlapPairs) +
+                " rawOverlap=" + std::to_string(rawSourceOverlapPairs) +
+                " leafOverlap=" + std::to_string(sourceMeshOverlapPairs) +
                 " meshOverlap=" + std::to_string(drawableMeshOverlapPairs) +
-                " rasterEmpty=" + std::to_string(rasterEmptyBindings) +
-                " rasterPartial=" + std::to_string(rasterPartialBindings) +
+                " meshDuplicates=" + std::to_string(drawableMeshDuplicates) +
+                " meshNoTile=" + std::to_string(drawableMeshNoTile) +
+                " meshMissing=" + std::to_string(drawableMeshMissing) +
+                " meshExtra=" + std::to_string(drawableMeshExtra) +
+                " rawIDs=" + std::to_string(rawIdealIDs.size()) +
+                " maskRoots=" + std::to_string(terrainMaskRoots) +
+                " maskLeaves=" + std::to_string(terrainMaskLeaves) +
+                " leafIDs=" + std::to_string(currentIdealIDs.size()) +
+                " maskDepth=" + std::to_string(terrainMaskMaxDepth) +
+                " atomicHold=" + std::to_string(terrainAtomicHold) +
+                " atomicEligible=" + std::to_string(previousCoverDrawableBacked) +
+                " candidateBindings=" + std::to_string(candidateBindingCount) +
+                " candidateReady=" + std::to_string(candidateReadyBindings) +
+                " candidateUnbound=" + std::to_string(candidateUnboundBindings) +
+                " candidateOwnRasterEmpty=" + std::to_string(candidateOwnRasterEmpty) +
+                " candidateOwnRasterPartial=" + std::to_string(candidateOwnRasterPartial) +
+                " rasterEmpty=" + std::to_string(boundRasterEmptyBindings) +
+                " rasterPartial=" + std::to_string(boundRasterPartialBindings) +
+                " rasterUnknown=" + std::to_string(boundRasterUnknownBindings) +
                 " unbound=" + std::to_string(unboundBindings) +
                 " allocFail=" + std::to_string(stageAllocFailEvents) +
                 " physMB=" + std::to_string(static_cast<int64_t>(std::lround(klattraPhysFootprintMB()))) +
