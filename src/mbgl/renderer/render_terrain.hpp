@@ -312,6 +312,9 @@ public:
     void diagNoteRasterOverlap(const OverscaledTileID& drapeID, uint8_t rasterZ, bool paintable) const;
     // Called when a raster drape drawable is actually added to the canvas.
     void diagNoteRasterRouted(const OverscaledTileID& drapeID, uint8_t rasterZ) const;
+    // .54: called when raster drape drawables are REMOVED from a canvas
+    // (raster cover shift / stale drop) — a readiness-revocation suspect.
+    void diagNoteRasterRevoked(const OverscaledTileID& drapeID, std::size_t removed) const;
 
     /**
      * @brief Visit every (tileID, RenderTarget) currently in the drape cache.
@@ -511,6 +514,14 @@ private:
         // 0 = own target ready at first bind, 1 = ancestor fallback,
         // 2 = background-only bind, 3 = unbound (hole).
         uint8_t firstBoundState = 255;
+        // .54 readiness-cycle tracking: canvases don't just become ready
+        // once — resizes recreate them empty and raster cover shifts revoke
+        // their content. Each ready→unready→ready cycle is a visible
+        // artifact window; its duration distribution IS the smear.
+        bool wasReadyForTile = false;
+        std::chrono::steady_clock::time_point unreadySince{};
+        uint32_t regressions = 0;
+        uint32_t revokes = 0;
     };
     mutable std::unordered_map<OverscaledTileID, DrapeStageEntry> drapeStageByTile;
     // Completed-transition latency samples (ms), capped; summarised at 1 Hz.
@@ -518,6 +529,11 @@ private:
     mutable std::vector<float> stageRouteMs;
     mutable std::vector<float> stageBakeMs;
     mutable std::vector<float> stageLateMs;
+    // .54: ready→unready→ready cycle durations (ms) and cumulative causes.
+    mutable std::vector<float> stageReReadyMs;
+    mutable uint64_t stageRevokeEvents = 0;
+    mutable uint64_t stageRegressionEvents = 0;
+    mutable uint64_t stageResizeEvents = 0;
 
     // Maximum stable-view pixel size of each close-zoom drape target. Moving
     // cameras allocate smaller close targets first and upgrade to this after

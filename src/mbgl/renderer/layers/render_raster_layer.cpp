@@ -385,6 +385,9 @@ void RenderRasterLayer::update(gfx::ShaderRegistry& shaders,
                                 return false;
                             });
                         stats.drawablesRemoved += removed;
+                        // .54 stage diag: cover-shift revocation — the prime
+                        // readiness-regression suspect.
+                        activeTerrain->diagNoteRasterRevoked(drapeID, removed);
                         if (removed && klattraLogDrapeStale()) {
                             Log::Info(Event::Render,
                                       "[Klättra DRAPE_STALE] layer=" + getID() +
@@ -444,7 +447,7 @@ void RenderRasterLayer::update(gfx::ShaderRegistry& shaders,
                 // render_fill_layer.cpp comment).
                 if (activeTerrain) {
                     activeTerrain->visitDrapeTargets(
-                        [&](const OverscaledTileID&, TerrainDrapeTargetPtr& drapeTarget) {
+                        [&](const OverscaledTileID& drapeID, TerrainDrapeTargetPtr& drapeTarget) {
                             if (!drapeTarget) return;
                             if (auto* drapeGroup = static_cast<TileLayerGroup*>(
                                     drapeTarget->getLayerGroup(layerIndex).get())) {
@@ -452,6 +455,8 @@ void RenderRasterLayer::update(gfx::ShaderRegistry& shaders,
                             const auto removedStale = drapeGroup->removeDrawables(renderPass, tileID).size();
                             stats.drawablesRemoved += removedStale;
                             probeRemovedStale += removedStale;
+                            // .54 stage diag: stale-drop revocation.
+                            activeTerrain->diagNoteRasterRevoked(drapeID, removedStale);
                         }
                             }
                         });

@@ -335,6 +335,15 @@ void RenderTerrain::diagNoteRasterRouted(const OverscaledTileID& drapeID, uint8_
     }
 }
 
+void RenderTerrain::diagNoteRasterRevoked(const OverscaledTileID& drapeID, std::size_t removed) const {
+    if (!stageDiagEnabled() || removed == 0) return;
+    stageRevokeEvents++;
+    const auto it = drapeStageByTile.find(drapeID);
+    if (it != drapeStageByTile.end()) {
+        it->second.revokes++;
+    }
+}
+
 RenderTerrain::RenderTerrain(Immutable<style::Terrain::Impl> impl_)
     : impl(std::move(impl_)) {
 }
@@ -797,6 +806,7 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
                         drapeWorkPending = true;
                     } else if (maxResizesPerFrame == 0 || resizesThisFrame < maxResizesPerFrame) {
                         resizesThisFrame++;
+                        if (stageDiagEnabled()) stageResizeEvents++;
                         lastDrapeResizeUpdate[tileID] = drapeUpdateCounter;
                         auto oldTarget = drapeCache.take(tileID);
                         if (klattraDrapeTargetReady(oldTarget)) {
@@ -1569,14 +1579,39 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
 
     // .53 stage diag: advance bake timestamps every frame (frame-accurate
     // latency), decompose the live backlog by pipeline stage at 1 Hz.
+    // .54: also track readiness REGRESSIONS — the .53 flight proved the
+    // maiden pipeline is ~30 ms while bgOnly/fallback waves persist, so the
+    // artifact must be canvases LOSING readiness (resize recreation, raster
+    // cover-shift revocations) and rebinding to plates/ancestors until they
+    // re-ready. The ready→unready→ready duration distribution is the smear.
     if (stageDiagEnabled()) {
         const auto nowTp = std::chrono::steady_clock::now();
         for (auto& [stageID, stage] : drapeStageByTile) {
+            const TerrainDrapeTargetPtr target = drapeCache.get(stageID);
+            if (!target) {
+                // Pruned from the cache: not visible, no artifact — close any
+                // open unready window without recording it.
+                stage.wasReadyForTile = false;
+                stage.unreadySince = std::chrono::steady_clock::time_point{};
+                continue;
+            }
+            const bool readyNow = klattraDrapeTargetReadyForTile(target, stageID);
+            if (stage.wasReadyForTile && !readyNow) {
+                stage.regressions++;
+                stageRegressionEvents++;
+                stage.unreadySince = nowTp;
+            } else if (!stage.wasReadyForTile && readyNow &&
+                       stage.unreadySince != std::chrono::steady_clock::time_point{}) {
+                klattraStagePush(stageReReadyMs, klattraStageMs(stage.unreadySince, nowTp));
+                stage.unreadySince = std::chrono::steady_clock::time_point{};
+            }
+            stage.wasReadyForTile = readyNow;
+
             if (stage.rasterRouted == std::chrono::steady_clock::time_point{} ||
                 stage.bakedWithRaster != std::chrono::steady_clock::time_point{}) {
                 continue;
             }
-            if (klattraDrapeTargetReadyForTile(drapeCache.get(stageID), stageID)) {
+            if (readyNow) {
                 stage.bakedWithRaster = nowTp;
                 klattraStagePush(stageBakeMs, klattraStageMs(stage.rasterRouted, nowTp));
                 if (stage.firstBound != std::chrono::steady_clock::time_point{} && stage.firstBound < nowTp) {
@@ -1639,6 +1674,18 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
                 " bgOnly=" + std::to_string(bound2) +
                 " hole=" + std::to_string(bound3) +
                 " tracked=" + std::to_string(drapeStageByTile.size()));
+            uint32_t inCycle = 0;
+            for (const auto& [stageID, stage] : drapeStageByTile) {
+                if (stage.unreadySince != std::chrono::steady_clock::time_point{} && drapeCache.get(stageID)) {
+                    inCycle++;
+                }
+            }
+            klattraDumpEmit(
+                "[KLATTRA STAGE] churn regressions=" + std::to_string(stageRegressionEvents) +
+                " revokes=" + std::to_string(stageRevokeEvents) +
+                " resizes=" + std::to_string(stageResizeEvents) +
+                " inCycle=" + std::to_string(inCycle) +
+                " reReadyMs=" + klattraStagePercentiles(stageReReadyMs));
         }
     }
     if (traceDrape) {
