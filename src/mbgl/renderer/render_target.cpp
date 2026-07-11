@@ -40,7 +40,7 @@ bool klattraLogDrapeTrace() {
 bool klattraFlyDiag() {
     static const bool enabled = [] {
         const char* v = std::getenv("KLATTRA_FLYDIAG");
-        return !(v && (*v == '0' || *v == 'f' || *v == 'F'));
+        return v && !(*v == '0' || *v == 'f' || *v == 'F');
     }();
     return enabled;
 }

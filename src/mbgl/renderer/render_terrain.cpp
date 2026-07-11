@@ -105,7 +105,7 @@ void klattraDumpEmit(const std::string& message) {
 bool klattraFlyDiag() {
     static const bool enabled = [] {
         const char* v = std::getenv("KLATTRA_FLYDIAG");
-        return !(v && (*v == '0' || *v == 'f' || *v == 'F'));
+        return v && !(*v == '0' || *v == 'f' || *v == 'F');
     }();
     return enabled;
 }
@@ -478,6 +478,35 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
         std::sort(rankedDrapeIDs.begin(), rankedDrapeIDs.end(), [](const auto& a, const auto& b) {
             return a.first < b.first;
         });
+        // .47 flight fix (device 2026-07-11: 322 live canvases at flyover
+        // start = the jetsam): cap the TOTAL drape population by camera
+        // rank. Visible-cover (ideal) tiles are never dropped — the cap
+        // sheds the farthest overscan/ancestor extras first, and tightens
+        // while the camera is in motion, when a sweep would otherwise mint
+        // canvases faster than the prune releases them.
+        static const uint32_t drapeTotalCapStable = klattraEnvTileCount("KLATTRA_DRAPE_TOTAL_CAP", 240);
+        static const uint32_t drapeTotalCapMoving = klattraEnvTileCount("KLATTRA_DRAPE_TOTAL_CAP_MOVING", 200);
+        const uint32_t drapeTotalCap = useHighQualityDrape ? drapeTotalCapStable : drapeTotalCapMoving;
+        if (drapeTotalCap > 0 && rankedDrapeIDs.size() > drapeTotalCap) {
+            std::size_t kept = rankedDrapeIDs.size();
+            for (std::size_t i = rankedDrapeIDs.size(); i > 0 && kept > drapeTotalCap; --i) {
+                const auto& candidate = rankedDrapeIDs[i - 1].second;
+                if (terrainMeshIDs.find(candidate) != terrainMeshIDs.end()) {
+                    continue; // never drop visible cover
+                }
+                currentDrapeIDs.erase(candidate);
+                kept--;
+            }
+            if (kept < rankedDrapeIDs.size()) {
+                rankedDrapeIDs.erase(std::remove_if(rankedDrapeIDs.begin(),
+                                                    rankedDrapeIDs.end(),
+                                                    [&](const auto& entry) {
+                                                        return currentDrapeIDs.find(entry.second) ==
+                                                               currentDrapeIDs.end();
+                                                    }),
+                                     rankedDrapeIDs.end());
+            }
+        }
         std::unordered_map<OverscaledTileID, uint32_t> drapeRankByTile;
         drapeRankByTile.reserve(rankedDrapeIDs.size());
         for (uint32_t i = 0; i < rankedDrapeIDs.size(); ++i) {
@@ -531,7 +560,17 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
                 // pans accumulate near-ring targets until jetsam. The retired
                 // target keeps rendering until its successor bakes.
                 if (existingSize != desiredSize) {
-                    if (maxResizesPerFrame == 0 || resizesThisFrame < maxResizesPerFrame) {
+                    // .47 flight fix: ring assignments churn every update
+                    // while the camera sweeps (174 resizes/min measured on
+                    // device) — each resize is a fresh allocation plus a
+                    // re-bake window. Only realign sizes once the cover has
+                    // been stable for a few frames; flight dwells and the
+                    // arrival settle re-sharpen within a second.
+                    static const uint32_t resizeStableFrames =
+                        klattraEnvFrameCount("KLATTRA_DRAPE_RESIZE_STABLE_FRAMES", 4);
+                    if (stableDrapeCoverFrames < resizeStableFrames) {
+                        drapeWorkPending = true;
+                    } else if (maxResizesPerFrame == 0 || resizesThisFrame < maxResizesPerFrame) {
                         resizesThisFrame++;
                         auto oldTarget = drapeCache.take(tileID);
                         if (klattraDrapeTargetReady(oldTarget)) {
@@ -669,6 +708,7 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
         }
 
         std::size_t removedGroups = 0;
+        std::vector<OverscaledTileID> staleBakeIDs;
         drapeCache.visitAll([&](const OverscaledTileID& drapeID, const TerrainDrapeTargetPtr& target) {
             if (!target) return;
             const auto removed = target->removeLayerGroupsIf(
@@ -679,6 +719,26 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
                     return activeDrapeLayerIndices.find(layerIndex) == activeDrapeLayerIndices.end();
                 });
             removedGroups += removed;
+            if (removed > 0 && target->hasCompletedRender()) {
+                // .47 flight fix (the beige plates): if the prune left this
+                // canvas with NO content groups (a style swap removed them
+                // all), its texture still holds the OLD style's bake — the
+                // own-baked binding fallback would show those stale pixels
+                // (device 2026-07-11: topo-paper plates bound mid-satellite
+                // flight, bgOnly≈40/165 bindings). Collect it for eviction;
+                // the create path rebuilds it next update with the current
+                // style's clear colour and content routing. Partial prunes
+                // (a layer leaving its zoom range) keep their canvas.
+                std::size_t contentGroups = 0;
+                target->visitLayerGroups([&](LayerGroupBase& group) {
+                    if (group.getLayerIndex() != std::numeric_limits<int32_t>::max()) {
+                        contentGroups++;
+                    }
+                });
+                if (contentGroups == 0) {
+                    staleBakeIDs.push_back(drapeID);
+                }
+            }
             if (traceDrape && removed) {
                 Log::Info(Event::Render,
                           "[KLATTRA DRAPE_TRACE] prune-inactive-groups frame=" +
@@ -687,6 +747,12 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
                               " removed=" + std::to_string(removed));
             }
         });
+        for (const auto& staleID : staleBakeIDs) {
+            if (auto stale = drapeCache.take(staleID)) {
+                changes.emplace_back(std::make_unique<RemoveRenderTargetRequest>(std::move(stale)));
+            }
+            retiredDrapeTargetsByTile.erase(staleID);
+        }
         if (traceDrape && removedGroups) {
             Log::Info(Event::Render,
                       "[KLATTRA DRAPE_TRACE] prune-inactive-groups-total frame=" +
