@@ -38,9 +38,10 @@ bool klattraLogDrapeTrace() {
 // syslog + stderr for the simulator; per-second budget caps the flood.
 // Render-thread only — plain statics.
 bool klattraFlyDiag() {
+    // .48-diag: default ON again for the beige-localisation flight.
     static const bool enabled = [] {
         const char* v = std::getenv("KLATTRA_FLYDIAG");
-        return v && !(*v == '0' || *v == 'f' || *v == 'F');
+        return !(v && (*v == '0' || *v == 'f' || *v == 'F'));
     }();
     return enabled;
 }

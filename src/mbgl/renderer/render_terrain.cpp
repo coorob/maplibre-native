@@ -61,9 +61,12 @@ bool klattraLogDrapeTrace() {
 // file carries its own copy — anonymous namespace). Opt out:
 // KLATTRA_LOG_COVER_SUMMARY=0.
 bool klattraLogCoverSummary() {
+    // .48-diag: default ON in this file only (the ideals/backed "holes"
+    // summary — the beige localisation instrument). tile_cover.cpp and
+    // render_raster_dem_source.cpp keep their quiet opt-in defaults.
     static const bool enabled = [] {
         const char* v = std::getenv("KLATTRA_LOG_COVER_SUMMARY");
-        return v && !(*v == '0' || *v == 'f' || *v == 'F');
+        return !(v && (*v == '0' || *v == 'f' || *v == 'F'));
     }();
     return enabled;
 }
@@ -103,9 +106,10 @@ void klattraDumpEmit(const std::string& message) {
 // klattraDumpEmit (Warning + stderr) with a per-second budget so a flight
 // cannot flood the syslog. Render-thread only — plain statics.
 bool klattraFlyDiag() {
+    // .48-diag: default ON again for the beige-localisation flight.
     static const bool enabled = [] {
         const char* v = std::getenv("KLATTRA_FLYDIAG");
-        return v && !(*v == '0' || *v == 'f' || *v == 'F');
+        return !(v && (*v == '0' || *v == 'f' || *v == 'F'));
     }();
     return enabled;
 }
@@ -549,6 +553,12 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
         // picked up on following frames (0 = uncapped).
         static const uint32_t maxResizesPerFrame = klattraEnvTileCount("KLATTRA_DRAPE_MAX_RESIZES_PER_FRAME", 3);
         uint32_t resizesThisFrame = 0;
+        // .48: per-tile resize cooldown state (see below). Function-static is
+        // fine: one terrain instance on the render thread; stale entries are
+        // a few bytes per tile and get overwritten on the next resize.
+        static uint64_t drapeUpdateCounter = 0;
+        ++drapeUpdateCounter;
+        static std::unordered_map<OverscaledTileID, uint64_t> lastDrapeResizeUpdate;
         drapeWorkPending = false;
         for (const auto& tileID : currentDrapeIDs) {
             const int32_t targetSize = drapeTargetSizeForTile(tileID);
@@ -560,18 +570,23 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
                 // pans accumulate near-ring targets until jetsam. The retired
                 // target keeps rendering until its successor bakes.
                 if (existingSize != desiredSize) {
-                    // .47 flight fix: ring assignments churn every update
-                    // while the camera sweeps (174 resizes/min measured on
-                    // device) — each resize is a fresh allocation plus a
-                    // re-bake window. Only realign sizes once the cover has
-                    // been stable for a few frames; flight dwells and the
-                    // arrival settle re-sharpen within a second.
-                    static const uint32_t resizeStableFrames =
-                        klattraEnvFrameCount("KLATTRA_DRAPE_RESIZE_STABLE_FRAMES", 4);
-                    if (stableDrapeCoverFrames < resizeStableFrames) {
+                    // .48 (reworks the .47 stability freeze, which starved
+                    // promotions for the whole flight — the cover never
+                    // stabilises mid-flight, so tiles created far stayed
+                    // far-coarse while filling the screen): a per-tile
+                    // cooldown instead. Promotions keep flowing under the
+                    // per-frame cap; only rapid re-resize thrash of the SAME
+                    // tile (ring-boundary jitter) is damped.
+                    static const uint32_t resizeCooldownUpdates =
+                        klattraEnvFrameCount("KLATTRA_DRAPE_RESIZE_COOLDOWN", 30);
+                    const auto lastResizeIt = lastDrapeResizeUpdate.find(tileID);
+                    const bool coolingDown = lastResizeIt != lastDrapeResizeUpdate.end() &&
+                                             drapeUpdateCounter - lastResizeIt->second < resizeCooldownUpdates;
+                    if (coolingDown) {
                         drapeWorkPending = true;
                     } else if (maxResizesPerFrame == 0 || resizesThisFrame < maxResizesPerFrame) {
                         resizesThisFrame++;
+                        lastDrapeResizeUpdate[tileID] = drapeUpdateCounter;
                         auto oldTarget = drapeCache.take(tileID);
                         if (klattraDrapeTargetReady(oldTarget)) {
                             retiredDrapeTargetsByTile[tileID] = oldTarget;
