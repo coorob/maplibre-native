@@ -35,7 +35,7 @@ TileLayerGroup::~TileLayerGroup() {
     // during pinch churn is the 3.3 GB jetsam's leak accounting.
     static const bool grouplife = [] {
         const char* v = std::getenv("KLATTRA_LOG_GROUPLIFE");
-        return !(v && (*v == '0' || *v == 'f' || *v == 'F'));
+        return v && !(*v == '0' || *v == 'f' || *v == 'F');
     }();
     if (grouplife) {
         const auto& n = getName();
@@ -124,7 +124,7 @@ void klattraDiagLandDraw(const void* group,
                          std::size_t skippedDisabled) {
     static const bool enabled = [] {
         const char* v = std::getenv("KLATTRA_LOG_LANDDRAW");
-        return !(v && (*v == '0' || *v == 'f' || *v == 'F'));
+        return v && !(*v == '0' || *v == 'f' || *v == 'F');
     }();
     if (!enabled) return;
     const bool watched = name.find("land") != std::string::npos || name.find("Land") != std::string::npos ||
@@ -170,7 +170,7 @@ void klattraDiagLandDraw(const void* group,
 bool klattraTilePaintEnabled() {
     static const bool enabled = [] {
         const char* v = std::getenv("KLATTRA_LOG_TILEPAINT");
-        return !(v && (*v == '0' || *v == 'f' || *v == 'F'));
+        return v && !(*v == '0' || *v == 'f' || *v == 'F');
     }();
     return enabled;
 }

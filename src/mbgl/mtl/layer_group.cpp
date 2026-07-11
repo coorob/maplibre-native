@@ -91,7 +91,7 @@ void klattraDiagLandDraw(const void* group,
                          std::size_t skippedDisabled) {
     static const bool enabled = [] {
         const char* v = std::getenv("KLATTRA_LOG_LANDDRAW");
-        return !(v && (*v == '0' || *v == 'f' || *v == 'F'));
+        return v && !(*v == '0' || *v == 'f' || *v == 'F');
     }();
     if (!enabled) return;
     const bool watched = name.find("land") != std::string::npos || name.find("Land") != std::string::npos ||

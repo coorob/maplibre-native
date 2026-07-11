@@ -323,7 +323,7 @@ void Texture2D::bind(RenderPass& renderPass, int32_t location) {
         static const bool trace = [] {
             if (std::getenv("KLATTRA_TRACE_STDERR") != nullptr) return true;
             const char* v = std::getenv("KLATTRA_LOG_TEXBIND");
-            return !(v && (*v == '0' || *v == 'f' || *v == 'F'));
+            return v && !(*v == '0' || *v == 'f' || *v == 'F');
         }();
         if (trace) {
             static std::atomic<int> diagBindLogBudget{200};

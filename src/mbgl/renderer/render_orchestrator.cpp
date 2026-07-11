@@ -493,7 +493,7 @@ std::unique_ptr<RenderTree> RenderOrchestrator::createRenderTree(
                 // sim-only). Opt out: KLATTRA_LOG_LAYERFLAP=0.
                 static const bool layerFlapLog = [] {
                     const char* v = std::getenv("KLATTRA_LOG_LAYERFLAP");
-                    return !(v && (*v == '0' || *v == 'f' || *v == 'F'));
+                    return v && !(*v == '0' || *v == 'f' || *v == 'F');
                 }();
                 if (layerFlapLog) {
                     RenderLayer& flapped = orderedLayers[i].get();
@@ -1256,7 +1256,7 @@ void RenderOrchestrator::onTileChanged(RenderSource&, const OverscaledTileID&) {
     // stays stale, splits the broken link. Opt out: KLATTRA_LOG_WAKE=0.
     static const bool wakeLog = [] {
         const char* v = std::getenv("KLATTRA_LOG_WAKE");
-        return !(v && (*v == '0' || *v == 'f' || *v == 'F'));
+        return v && !(*v == '0' || *v == 'f' || *v == 'F');
     }();
     if (wakeLog) {
         static std::atomic<uint64_t> count{0};

@@ -64,7 +64,7 @@ double klattraEnvTerrainLodPitchDeg() {
 bool klattraLogCoverSummary() {
     static const bool enabled = [] {
         const char* v = std::getenv("KLATTRA_LOG_COVER_SUMMARY");
-        return !(v && (*v == '0' || *v == 'f' || *v == 'F'));
+        return v && !(*v == '0' || *v == 'f' || *v == 'F');
     }();
     return enabled;
 }

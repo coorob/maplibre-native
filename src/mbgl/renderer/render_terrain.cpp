@@ -63,7 +63,7 @@ bool klattraLogDrapeTrace() {
 bool klattraLogCoverSummary() {
     static const bool enabled = [] {
         const char* v = std::getenv("KLATTRA_LOG_COVER_SUMMARY");
-        return !(v && (*v == '0' || *v == 'f' || *v == 'F'));
+        return v && !(*v == '0' || *v == 'f' || *v == 'F');
     }();
     return enabled;
 }
@@ -1190,7 +1190,7 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
     // and this is a diagnostic aid. Opt out: KLATTRA_FRAME_DUMP=0.
     static const bool frameDumpEnabled = [] {
         const char* v = std::getenv("KLATTRA_FRAME_DUMP");
-        return !(v && (*v == '0' || *v == 'f' || *v == 'F'));
+        return v && !(*v == '0' || *v == 'f' || *v == 'F');
     }();
     if (frameDumpEnabled) {
         static double lastZoom = -1.0;

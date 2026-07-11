@@ -189,7 +189,7 @@ namespace {
 bool klattraLogStyleMutations() {
     static const bool enabled = [] {
         const char* v = std::getenv("KLATTRA_LOG_STYLEMUT");
-        return !(v && (*v == '0' || *v == 'f' || *v == 'F'));
+        return v && !(*v == '0' || *v == 'f' || *v == 'F');
     }();
     return enabled;
 }

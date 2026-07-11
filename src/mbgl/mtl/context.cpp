@@ -317,7 +317,7 @@ TileLayerGroupPtr Context::createTileLayerGroup(int32_t layerIndex, std::size_t 
     // pinch-hold jetsam died at the 3.3 GB per-process limit.
     static const bool grouplife = [] {
         const char* v = std::getenv("KLATTRA_LOG_GROUPLIFE");
-        return !(v && (*v == '0' || *v == 'f' || *v == 'F'));
+        return v && !(*v == '0' || *v == 'f' || *v == 'F');
     }();
     if (grouplife) {
         const auto& n = tileLayerGroup->getName();

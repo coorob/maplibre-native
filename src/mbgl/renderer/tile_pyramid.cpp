@@ -83,7 +83,7 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
         if (!renderedTiles.empty()) {
             static const bool purgeLog = [] {
                 const char* v = std::getenv("KLATTRA_LOG_SRCPURGE");
-                return !(v && (*v == '0' || *v == 'f' || *v == 'F'));
+                return v && !(*v == '0' || *v == 'f' || *v == 'F');
             }();
             if (purgeLog) {
                 Log::Warning(Event::Render,
@@ -401,7 +401,7 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
     {
         static const bool coverHoldLog = [] {
             const char* v = std::getenv("KLATTRA_LOG_COVERHOLD");
-            return !(v && (*v == '0' || *v == 'f' || *v == 'F'));
+            return v && !(*v == '0' || *v == 'f' || *v == 'F');
         }();
         if (coverHoldLog) {
             struct State {
@@ -508,7 +508,7 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
     {
         static const bool srcTilesLog = [] {
             const char* v = std::getenv("KLATTRA_LOG_SRCTILES");
-            return !(v && (*v == '0' || *v == 'f' || *v == 'F'));
+            return v && !(*v == '0' || *v == 'f' || *v == 'F');
         }();
         if (srcTilesLog) {
             struct State {
