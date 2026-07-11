@@ -469,7 +469,17 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
                 velY = (centerY - oldest.y) / dt;
             }
         }
-        static const double lookaheadSeconds = klattraEnvSeconds("KLATTRA_DRAPE_LOOKAHEAD_S", 3.0);
+        // DEFAULT 0 = dormant (.52). Robert's first .51 flyover jetsammed on
+        // the first frames: the tour's initial fly-in is fast sustained
+        // translation, so the gate opens there — and segment-ranked strip
+        // tiles are born NEAR-ring (2048² +mips ≈ 21 MB each) instead of the
+        // far-tier 512² the .47 cap's byte budget implicitly assumed, while
+        // gate flap re-ranks rings en masse (resize churn + parked retired
+        // targets). The count cap held; the BYTES didn't. Opt back in via
+        // env for pan experiments only after create-size clamping and gate
+        // hysteresis exist. With 0 the strip, projection, and segment
+        // ranking are all inert — measured bit-for-bit .50 behaviour.
+        static const double lookaheadSeconds = klattraEnvSeconds("KLATTRA_DRAPE_LOOKAHEAD_S", 0.0);
         if (!klattraLookaheadDisabled() && lookaheadSeconds > 0.0 && !currentIdealIDs.empty()) {
             // The strip bakes at the finest LOD present in the cover — the
             // zoom tiles enter at on the leading edge, where the smear lives.
