@@ -842,7 +842,19 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
             }
 
             const bool wasAllocated = drapeCache.get(tileID) != nullptr;
-            auto target = drapeCache.getOrCreate(context, tileID, desiredSize);
+            // .58 memory diet: mid/far tiers bake into packed-565 targets —
+            // half the bytes of RGBA8 across the ~85% of the population that
+            // isn't the near ring (device flights ran 720-910 MB of canvases
+            // at a 2.4-2.7 GB footprint vs the ~3.4 GB kill line; this is
+            // the headroom for sharper near tiles and the far cover). Drape
+            // targets clear to the style background, so the missing alpha
+            // channel is never consulted. Near ring stays RGBA8 for
+            // gradient fidelity where the camera looks.
+            static const bool drape565 = std::getenv("KLATTRA_DISABLE_DRAPE_565") == nullptr;
+            const auto channelType = (drape565 && targetSize < nearSize)
+                                         ? gfx::TextureChannelDataType::UnsignedShort565
+                                         : gfx::TextureChannelDataType::UnsignedByte;
+            auto target = drapeCache.getOrCreate(context, tileID, desiredSize, channelType);
             if (!target) {
                 // .56: allocation failed (memory pressure) — retry next
                 // frame; count it so green plates are attributable.
@@ -1647,16 +1659,24 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
                 else if (stage.rasterOverlap != std::chrono::steady_clock::time_point{}) waitTex++;
                 else waitCover++;
             }
+            // Format-aware gauge (.58): near-ring-sized targets are RGBA8
+            // (4 B/px), everything smaller is packed 565 (2 B/px) unless
+            // the diet is disabled.
+            static const bool gauge565 = std::getenv("KLATTRA_DISABLE_DRAPE_565") == nullptr;
+            static const int32_t gaugeNearSize = klattraEnvTargetSize("KLATTRA_DRAPE_TARGET_SIZE_NEAR",
+                                                                      DRAPE_TARGET_SIZE);
+            const auto targetBytes = [&](const Size& s) {
+                const uint64_t px = static_cast<uint64_t>(s.width) * s.height;
+                return px * ((gauge565 && static_cast<int32_t>(s.width) < gaugeNearSize) ? 2 : 4);
+            };
             uint64_t drapeBytes = 0;
             drapeCache.visitAll([&](const OverscaledTileID&, TerrainDrapeTargetPtr& target) {
                 if (!target) return;
-                const Size s = target->getSize();
-                drapeBytes += static_cast<uint64_t>(s.width) * s.height * 4;
+                drapeBytes += targetBytes(target->getSize());
             });
             for (const auto& [retiredID, retiredTarget] : retiredDrapeTargetsByTile) {
                 if (!retiredTarget) continue;
-                const Size s = retiredTarget->getSize();
-                drapeBytes += static_cast<uint64_t>(s.width) * s.height * 4;
+                drapeBytes += targetBytes(retiredTarget->getSize());
             }
             klattraDumpEmit(
                 "[KLATTRA STAGE] now waitCover=" + std::to_string(waitCover) +

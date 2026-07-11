@@ -27,7 +27,8 @@ std::string klattraTileString(const OverscaledTileID& id) {
 
 TerrainDrapeTargetPtr TerrainDrapeCache::getOrCreate(gfx::Context& context,
                                                const OverscaledTileID& tileID,
-                                               Size size) {
+                                               Size size,
+                                               gfx::TextureChannelDataType channelType) {
     auto it = targetsByTileID.find(tileID);
     if (it != targetsByTileID.end()) {
         if (klattraLogDrapeTrace()) {
@@ -40,10 +41,10 @@ TerrainDrapeTargetPtr TerrainDrapeCache::getOrCreate(gfx::Context& context,
         }
         return it->second;
     }
-    // 8-bit RGBA — matches the trove of color buffers MapLibre Native uses
-    // elsewhere for offscreen passes. The terrain shader samples this as a
-    // colour texture so we don't need HDR or float-precision storage here.
-    auto target = context.createRenderTarget(size, gfx::TextureChannelDataType::UnsignedByte);
+    // The terrain shader samples this as a colour texture so we don't need
+    // HDR or float precision; near tiles use 8-bit RGBA, mid/far tiers pass
+    // packed 565 (see RenderTerrain's tier selection).
+    auto target = context.createRenderTarget(size, channelType);
     if (!target) {
         // .56: do NOT cache the failure. Under memory pressure the backend
         // can return null; caching it left the tile canvas-less — a solid

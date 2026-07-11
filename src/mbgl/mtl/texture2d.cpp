@@ -99,6 +99,8 @@ size_t Texture2D::getPixelStride() const noexcept {
             return 2 * numChannels(); // NOLINT(clang-analyzer-optin.cplusplus.VirtualCall)
         case gfx::TextureChannelDataType::Float:
             return 4 * numChannels(); // NOLINT(clang-analyzer-optin.cplusplus.VirtualCall)
+        case gfx::TextureChannelDataType::UnsignedShort565:
+            return 2; // packed 16-bit, channel count does not apply
     }
 }
 
@@ -163,6 +165,21 @@ MTL::PixelFormat Texture2D::getMetalPixelFormat() const noexcept {
                     return MTL::PixelFormat::PixelFormatR32Float;
                 case gfx::TexturePixelType::Depth:
                     return MTL::PixelFormat::PixelFormatDepth32Float;
+                default:
+                    assert(false);
+                    return MTL::PixelFormat::PixelFormatInvalid;
+            }
+        case gfx::TextureChannelDataType::UnsignedShort565:
+            switch (pixelFormat) {
+                case gfx::TexturePixelType::RGBA:
+#if TARGET_OS_SIMULATOR || defined(__x86_64__)
+                    // Packed 16-bit colour formats are not available in the
+                    // simulator's Metal environment — fall back to RGBA8
+                    // (double the memory, identical rendering).
+                    return MTL::PixelFormat::PixelFormatRGBA8Unorm;
+#else
+                    return MTL::PixelFormat::PixelFormatB5G6R5Unorm;
+#endif
                 default:
                     assert(false);
                     return MTL::PixelFormat::PixelFormatInvalid;

@@ -45,10 +45,16 @@ public:
     TerrainDrapeCache& operator=(const TerrainDrapeCache&) = delete;
 
     /// Look up the RenderTarget for the given tile, allocating a new one
-    /// (sized to `size` pixels square, 8-bit RGBA channel data) if missing.
-    /// Reusing an existing target preserves its layer-group bindings across
-    /// frames so we don't constantly re-add the same drawables.
-    TerrainDrapeTargetPtr getOrCreate(gfx::Context& context, const OverscaledTileID& tileID, Size size);
+    /// (sized to `size` pixels square, in the given channel format) if
+    /// missing. Reusing an existing target preserves its layer-group
+    /// bindings across frames so we don't constantly re-add the same
+    /// drawables. .58: mid/far tiers pass UnsignedShort565 (half the bytes,
+    /// no alpha — drape targets clear to the style background so no alpha
+    /// is ever needed); the near ring stays 8-bit RGBA.
+    TerrainDrapeTargetPtr getOrCreate(gfx::Context& context,
+                                      const OverscaledTileID& tileID,
+                                      Size size,
+                                      gfx::TextureChannelDataType channelType = gfx::TextureChannelDataType::UnsignedByte);
 
     /// Returns the cached target for tileID if any, otherwise nullptr. Does
     /// not allocate.

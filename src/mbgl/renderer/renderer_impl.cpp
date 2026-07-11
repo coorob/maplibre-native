@@ -436,6 +436,20 @@ void Renderer::Impl::render(const RenderTree& renderTree, const std::shared_ptr<
                 // flash. Clearing to the style background makes the base
                 // match the map, and clears are cheaper than loads on TBDR.
                 color = renderTreeParameters.backgroundColor;
+                // .58 horizon void retint: with terrain active, everything
+                // beyond the mesh's far cover shows this clear colour — as
+                // the style background it read as dark-green void bands at
+                // the top of flyover frames (Robert's screenshots,
+                // 2026-07-12). The .50 haze already fades the far mesh
+                // toward the #8FC3DE sky/sea backdrop tone precisely "so
+                // the horizon merges into the backdrop" — this finishes
+                // that design by making the backdrop actually BE that tone
+                // whenever the terrain mesh is on screen. 2D rendering is
+                // untouched.
+                static const bool voidRetint = std::getenv("KLATTRA_DISABLE_VOID_RETINT") == nullptr;
+                if (voidRetint && parameters.activeTerrain) {
+                    color = Color{0.56078431f, 0.76470588f, 0.87058824f, 1.0f};
+                }
             }
             parameters.renderPass = parameters.encoder->createRenderPass(
                 "main buffer",
