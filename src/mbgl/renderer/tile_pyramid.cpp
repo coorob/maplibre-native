@@ -322,7 +322,19 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
     // stops overlapping the union of ideal tiles seen in the last
     // coverHoldWindow updates — i.e. when it genuinely leaves the viewport —
     // with the age cap kept only as a pathological backstop (~10 s).
-    static const bool coverHoldDisabled = std::getenv("KLATTRA_DISABLE_COVERHOLD") != nullptr;
+    // .67: the custom cover hold exists to bridge flat 2D source-cover
+    // fragmentation, but a RasterDEM tile is also a displaced 3D surface.
+    // Holding its parent alongside replacement children makes RenderTerrain
+    // create overlapping parent/child meshes with different drape textures;
+    // their depth intersections appear as hard organic islands of coarse or
+    // background-green imagery. Terrain already owns a separate, bounded
+    // transition hold plus DEM parent fallback, so never apply the global 2D
+    // hold to RasterDEM. KLATTRA_ENABLE_DEM_COVERHOLD restores the old path for
+    // a controlled diagnostic build only.
+    static const bool coverHoldDisabledByEnv = std::getenv("KLATTRA_DISABLE_COVERHOLD") != nullptr;
+    const bool coverHoldDisabled = coverHoldDisabledByEnv ||
+                                   (type == SourceType::RasterDEM &&
+                                    std::getenv("KLATTRA_ENABLE_DEM_COVERHOLD") == nullptr);
     static const uint16_t coverHoldMaxFrames = [] {
         const char* v = std::getenv("KLATTRA_COVERHOLD_FRAMES");
         const long parsed = v ? std::strtol(v, nullptr, 10) : 0;

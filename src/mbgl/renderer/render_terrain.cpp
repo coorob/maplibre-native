@@ -45,6 +45,7 @@
 #include <cstdint>
 #include <cstring>
 #include <cstdio>
+#include <iterator>
 #include <limits>
 #include <unordered_set>
 #include <utility>
@@ -508,6 +509,18 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
     // The DEM source itself expands its pitched cover; drape targets can still
     // overscan further so satellite colour is ready before the mesh arrives.
     const std::unordered_set<OverscaledTileID>& terrainMeshIDs = currentIdealIDs;
+    // .67 referee: parent+child DEM IDs are overlapping displaced surfaces,
+    // not harmless 2D fallback tiles. The global TilePyramid cover-hold used
+    // to feed dozens of these pairs into RenderTerrain simultaneously; their
+    // depth intersections select different drape textures in organic islands.
+    std::size_t sourceMeshOverlapPairs = 0;
+    for (auto a = terrainMeshIDs.begin(); a != terrainMeshIDs.end(); ++a) {
+        for (auto b = std::next(a); b != terrainMeshIDs.end(); ++b) {
+            if (klattraIsAncestorOf(*a, *b) || klattraIsAncestorOf(*b, *a)) {
+                ++sourceMeshOverlapPairs;
+            }
+        }
+    }
     // One parent fallback level is back on by default: with distance-ranked
     // ring budgets bounding target sizes, the extra ~25% mostly-far targets
     // are cheap, and the parent texture is what stops fresh tiles flashing
@@ -1222,6 +1235,7 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
     nextBindings.reserve(terrainMeshIDs.size());
     std::size_t readyBindings = 0;
     std::size_t rasterEmptyBindings = 0;
+    std::size_t rasterPartialBindings = 0;
     std::size_t emptyDemBindings = 0;
     std::size_t fallbackDrapeBindings = 0;
     // .46-diag: flicker-window classes. bgOnly = own baked canvas bound with
@@ -1363,15 +1377,29 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
             // wants raster content but holds NO raster drawable renders its
             // cleared background through the relief shader — the .61 black.
             if (const TerrainDrapeTargetPtr own = drapeCache.get(idealOS);
-                own && own->requiresRasterDrapeContent() && !klattraDrapeHasRasterContent(own)) {
-                rasterEmptyBindings++;
-                if (klattraFlyDiag() ? klattraFlyDiagBudget() : (rasterEmptyBindings <= 3)) {
-                    // A few named samples per second even without FLYDIAG.
-                    static std::chrono::steady_clock::time_point lastEmptyEmit{};
+                own && own->requiresRasterDrapeContent()) {
+                const bool hasAnyRaster = klattraDrapeHasRasterContent(own);
+                const bool hasFullRaster = hasAnyRaster && own->hasRasterDrawableCoveringTile(idealOS);
+                if (!hasAnyRaster) {
+                    rasterEmptyBindings++;
+                } else if (!hasFullRaster) {
+                    // .67: the old empty-only gauge missed a canvas with one
+                    // z+ child covering only a quarter (or 1/16) of the RTT;
+                    // the remaining pixels are exactly satellite-background.
+                    rasterPartialBindings++;
+                }
+                if ((!hasAnyRaster || !hasFullRaster) &&
+                    (klattraFlyDiag() ? klattraFlyDiagBudget()
+                                      : (rasterEmptyBindings + rasterPartialBindings <= 3))) {
+                    // One named incomplete canvas per second even without
+                    // FLYDIAG, classified as empty vs partial.
+                    static std::chrono::steady_clock::time_point lastIncompleteEmit{};
                     const auto nowE = std::chrono::steady_clock::now();
-                    if (nowE - lastEmptyEmit >= std::chrono::seconds(1)) {
-                        lastEmptyEmit = nowE;
-                        klattraDumpEmit("[KLATTRA STAGE] rasterEmpty tile=" + klattraTileString(idealOS) +
+                    if (nowE - lastIncompleteEmit >= std::chrono::seconds(1)) {
+                        lastIncompleteEmit = nowE;
+                        klattraDumpEmit(std::string("[KLATTRA STAGE] raster") +
+                                        (hasAnyRaster ? "Partial" : "Empty") +
+                                        " tile=" + klattraTileString(idealOS) +
                                         " size=" + std::to_string(own->getSize().width) +
                                         " groups=" + std::to_string(own->numLayerGroups()) +
                                         " drawables=" + std::to_string(klattraDrapeDrawableCount(own)));
@@ -1535,17 +1563,16 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
     // RenderTargets are pruned separately above; this only handles the
     // terrain mesh drawables themselves.
     //
-    // Zoom-level transitions need care: the replacement ideals often haven't
-    // had their first bake when the old level's tiles leave the cover, and
-    // pruning immediately flashes a hole (black at high pitch). Hold a
-    // leaving tile's drawable until every current ideal overlapping it is
-    // drawable-backed — the swap then happens within one update, so old and
-    // new never coexist in a rendered frame in the common single-cover case.
-    // Tiles with no overlapping ideal (camera panned away) prune at once,
-    // and a frame cap bounds pathological covers.
+    // Zoom-level transitions used to hold a leaving terrain mesh until every
+    // replacement ideal was drawable-backed. With a partial child cohort that
+    // means the ready children and the full parent are rendered together — two
+    // intersecting displaced surfaces carrying different drape canvases. DEM
+    // and drape ancestor texture fallback now bridge not-ready ideals without
+    // keeping the old geometry, so the safe default is zero. The env knob can
+    // restore the legacy hold for a controlled diagnostic only.
     if (!currentBindings.empty()) {
         static const uint32_t pruneHoldFrames =
-            klattraEnvFrameCount("KLATTRA_DRAPE_PRUNE_HOLD_FRAMES", 30);
+            klattraEnvFrameCount("KLATTRA_DRAPE_PRUNE_HOLD_FRAMES", 0);
         std::unordered_map<OverscaledTileID, uint32_t> nextPruneHoldAges;
         std::size_t held = 0;
         const auto removed = lg->removeDrawablesIf([&](gfx::Drawable& d) {
@@ -1592,6 +1619,24 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
         }
     }
 
+    // Count the meshes the GPU will actually draw after pruning. This catches
+    // both source-level overlaps and any terrain-local retained predecessor;
+    // `meshOverlap=0` is the hard referee for the .67 flight.
+    std::unordered_set<OverscaledTileID> drawableMeshIDs;
+    lg->visitDrawables([&](const gfx::Drawable& drawable) {
+        if (const auto& tileID = drawable.getTileID()) {
+            drawableMeshIDs.insert(*tileID);
+        }
+    });
+    std::size_t drawableMeshOverlapPairs = 0;
+    for (auto a = drawableMeshIDs.begin(); a != drawableMeshIDs.end(); ++a) {
+        for (auto b = std::next(a); b != drawableMeshIDs.end(); ++b) {
+            if (klattraIsAncestorOf(*a, *b) || klattraIsAncestorOf(*b, *a)) {
+                ++drawableMeshOverlapPairs;
+            }
+        }
+    }
+
     currentBindings = std::move(nextBindings);
     klattraTrace("terrain update-end source=" + impl->sourceID +
                  " bindings=" + std::to_string(currentBindings.size()) +
@@ -1624,6 +1669,8 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
                             " parked=" + std::to_string(retiredDrapeTargetsByTile.size()) +
                             " targets=" + std::to_string(drapeCache.size()) +
                             " demTex=" + std::to_string(demTexturesByTile.size()) +
+                            " sourceOverlap=" + std::to_string(sourceMeshOverlapPairs) +
+                            " meshOverlap=" + std::to_string(drawableMeshOverlapPairs) +
                             " ahead=" + std::to_string(lookaheadStripAdded) +
                             " aheadSpan10=" + std::to_string(static_cast<int64_t>(std::lround(lookaheadSpanTiles * 10.0))));
         }
@@ -1722,7 +1769,10 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
                 " fallback=" + std::to_string(fallbackDrapeBindings) +
                 " ready=" + std::to_string(readyBindings) +
                 " bindings=" + std::to_string(currentBindings.size()) +
+                " sourceOverlap=" + std::to_string(sourceMeshOverlapPairs) +
+                " meshOverlap=" + std::to_string(drawableMeshOverlapPairs) +
                 " rasterEmpty=" + std::to_string(rasterEmptyBindings) +
+                " rasterPartial=" + std::to_string(rasterPartialBindings) +
                 " unbound=" + std::to_string(unboundBindings) +
                 " allocFail=" + std::to_string(stageAllocFailEvents) +
                 " physMB=" + std::to_string(static_cast<int64_t>(std::lround(klattraPhysFootprintMB()))) +
