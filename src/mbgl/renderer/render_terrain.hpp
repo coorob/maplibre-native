@@ -534,6 +534,10 @@ private:
     mutable uint64_t stageRevokeEvents = 0;
     mutable uint64_t stageRegressionEvents = 0;
     mutable uint64_t stageResizeEvents = 0;
+    // .56: canvas render-target allocation failures (memory pressure). A
+    // failed tile retries next frame (the cache no longer stores nulls);
+    // this counts the events so green plates can be attributed.
+    mutable uint64_t stageAllocFailEvents = 0;
 
     // Maximum stable-view pixel size of each close-zoom drape target. Moving
     // cameras allocate smaller close targets first and upgrade to this after

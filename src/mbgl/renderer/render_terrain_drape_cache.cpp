@@ -44,17 +44,26 @@ TerrainDrapeTargetPtr TerrainDrapeCache::getOrCreate(gfx::Context& context,
     // elsewhere for offscreen passes. The terrain shader samples this as a
     // colour texture so we don't need HDR or float-precision storage here.
     auto target = context.createRenderTarget(size, gfx::TextureChannelDataType::UnsignedByte);
-    if (target) {
-        target->setMipmapped(true);
-        target->setDebugName("terrain-drape " + klattraTileString(tileID));
-        if (klattraLogDrapeTrace()) {
-            Log::Info(Event::Render,
-                      "[KLATTRA DRAPE_TRACE] cache-create tile=" + klattraTileString(tileID) +
-                          " target=" + target->getDebugName() +
-                          " ptr=" + std::to_string(reinterpret_cast<uintptr_t>(target.get())) +
-                          " size=" + std::to_string(size.width) + "x" + std::to_string(size.height) +
-                          " mipmapped=1");
-        }
+    if (!target) {
+        // .56: do NOT cache the failure. Under memory pressure the backend
+        // can return null; caching it left the tile canvas-less — a solid
+        // style-background plate on the mesh — for as long as it stayed in
+        // cover, with no retry and no probe visibility. Returning without
+        // inserting lets the next frame's getOrCreate try again.
+        Log::Warning(Event::Render,
+                     "[KLATTRA DRAPE] render-target allocation FAILED tile=" + klattraTileString(tileID) +
+                         " size=" + std::to_string(size.width));
+        return nullptr;
+    }
+    target->setMipmapped(true);
+    target->setDebugName("terrain-drape " + klattraTileString(tileID));
+    if (klattraLogDrapeTrace()) {
+        Log::Info(Event::Render,
+                  "[KLATTRA DRAPE_TRACE] cache-create tile=" + klattraTileString(tileID) +
+                      " target=" + target->getDebugName() +
+                      " ptr=" + std::to_string(reinterpret_cast<uintptr_t>(target.get())) +
+                      " size=" + std::to_string(size.width) + "x" + std::to_string(size.height) +
+                      " mipmapped=1");
     }
     targetsByTileID.emplace(tileID, target);
     return target;

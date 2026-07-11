@@ -843,6 +843,12 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
 
             const bool wasAllocated = drapeCache.get(tileID) != nullptr;
             auto target = drapeCache.getOrCreate(context, tileID, desiredSize);
+            if (!target) {
+                // .56: allocation failed (memory pressure) — retry next
+                // frame; count it so green plates are attributable.
+                stageAllocFailEvents++;
+                drapeWorkPending = true;
+            }
             if (!wasAllocated && target) {
                 if (stageDiagEnabled() && drapeStageByTile.size() < 8192) {
                     auto& stage = drapeStageByTile[tileID];
@@ -1662,6 +1668,8 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
                 " fallback=" + std::to_string(fallbackDrapeBindings) +
                 " ready=" + std::to_string(readyBindings) +
                 " bindings=" + std::to_string(currentBindings.size()) +
+                " unbound=" + std::to_string(unboundBindings) +
+                " allocFail=" + std::to_string(stageAllocFailEvents) +
                 " physMB=" + std::to_string(static_cast<int64_t>(std::lround(klattraPhysFootprintMB()))) +
                 " drapeMB=" + std::to_string(static_cast<int64_t>(drapeBytes * 133 / 100 / 1048576)));
             klattraDumpEmit(
