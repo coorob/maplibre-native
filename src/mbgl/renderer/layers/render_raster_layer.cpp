@@ -46,6 +46,14 @@ bool klattraDisableRasterDrape() {
     return disabled;
 }
 
+// .55: keep stale raster drape content until replacement content routes
+// (fix for the flyover green plates / readiness revocations). Kill switch
+// reverts to the remove-on-cover-exit behaviour for A/B on sim.
+bool klattraKeepStaleRasterDrape() {
+    static const bool enabled = std::getenv("KLATTRA_DISABLE_STALE_KEEP") == nullptr;
+    return enabled;
+}
+
 std::string klattraDrapeIDString(const OverscaledTileID& id) {
     return "z" + std::to_string(static_cast<int>(id.canonical.z)) + "/" +
            std::to_string(id.canonical.x) + "/" + std::to_string(id.canonical.y);
@@ -375,8 +383,24 @@ void RenderRasterLayer::update(gfx::ShaderRegistry& shaders,
                                 const auto& dID = drawable.getTileID();
                                 if (!dID) return false;
                                 if (!hasRenderTile(*dID)) {
-                                    removedNotInCover++;
-                                    return true;
+                                    // .55: KEEP content whose raster tile left
+                                    // the raster cover. The drape cover is
+                                    // wider than the raster cover, so fringe
+                                    // canvases have no replacement — removing
+                                    // here un-readied them permanently (the
+                                    // phone-54 flight: 1187 revocations, ~100
+                                    // canvases stuck plating = the green
+                                    // patches; same bug class as the
+                                    // 2026-07-04 evaporating far-field fix).
+                                    // Stale drawables are superseded at emit
+                                    // time the moment replacement content
+                                    // routes; canvas prune still releases
+                                    // everything when the canvas dies.
+                                    if (!klattraKeepStaleRasterDrape()) {
+                                        removedNotInCover++;
+                                        return true;
+                                    }
+                                    return false;
                                 }
                                 if (!LayerTweaker::tilesOverlap(*dID, drapeID)) {
                                     removedNoOverlap++;
@@ -635,7 +659,21 @@ void RenderRasterLayer::update(gfx::ShaderRegistry& shaders,
                                         /*localVertexBuffers=*/true);
                         drapeBuilder->flush(context);
 
-                        for (auto& drapeDrawable : drapeBuilder->clearDrawables()) {
+                        auto freshDrawables = drapeBuilder->clearDrawables();
+                        if (!freshDrawables.empty() && klattraKeepStaleRasterDrape()) {
+                            // .55 supersede: replacement content is here —
+                            // NOW drop stale kept drawables whose ground this
+                            // tile re-covers. Only stale (left the raster
+                            // cover) drawables are eligible: current-cover
+                            // tiles at other zooms legitimately coexist in
+                            // one canvas and must not be evicted.
+                            drapeGroup->removeDrawablesIf([&](gfx::Drawable& drawable) {
+                                const auto& dID = drawable.getTileID();
+                                return dID && *dID != tileID && !hasRenderTile(*dID) &&
+                                       LayerTweaker::tilesOverlap(*dID, tileID);
+                            });
+                        }
+                        for (auto& drapeDrawable : freshDrawables) {
                             drapeDrawable->setTileID(tileID);
                             drapeDrawable->setLayerTweaker(tw);
                             drapeGroup->addDrawable(renderPass, tileID, std::move(drapeDrawable));
