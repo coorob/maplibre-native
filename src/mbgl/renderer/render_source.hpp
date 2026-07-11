@@ -11,6 +11,7 @@
 #include <mbgl/style/source_impl.hpp>
 #include <mbgl/style/layer_properties.hpp>
 
+#include <functional>
 #include <map>
 #include <memory>
 #include <unordered_map>
@@ -22,6 +23,7 @@ class CollisionIndex;
 class ImageManager;
 class ImageSourceRenderData;
 class PaintParameters;
+class RasterBucket;
 class RenderedQueryOptions;
 class RenderItem;
 class RenderLayer;
@@ -78,6 +80,12 @@ public:
     virtual const ImageSourceRenderData* getImageRenderData() const { return nullptr; }
     virtual const Tile* getRenderedTile(const UnwrappedTileID&) const { return nullptr; }
     virtual Immutable<std::vector<RenderTile>> getRawRenderTiles() const;
+
+    // .63: raster drape gap-fill — visit every raster tile bucket this
+    // source still holds (active pyramid + retired cache), not just the
+    // current render set. Only raster sources implement it; everything
+    // else has nothing to contribute to a raster drape canvas.
+    virtual void visitRasterTileBuckets(const std::function<void(const OverscaledTileID&, RasterBucket&)>&) {}
 
     virtual std::unordered_map<std::string, std::vector<Feature>> queryRenderedFeatures(
         const ScreenLineString& geometry,

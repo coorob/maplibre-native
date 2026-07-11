@@ -73,6 +73,13 @@ private:
 
     // Phase 2 drape routing: per-drape-target RasterLayerTweakers.
     std::unordered_map<OverscaledTileID, RasterLayerTweakerPtr> drapeLayerTweakers;
+
+    // .63 phase 3 (drape gap-fill): the source, captured in prepare(), so
+    // update() can reach past the render set into the full tile pyramid
+    // (active + cache) when a live canvas has no raster content to route.
+    RenderSource* drapeGapfillSource = nullptr;
+    // Cumulative gap-fill telemetry for the 1 Hz STAGE probe.
+    std::size_t drapeGapfillFilled = 0;
 };
 
 } // namespace mbgl

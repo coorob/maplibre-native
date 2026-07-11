@@ -9,6 +9,10 @@ class RenderRasterSource final : public RenderTileSetSource {
 public:
     explicit RenderRasterSource(Immutable<style::TileSource::Impl>, const TaggedScheduler&);
 
+    // .63: drape gap-fill candidate reservoir — every tile the pyramid
+    // still holds (active + cache) with a parsed bucket.
+    void visitRasterTileBuckets(const std::function<void(const OverscaledTileID&, RasterBucket&)>&) override;
+
 private:
     void prepare(const SourcePrepareParameters&) final;
 

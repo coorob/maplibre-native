@@ -149,6 +149,16 @@ void RenderRasterSource::prepare(const SourcePrepareParameters& parameters) {
     RenderTileSource::prepare(parameters);
 }
 
+void RenderRasterSource::visitRasterTileBuckets(
+    const std::function<void(const OverscaledTileID&, RasterBucket&)>& fn) {
+    tilePyramid.visitAllTiles([&](const OverscaledTileID& tileID, Tile& tile) {
+        // This pyramid only ever holds RasterTiles (see createTile above).
+        if (auto* bucket = static_cast<RasterTile&>(tile).getParsedBucket()) {
+            fn(tileID, *bucket);
+        }
+    });
+}
+
 std::unordered_map<std::string, std::vector<Feature>> RenderRasterSource::queryRenderedFeatures(
     const ScreenLineString&,
     const TransformState&,

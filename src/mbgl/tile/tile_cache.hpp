@@ -35,6 +35,18 @@ public:
     bool has(const OverscaledTileID& key);
     void clear();
 
+    /// .63: enumerate retained tiles. The raster drape gap-fill uses the
+    /// cache as its candidate reservoir — tiles that left the render cover
+    /// keep their parsed buckets (and uploaded textures) here.
+    template <typename Fn>
+    void forEach(Fn&& fn) {
+        for (auto& [id, tile] : tiles) {
+            if (tile) {
+                fn(id, *tile);
+            }
+        }
+    }
+
     /// Set aside a tile to be destroyed later, without blocking
     void deferredRelease(std::unique_ptr<Tile>&&);
 

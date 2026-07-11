@@ -69,6 +69,19 @@ public:
     const std::map<OverscaledTileID, std::unique_ptr<Tile>>& getTiles() const { return tiles; }
     void clearAll();
 
+    /// .63: visit every tile this pyramid still holds — the active set AND
+    /// the retired cache. The raster drape gap-fill routes imagery from
+    /// here when the render set no longer covers a live drape canvas.
+    template <typename Fn>
+    void visitAllTiles(Fn&& fn) {
+        for (auto& [id, tile] : tiles) {
+            if (tile) {
+                fn(id, *tile);
+            }
+        }
+        cache.forEach(fn);
+    }
+
     void updateFadingTiles();
     bool hasFadingTiles() const { return fadingTiles; }
 

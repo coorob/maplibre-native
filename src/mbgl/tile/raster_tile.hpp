@@ -38,6 +38,11 @@ public:
 
     void cancel() override;
 
+    /// .63: parsed-bucket access for the drape gap-fill. Cached tiles have
+    /// no RenderTile wrapper, so the render-data path is unavailable;
+    /// render-thread only, like every other bucket consumer.
+    RasterBucket* getParsedBucket() { return bucket.get(); }
+
 private:
     void markObsolete();
 
