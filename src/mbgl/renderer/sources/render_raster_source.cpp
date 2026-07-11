@@ -93,8 +93,21 @@ void RenderRasterSource::updateInternal(const Tileset& tileset,
         const int32_t coverZoom = std::clamp<int32_t>(idealZoom,
                                                       static_cast<int32_t>(tileset.zoomRange.min),
                                                       static_cast<int32_t>(tileset.zoomRange.max));
+        // .65: floor at coverZoom-3, one step below the DEM's -2. The -2
+        // mirror was blind to the sources' asymmetry: this source's
+        // coverZoom is deeper than the DEM's (256px tiles and maxzoom 15
+        // vs 512px and maxzoom 12), so at flyover the raster floor sat at
+        // z11 while the DEM/mesh cover flooring at z10 reached 2-4x
+        // farther on the same ranked tile budget. Bound far meshes (z8
+        // canvases in the phone-63 census) rendered relief in
+        // style-background green with the raster pyramid holding NOTHING
+        // to route or gap-fill from (standing dry z8/136/70 + z8/138/71 =
+        // "green covering the terrain"). Floor z10 at flyover matches the
+        // DEM's geographic reach per tile, so the imagery cover blankets
+        // everything the mesh cover emits — same tile cap, coarser far
+        // rows, no extra memory.
         rasterParameters.tileLodMinZoom = static_cast<uint8_t>(
-            std::max<int32_t>(tileset.zoomRange.min, coverZoom - 2));
+            std::max<int32_t>(tileset.zoomRange.min, coverZoom - 3));
     }
     tilePyramid.update(layers,
                        needsRendering,
