@@ -297,6 +297,22 @@ public:
         return false;
     }
 
+    // ---- .53 stage diagnostics ----
+    // Per-drape-canvas pipeline timeline: create → raster overlap seen →
+    // raster paintable (texture source exists) → raster routed (drape
+    // drawable added) → baked with that content → first bound as a visible
+    // ideal. The 1 Hz [KLATTRA STAGE] summary decomposes the flyover
+    // artifact backlog into WHICH stage the stuck canvases wait in —
+    // source cover, decode/upload, routing, or bake. Default ON in this
+    // diag dist; KLATTRA_STAGEDIAG=0 disables. Render-thread only.
+    static bool stageDiagEnabled();
+    // Called from RenderRasterLayer's drape block: a raster render tile
+    // overlaps this drape canvas; `paintable` = the raster bucket has a
+    // CPU image or an uploaded GPU texture (i.e. could actually route).
+    void diagNoteRasterOverlap(const OverscaledTileID& drapeID, uint8_t rasterZ, bool paintable) const;
+    // Called when a raster drape drawable is actually added to the canvas.
+    void diagNoteRasterRouted(const OverscaledTileID& drapeID, uint8_t rasterZ) const;
+
     /**
      * @brief Visit every (tileID, RenderTarget) currently in the drape cache.
      *
@@ -477,6 +493,31 @@ private:
         std::chrono::steady_clock::time_point time;
     };
     std::deque<DrapeCameraSample> drapeCameraSamples;
+
+    // .53 stage-diag registry (see stageDiagEnabled above). One entry per
+    // drape canvas ever created this session (capped); timestamps advance
+    // monotonically through the pipeline, so "current stage" = furthest
+    // stage reached. mutable: the raster layer reports through a const
+    // RenderTerrain*; all access is render-thread only.
+    struct DrapeStageEntry {
+        std::chrono::steady_clock::time_point created{};
+        std::chrono::steady_clock::time_point rasterOverlap{};
+        std::chrono::steady_clock::time_point rasterAvail{};
+        std::chrono::steady_clock::time_point rasterRouted{};
+        std::chrono::steady_clock::time_point bakedWithRaster{};
+        std::chrono::steady_clock::time_point firstBound{};
+        uint8_t bestAvailZ = 0;
+        uint8_t routedFromZ = 0;
+        // 0 = own target ready at first bind, 1 = ancestor fallback,
+        // 2 = background-only bind, 3 = unbound (hole).
+        uint8_t firstBoundState = 255;
+    };
+    mutable std::unordered_map<OverscaledTileID, DrapeStageEntry> drapeStageByTile;
+    // Completed-transition latency samples (ms), capped; summarised at 1 Hz.
+    mutable std::vector<float> stageAvailMs;
+    mutable std::vector<float> stageRouteMs;
+    mutable std::vector<float> stageBakeMs;
+    mutable std::vector<float> stageLateMs;
 
     // Maximum stable-view pixel size of each close-zoom drape target. Moving
     // cameras allocate smaller close targets first and upgrade to this after

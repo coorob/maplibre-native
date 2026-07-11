@@ -568,6 +568,10 @@ void RenderRasterLayer::update(gfx::ShaderRegistry& shaders,
                     [&](const OverscaledTileID& drapeID, TerrainDrapeTargetPtr& drapeTarget) {
                         if (!drapeTarget || !LayerTweaker::tilesOverlap(tileID, drapeID)) return;
                         ++probeOverlaps;
+                        // .53 stage diag: a raster tile covers this canvas;
+                        // paintable = it could actually route content now.
+                        activeTerrain->diagNoteRasterOverlap(
+                            drapeID, tileID.canonical.z, bucket.image || bucket.texture2d);
 
                         // Do not bake a raster drawable into terrain until a
                         // texture source exists (fresh image OR the already-
@@ -632,6 +636,8 @@ void RenderRasterLayer::update(gfx::ShaderRegistry& shaders,
                             drapeGroup->addDrawable(renderPass, tileID, std::move(drapeDrawable));
                             ++stats.drawablesAdded;
                             ++probeAdded;
+                            // .53 stage diag: raster content actually routed.
+                            activeTerrain->diagNoteRasterRouted(drapeID, tileID.canonical.z);
                         }
                     });
             }

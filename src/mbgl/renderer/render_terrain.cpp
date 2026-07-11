@@ -34,6 +34,8 @@
 #include <mbgl/util/image.hpp>
 #include <mbgl/util/mat4.hpp>
 
+#include <mach/mach.h>
+
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -121,6 +123,36 @@ bool klattraFlyDiagBudget() {
         count = 0;
     }
     return count++ < 40;
+}
+
+// .53 stage-diag: jetsam watches phys_footprint, so report that (fallback
+// to resident size). Render-thread only, called at 1 Hz.
+double klattraPhysFootprintMB() {
+    task_vm_info_data_t info;
+    mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+    if (task_info(mach_task_self(), TASK_VM_INFO, reinterpret_cast<task_info_t>(&info), &count) == KERN_SUCCESS) {
+        return static_cast<double>(info.phys_footprint) / (1024.0 * 1024.0);
+    }
+    return -1.0;
+}
+
+float klattraStageMs(std::chrono::steady_clock::time_point from, std::chrono::steady_clock::time_point to) {
+    return std::chrono::duration<float, std::milli>(to - from).count();
+}
+
+void klattraStagePush(std::vector<float>& samples, float ms) {
+    if (samples.size() < 4096) samples.push_back(ms);
+}
+
+std::string klattraStagePercentiles(std::vector<float>& samples) {
+    if (samples.empty()) return "-";
+    std::vector<float> copy(samples);
+    const auto nth = [&](double q) {
+        const std::size_t i = static_cast<std::size_t>(q * (copy.size() - 1));
+        std::nth_element(copy.begin(), copy.begin() + i, copy.end());
+        return static_cast<int64_t>(std::lround(copy[i]));
+    };
+    return std::to_string(nth(0.5)) + "/" + std::to_string(nth(0.9)) + "(n" + std::to_string(copy.size()) + ")";
 }
 
 std::string klattraTileString(const OverscaledTileID& id) {
@@ -263,6 +295,45 @@ void klattraAddDrapeOverscan(std::unordered_set<OverscaledTileID>& drapeIDs,
 }
 
 } // namespace
+
+bool RenderTerrain::stageDiagEnabled() {
+    // Default ON — this is a diag dist and device builds cannot set env.
+    static const bool enabled = [] {
+        const char* v = std::getenv("KLATTRA_STAGEDIAG");
+        return !(v && (*v == '0' || *v == 'f' || *v == 'F'));
+    }();
+    return enabled;
+}
+
+void RenderTerrain::diagNoteRasterOverlap(const OverscaledTileID& drapeID, uint8_t rasterZ, bool paintable) const {
+    if (!stageDiagEnabled()) return;
+    const auto it = drapeStageByTile.find(drapeID);
+    if (it == drapeStageByTile.end()) return; // only track canvases we saw created
+    auto& e = it->second;
+    const auto now = std::chrono::steady_clock::now();
+    if (e.rasterOverlap == std::chrono::steady_clock::time_point{}) e.rasterOverlap = now;
+    if (paintable) {
+        e.bestAvailZ = std::max(e.bestAvailZ, rasterZ);
+        if (e.rasterAvail == std::chrono::steady_clock::time_point{}) {
+            e.rasterAvail = now;
+            klattraStagePush(stageAvailMs, klattraStageMs(e.created, now));
+        }
+    }
+}
+
+void RenderTerrain::diagNoteRasterRouted(const OverscaledTileID& drapeID, uint8_t rasterZ) const {
+    if (!stageDiagEnabled()) return;
+    const auto it = drapeStageByTile.find(drapeID);
+    if (it == drapeStageByTile.end()) return;
+    auto& e = it->second;
+    if (e.rasterRouted == std::chrono::steady_clock::time_point{}) {
+        const auto now = std::chrono::steady_clock::now();
+        e.rasterRouted = now;
+        e.routedFromZ = rasterZ;
+        const auto from = e.rasterAvail != std::chrono::steady_clock::time_point{} ? e.rasterAvail : e.created;
+        klattraStagePush(stageRouteMs, klattraStageMs(from, now));
+    }
+}
 
 RenderTerrain::RenderTerrain(Immutable<style::Terrain::Impl> impl_)
     : impl(std::move(impl_)) {
@@ -763,6 +834,12 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
             const bool wasAllocated = drapeCache.get(tileID) != nullptr;
             auto target = drapeCache.getOrCreate(context, tileID, desiredSize);
             if (!wasAllocated && target) {
+                if (stageDiagEnabled() && drapeStageByTile.size() < 8192) {
+                    auto& stage = drapeStageByTile[tileID];
+                    if (stage.created == std::chrono::steady_clock::time_point{}) {
+                        stage.created = std::chrono::steady_clock::now();
+                    }
+                }
                 if (klattraFlyDiag() && klattraFlyDiagBudget()) {
                     klattraDumpEmit("[KLATTRA FLYDIAG] create tile=" + klattraTileString(tileID) +
                                     " size=" + std::to_string(targetSize));
@@ -1228,6 +1305,18 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
         if (binding.usedDrapeFallback) {
             fallbackDrapeBindings++;
         }
+        if (stageDiagEnabled()) {
+            const auto stageIt = drapeStageByTile.find(idealOS);
+            if (stageIt != drapeStageByTile.end() &&
+                stageIt->second.firstBound == std::chrono::steady_clock::time_point{}) {
+                auto& stage = stageIt->second;
+                stage.firstBound = std::chrono::steady_clock::now();
+                stage.firstBoundState = binding.usedDrapeFallback  ? 1
+                                        : binding.drapeReady       ? 0
+                                        : binding.drapeTexture     ? 2
+                                                                   : 3;
+            }
+        }
 
         if (traceDrape) {
             Log::Info(Event::Render,
@@ -1475,6 +1564,81 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
                             " demTex=" + std::to_string(demTexturesByTile.size()) +
                             " ahead=" + std::to_string(lookaheadStripAdded) +
                             " aheadSpan10=" + std::to_string(static_cast<int64_t>(std::lround(lookaheadSpanTiles * 10.0))));
+        }
+    }
+
+    // .53 stage diag: advance bake timestamps every frame (frame-accurate
+    // latency), decompose the live backlog by pipeline stage at 1 Hz.
+    if (stageDiagEnabled()) {
+        const auto nowTp = std::chrono::steady_clock::now();
+        for (auto& [stageID, stage] : drapeStageByTile) {
+            if (stage.rasterRouted == std::chrono::steady_clock::time_point{} ||
+                stage.bakedWithRaster != std::chrono::steady_clock::time_point{}) {
+                continue;
+            }
+            if (klattraDrapeTargetReadyForTile(drapeCache.get(stageID), stageID)) {
+                stage.bakedWithRaster = nowTp;
+                klattraStagePush(stageBakeMs, klattraStageMs(stage.rasterRouted, nowTp));
+                if (stage.firstBound != std::chrono::steady_clock::time_point{} && stage.firstBound < nowTp) {
+                    // The canvas was NEEDED on screen before its content
+                    // finished — this duration IS the visible artifact.
+                    klattraStagePush(stageLateMs, klattraStageMs(stage.firstBound, nowTp));
+                }
+            }
+        }
+        static std::chrono::steady_clock::time_point lastStageEmit{};
+        if (nowTp - lastStageEmit >= std::chrono::seconds(1)) {
+            lastStageEmit = nowTp;
+            uint32_t waitCover = 0, waitTex = 0, availUnrouted = 0, routedUnbaked = 0, contentReady = 0;
+            uint32_t bound0 = 0, bound1 = 0, bound2 = 0, bound3 = 0;
+            for (const auto& [stageID, stage] : drapeStageByTile) {
+                switch (stage.firstBoundState) {
+                    case 0: bound0++; break;
+                    case 1: bound1++; break;
+                    case 2: bound2++; break;
+                    case 3: bound3++; break;
+                    default: break;
+                }
+                if (!drapeCache.get(stageID)) continue; // live canvases only below
+                if (stage.bakedWithRaster != std::chrono::steady_clock::time_point{}) contentReady++;
+                else if (stage.rasterRouted != std::chrono::steady_clock::time_point{}) routedUnbaked++;
+                else if (stage.rasterAvail != std::chrono::steady_clock::time_point{}) availUnrouted++;
+                else if (stage.rasterOverlap != std::chrono::steady_clock::time_point{}) waitTex++;
+                else waitCover++;
+            }
+            uint64_t drapeBytes = 0;
+            drapeCache.visitAll([&](const OverscaledTileID&, TerrainDrapeTargetPtr& target) {
+                if (!target) return;
+                const Size s = target->getSize();
+                drapeBytes += static_cast<uint64_t>(s.width) * s.height * 4;
+            });
+            for (const auto& [retiredID, retiredTarget] : retiredDrapeTargetsByTile) {
+                if (!retiredTarget) continue;
+                const Size s = retiredTarget->getSize();
+                drapeBytes += static_cast<uint64_t>(s.width) * s.height * 4;
+            }
+            klattraDumpEmit(
+                "[KLATTRA STAGE] now waitCover=" + std::to_string(waitCover) +
+                " waitTex=" + std::to_string(waitTex) +
+                " availUnrouted=" + std::to_string(availUnrouted) +
+                " routedUnbaked=" + std::to_string(routedUnbaked) +
+                " contentReady=" + std::to_string(contentReady) +
+                " bgOnly=" + std::to_string(bgOnlyBindings) +
+                " fallback=" + std::to_string(fallbackDrapeBindings) +
+                " ready=" + std::to_string(readyBindings) +
+                " bindings=" + std::to_string(currentBindings.size()) +
+                " physMB=" + std::to_string(static_cast<int64_t>(std::lround(klattraPhysFootprintMB()))) +
+                " drapeMB=" + std::to_string(static_cast<int64_t>(drapeBytes * 133 / 100 / 1048576)));
+            klattraDumpEmit(
+                "[KLATTRA STAGE] lat availMs=" + klattraStagePercentiles(stageAvailMs) +
+                " routeMs=" + klattraStagePercentiles(stageRouteMs) +
+                " bakeMs=" + klattraStagePercentiles(stageBakeMs) +
+                " lateMs=" + klattraStagePercentiles(stageLateMs) +
+                " firstBind ok=" + std::to_string(bound0) +
+                " ancestor=" + std::to_string(bound1) +
+                " bgOnly=" + std::to_string(bound2) +
+                " hole=" + std::to_string(bound3) +
+                " tracked=" + std::to_string(drapeStageByTile.size()));
         }
     }
     if (traceDrape) {
