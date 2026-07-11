@@ -347,10 +347,18 @@ public:
      */
     TerrainLayerTweaker* getTweaker() const { return tweaker.get(); }
 
+    /**
+     * @brief Current style's solid background — the terrain shader's
+     * no-drape-pixel fallback tone (updated each update() from the render
+     * tree; defaults to the topo paper it used to hardcode).
+     */
+    const Color& getDrapeFallbackColor() const { return drapeFallbackColor; }
+
     // Immutable terrain configuration
     Immutable<style::Terrain::Impl> impl;
 
 private:
+    Color drapeFallbackColor = {0.95686275f, 0.91764706f, 0.81568627f, 1.0f};
     /**
      * @brief Generate terrain mesh geometry
      *

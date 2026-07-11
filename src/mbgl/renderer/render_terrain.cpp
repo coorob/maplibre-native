@@ -717,6 +717,16 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
     // RenderLayer::markLayerRenderable(false) only removes the main
     // framebuffer layer group. Prune stale drape groups here as well, or
     // hidden/zoomed-out style layers can stay baked into the terrain texture.
+    // .50: remember the current style's solid background for the shader's
+    // no-drape-pixel fallback; ignore the transparent default so mutation
+    // instants keep the last good tone.
+    {
+        const Color& solidBg = renderTree.getParameters().backgroundColor;
+        if (solidBg.a > 0.0f) {
+            drapeFallbackColor = solidBg;
+        }
+    }
+
     {
         std::unordered_set<int32_t> activeDrapeLayerIndices;
         std::unordered_set<std::string> activeDrapeLayerNames;

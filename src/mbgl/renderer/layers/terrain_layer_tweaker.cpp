@@ -149,6 +149,30 @@ void TerrainLayerTweaker::execute(LayerGroupBase& layerGroup, const PaintParamet
     const float debugColorMode = klattraTerrainDebugColorMode();
     const float debugVertexMode = klattraTerrainDebugVertexMode();
 
+    // .50 horizon haze: knobs in kilometres, converted per frame to the
+    // clip-w units the shader sees (clip w = view distance in world-pixel
+    // units, so km / metersPerPixel at the current latitude+zoom).
+    static const double hazeStartKm = [] {
+        const char* v = std::getenv("KLATTRA_HAZE_START_KM");
+        return v ? std::atof(v) : 12.0;
+    }();
+    static const double hazeEndKm = [] {
+        const char* v = std::getenv("KLATTRA_HAZE_END_KM");
+        return v ? std::atof(v) : 34.0;
+    }();
+    static const float hazeAlpha = [] {
+        if (std::getenv("KLATTRA_DISABLE_HAZE") != nullptr) return 0.0f;
+        const char* v = std::getenv("KLATTRA_HAZE_ALPHA");
+        return v ? static_cast<float>(std::atof(v)) : 0.85f;
+    }();
+    const double metersPerPixel = Projection::getMetersPerPixelAtLatitude(
+        parameters.state.getLatLng().latitude(), parameters.state.getZoom());
+    const float hazeStartW = static_cast<float>(hazeStartKm * 1000.0 / metersPerPixel);
+    const float hazeEndW = static_cast<float>(std::max(hazeEndKm, hazeStartKm + 0.5) * 1000.0 / metersPerPixel);
+    const float hazeInvRange = 1.0f / std::max(hazeEndW - hazeStartW, 1.0f);
+    const Color fallback = terrain ? terrain->getDrapeFallbackColor()
+                                   : Color{0.95686275f, 0.91764706f, 0.81568627f, 1.0f};
+
     auto& layerUniforms = layerGroup.mutableUniformBuffers();
     const TerrainEvaluatedPropsUBO propsUBO = {
         .exaggeration = exaggeration,
@@ -157,6 +181,11 @@ void TerrainLayerTweaker::execute(LayerGroupBase& layerGroup, const PaintParamet
         .pad2 = debugVertexMode,
         .light_color_pad = {lightColor[0], lightColor[1], lightColor[2], 0.0f},
         .light_position_intensity = {lightPos[0], lightPos[1], lightPos[2], lightIntensity},
+        .fallback_color = {fallback.r, fallback.g, fallback.b, 1.0f},
+        // #8FC3DE — the app's 3D sea/sky backdrop tone, so the horizon
+        // merges into the backdrop instead of banding against it.
+        .haze_color = {0.56078431f, 0.76470588f, 0.87058824f, hazeAlpha},
+        .haze_params = {hazeStartW, hazeInvRange, 0.0f, 0.0f},
     };
     layerUniforms.createOrUpdate(idTerrainEvaluatedPropsUBO, &propsUBO, context);
 

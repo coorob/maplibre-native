@@ -69,9 +69,16 @@ struct alignas(16) TerrainEvaluatedPropsUBO {
     /* 12 */ float pad2; // debug vertex/depth mode
     /* 16 */ std::array<float, 4> light_color_pad;          // rgb = color
     /* 32 */ std::array<float, 4> light_position_intensity; // xyz = direction, w = intensity
-    /* 48 */
+    // .50 flyover polish:
+    /* 48 */ std::array<float, 4> fallback_color; // rgb = no-drape-pixel colour (current style's
+                                                  // background) — was hardcoded topo paper in the
+                                                  // shader, painting paper plates over empty canvas
+                                                  // regions in every style
+    /* 64 */ std::array<float, 4> haze_color;     // rgb = horizon haze tint, a = max haze opacity
+    /* 80 */ std::array<float, 4> haze_params;    // x = haze start (clip-w units), y = 1/(end-start)
+    /* 96 */
 };
-static_assert(sizeof(TerrainEvaluatedPropsUBO) == 48);
+static_assert(sizeof(TerrainEvaluatedPropsUBO) == 96);
 
 } // namespace shaders
 } // namespace mbgl

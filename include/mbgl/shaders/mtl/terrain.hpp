@@ -48,9 +48,12 @@ struct alignas(16) TerrainEvaluatedPropsUBO {
     /* 12 */ float pad2; // debug vertex/depth mode
     /* 16 */ float4 light_color_pad;          // rgb = colour
     /* 32 */ float4 light_position_intensity; // xyz = direction, w = intensity
-    /* 48 */
+    /* 48 */ float4 fallback_color;           // rgb = no-drape-pixel colour (style background)
+    /* 64 */ float4 haze_color;               // rgb = horizon haze tint, a = max opacity
+    /* 80 */ float4 haze_params;              // x = start (clip-w), y = 1/(end-start)
+    /* 96 */
 };
-static_assert(sizeof(TerrainEvaluatedPropsUBO) == 48, "wrong size");
+static_assert(sizeof(TerrainEvaluatedPropsUBO) == 96, "wrong size");
 
 )";
 
@@ -86,6 +89,7 @@ struct FragmentStage {
     float elevation;
     float metersPerTile;
     float demScale;
+    float viewW; // clip-space w = view distance in world-pixel units (haze)
 };
 
 // Decode one Mapbox Terrain-RGB texel to elevation (metres).
@@ -274,7 +278,17 @@ FragmentStage vertex vertexMain(thread const VertexStage vertx [[stage_in]],
         .elevation = elevation,
         .metersPerTile = drawable.meters_per_tile,
         .demScale = drawable.dem_scale,
+        .viewW = position.w,
     };
+}
+
+// Horizon haze: fade the far field toward the haze tint so the coarse
+// distance cover reads as atmosphere instead of low-resolution imagery.
+// haze_params.x = start distance, .y = 1/(end-start), both in clip-w
+// units (computed CPU-side from km); haze_color.a caps the strength.
+static inline float hazeFactor(float viewW, float4 hazeParams, float hazeAlpha) {
+    float f = clamp((viewW - hazeParams.x) * hazeParams.y, 0.0, 1.0);
+    return f * f * (3.0 - 2.0 * f) * hazeAlpha;
 }
 
 half4 fragment fragmentMain(FragmentStage in [[stage_in]],
@@ -311,7 +325,9 @@ half4 fragment fragmentMain(FragmentStage in [[stage_in]],
         // Metal offscreen paths preserve useful RGB while leaving alpha at
         // zero, so do not use alpha to punch holes in the terrain.
         float shade = terrainReliefShade(demTexture, demSampler, in.mapUV, in.metersPerTile, in.demScale, props);
-        return half4(half3(clamp(mapColor.rgb * shade, float3(0.0), float3(1.0))), 1.0);
+        float3 lit = clamp(mapColor.rgb * shade, float3(0.0), float3(1.0));
+        float haze = hazeFactor(in.viewW, props.haze_params, props.haze_color.a);
+        return half4(half3(mix(lit, props.haze_color.rgb, haze)), 1.0);
     }
 
     // No valid drape pixel. Use the Klättra style's base terrain colour
@@ -321,7 +337,11 @@ half4 fragment fragmentMain(FragmentStage in [[stage_in]],
     if (props.pad1 > 2.5 && props.pad1 < 3.5) {
         return half4(1.0h, 0.0h, 1.0h, 1.0h);
     }
-    return half4(0.95686275h, 0.91764706h, 0.81568627h, 1.0h);
+    // .50: style-correct fallback (was hardcoded topo paper #F4EAD0 — the
+    // paper plates over empty canvas regions in the satellite flyover),
+    // hazed like any other far-field surface.
+    float fallbackHaze = hazeFactor(in.viewW, props.haze_params, props.haze_color.a);
+    return half4(half3(mix(props.fallback_color.rgb, props.haze_color.rgb, fallbackHaze)), 1.0);
 }
 )";
 };
