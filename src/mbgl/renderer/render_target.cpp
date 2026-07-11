@@ -537,7 +537,16 @@ void RenderTarget::render(RenderOrchestrator& orchestrator, const RenderTree& re
     // finding: mid-flight black rectangles that outlived pauses). With the
     // basemap colour as the floor, a contentless bake reads as unloaded
     // basemap instead of a void.
-    const Color drapeClearColor = renderTree.getParameters().backgroundColor;
+    Color drapeClearColor = renderTree.getParameters().backgroundColor;
+    // .60-DIAG writer attribution (with magenta bg-drape + cyan shader
+    // fallback; default ON in this diag dist, KLATTRA_DISABLE_TINT
+    // reverts; REMOVE next dist): canvas CLEAR renders YELLOW, so regions
+    // where NOTHING was ever routed — the "or never is, for some far
+    // targets" case above — are unmistakable in flyover screenshots.
+    static const bool diagTint = std::getenv("KLATTRA_DISABLE_TINT") == nullptr;
+    if (diagTint) {
+        drapeClearColor = Color{1.0f, 1.0f, 0.0f, 1.0f};
+    }
 
     // .46-diag: the first bakes are where flicker windows live — log the
     // ACTUAL clear colour + group population for every target's first few

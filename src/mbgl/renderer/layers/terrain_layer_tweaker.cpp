@@ -170,8 +170,17 @@ void TerrainLayerTweaker::execute(LayerGroupBase& layerGroup, const PaintParamet
     const float hazeStartW = static_cast<float>(hazeStartKm * 1000.0 / metersPerPixel);
     const float hazeEndW = static_cast<float>(std::max(hazeEndKm, hazeStartKm + 0.5) * 1000.0 / metersPerPixel);
     const float hazeInvRange = 1.0f / std::max(hazeEndW - hazeStartW, 1.0f);
-    const Color fallback = terrain ? terrain->getDrapeFallbackColor()
-                                   : Color{0.95686275f, 0.91764706f, 0.81568627f, 1.0f};
+    Color fallback = terrain ? terrain->getDrapeFallbackColor()
+                             : Color{0.95686275f, 0.91764706f, 0.81568627f, 1.0f};
+    // .60-DIAG writer attribution (paired with the magenta background-drape
+    // tint and the yellow canvas clear; default ON in this diag dist,
+    // KLATTRA_DISABLE_TINT reverts; REMOVE next dist): the shader's
+    // no-valid-drape-pixel branch renders CYAN so screenshots split
+    // "binding had no usable texture" from the other writers.
+    static const bool diagTint = std::getenv("KLATTRA_DISABLE_TINT") == nullptr;
+    if (diagTint) {
+        fallback = Color{0.0f, 1.0f, 1.0f, 1.0f};
+    }
 
     auto& layerUniforms = layerGroup.mutableUniformBuffers();
     const TerrainEvaluatedPropsUBO propsUBO = {
