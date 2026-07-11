@@ -487,8 +487,14 @@ void RenderRasterLayer::update(gfx::ShaderRegistry& shaders,
                 // Bucket ID changed, we need to rebuild the drawables
                 removeTile(renderPass, tileID);
                 // Also drop drape-pass drawables for this tile (see
-                // render_fill_layer.cpp comment).
-                if (activeTerrain) {
+                // render_fill_layer.cpp comment). .62: only when keep-stale
+                // is off — with it on, the emit path's same-id removal
+                // supersedes these drawables the moment the rebuilt bucket
+                // routes, so dropping them here just opens a contentless
+                // window (and if the new bucket never becomes paintable, a
+                // permanent one). Content leaves a canvas only when
+                // replaced.
+                if (activeTerrain && !klattraKeepStaleRasterDrape()) {
                     activeTerrain->visitDrapeTargets(
                         [&](const OverscaledTileID& drapeID, TerrainDrapeTargetPtr& drapeTarget) {
                             if (!drapeTarget) return;

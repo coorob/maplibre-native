@@ -186,6 +186,20 @@ bool klattraDrapeTargetReadyForTile(const TerrainDrapeTargetPtr& target, const O
     return RenderTerrain::isDrapeTargetReadyForTile(target, tileID);
 }
 
+// .62: does this canvas hold ANY raster drape drawable? The .61 flight
+// showed level-0 canvas regions that are pure cleared background (black
+// under relief shade) — this names the population directly at bind time.
+bool klattraDrapeHasRasterContent(const TerrainDrapeTargetPtr& target) {
+    if (!target) return false;
+    bool has = false;
+    target->visitLayerGroups([&](LayerGroupBase& group) {
+        if (!has && group.getName().find("-raster-drape") != std::string::npos && group.getDrawableCount() > 0) {
+            has = true;
+        }
+    });
+    return has;
+}
+
 bool klattraIsAncestorOf(const OverscaledTileID& ancestor, const OverscaledTileID& child) {
     return ancestor.canonical.z < child.canonical.z && LayerTweaker::tilesOverlap(ancestor, child);
 }
@@ -1207,6 +1221,7 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
     std::unordered_map<OverscaledTileID, DEMBinding> nextBindings;
     nextBindings.reserve(terrainMeshIDs.size());
     std::size_t readyBindings = 0;
+    std::size_t rasterEmptyBindings = 0;
     std::size_t emptyDemBindings = 0;
     std::size_t fallbackDrapeBindings = 0;
     // .46-diag: flicker-window classes. bgOnly = own baked canvas bound with
@@ -1343,6 +1358,25 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
                                         : binding.drapeReady       ? 0
                                         : binding.drapeTexture     ? 2
                                                                    : 3;
+            }
+            // .62: the direct unpainted-canvas gauge. A bound canvas that
+            // wants raster content but holds NO raster drawable renders its
+            // cleared background through the relief shader — the .61 black.
+            if (const TerrainDrapeTargetPtr own = drapeCache.get(idealOS);
+                own && own->requiresRasterDrapeContent() && !klattraDrapeHasRasterContent(own)) {
+                rasterEmptyBindings++;
+                if (klattraFlyDiag() ? klattraFlyDiagBudget() : (rasterEmptyBindings <= 3)) {
+                    // A few named samples per second even without FLYDIAG.
+                    static std::chrono::steady_clock::time_point lastEmptyEmit{};
+                    const auto nowE = std::chrono::steady_clock::now();
+                    if (nowE - lastEmptyEmit >= std::chrono::seconds(1)) {
+                        lastEmptyEmit = nowE;
+                        klattraDumpEmit("[KLATTRA STAGE] rasterEmpty tile=" + klattraTileString(idealOS) +
+                                        " size=" + std::to_string(own->getSize().width) +
+                                        " groups=" + std::to_string(own->numLayerGroups()) +
+                                        " drawables=" + std::to_string(klattraDrapeDrawableCount(own)));
+                    }
+                }
             }
         }
 
@@ -1688,6 +1722,7 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
                 " fallback=" + std::to_string(fallbackDrapeBindings) +
                 " ready=" + std::to_string(readyBindings) +
                 " bindings=" + std::to_string(currentBindings.size()) +
+                " rasterEmpty=" + std::to_string(rasterEmptyBindings) +
                 " unbound=" + std::to_string(unboundBindings) +
                 " allocFail=" + std::to_string(stageAllocFailEvents) +
                 " physMB=" + std::to_string(static_cast<int64_t>(std::lround(klattraPhysFootprintMB()))) +
