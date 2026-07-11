@@ -68,15 +68,9 @@ void BackgroundLayerTweaker::execute(LayerGroupBase& layerGroup, const PaintPara
         layerUniforms.createOrUpdate(idBackgroundPropsUBO, &propsUBO, context);
     } else {
         Color bgColor = evaluated.get<BackgroundColor>();
-        // .60-DIAG writer attribution (default ON in this diag dist,
-        // KLATTRA_DISABLE_TINT reverts; REMOVE the default in the next
-        // dist): background DRAPE content renders MAGENTA so flyover
-        // screenshots identify whether the persistent dark-green regions
-        // are canvas areas painted by the background drape (i.e. no raster
-        // imagery ever landed there) — magenta on screen — or something
-        // else entirely. Robert-sanctioned diagnostic recolor.
-        static const bool diagTint = std::getenv("KLATTRA_DISABLE_TINT") == nullptr;
-        if (drapeMode && diagTint) {
+        // .60 tint (removed in .61): magenta bg-drape attribution. Verdict:
+        // the green was NOT this writer — it was empty drape mip levels.
+        if (drapeMode && std::getenv("KLATTRA_TINT_WRITERS") != nullptr) {
             bgColor = Color{1.0f, 0.0f, 1.0f, 1.0f};
         }
         const BackgroundPropsUBO propsUBO = {.color = bgColor,

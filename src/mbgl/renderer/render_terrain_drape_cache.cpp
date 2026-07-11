@@ -56,7 +56,19 @@ TerrainDrapeTargetPtr TerrainDrapeCache::getOrCreate(gfx::Context& context,
                          " size=" + std::to_string(size.width));
         return nullptr;
     }
-    target->setMipmapped(true);
+    // .61: drape canvases are NOT mipmapped. The .60 tint flight proved the
+    // week-long "green patches" were the terrain shader's no-valid-pixel
+    // fallback sampling EMPTY deep mip levels at far-field minification —
+    // level 0 is baked and correct, but the generateMipmaps encode in
+    // OffscreenTextureResource::swap() leaves the chain unpopulated on
+    // device (open question — see the .61 handover). Until that is fixed
+    // for real, a 1-level texture clamps every sample to the imagery that
+    // actually exists, kills the artifact class deterministically, saves
+    // the 33% mip memory and the per-bake blit. Cost: far-field
+    // minification shimmer during motion. KLATTRA_DRAPE_MIPS=1 re-enables
+    // for future mip-population work.
+    static const bool drapeMips = std::getenv("KLATTRA_DRAPE_MIPS") != nullptr;
+    target->setMipmapped(drapeMips);
     target->setDebugName("terrain-drape " + klattraTileString(tileID));
     if (klattraLogDrapeTrace()) {
         Log::Info(Event::Render,

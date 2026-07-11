@@ -172,13 +172,10 @@ void TerrainLayerTweaker::execute(LayerGroupBase& layerGroup, const PaintParamet
     const float hazeInvRange = 1.0f / std::max(hazeEndW - hazeStartW, 1.0f);
     Color fallback = terrain ? terrain->getDrapeFallbackColor()
                              : Color{0.95686275f, 0.91764706f, 0.81568627f, 1.0f};
-    // .60-DIAG writer attribution (paired with the magenta background-drape
-    // tint and the yellow canvas clear; default ON in this diag dist,
-    // KLATTRA_DISABLE_TINT reverts; REMOVE next dist): the shader's
-    // no-valid-drape-pixel branch renders CYAN so screenshots split
-    // "binding had no usable texture" from the other writers.
-    static const bool diagTint = std::getenv("KLATTRA_DISABLE_TINT") == nullptr;
-    if (diagTint) {
+    // .60 tint (opt-in since .61): cyan no-valid-drape-pixel attribution —
+    // THE verdict tint: the week-long green patches were this branch,
+    // sampling empty deep mip levels at far-field minification.
+    if (std::getenv("KLATTRA_TINT_WRITERS") != nullptr) {
         fallback = Color{0.0f, 1.0f, 1.0f, 1.0f};
     }
 
