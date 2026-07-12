@@ -291,6 +291,10 @@ static inline float hazeFactor(float viewW, float4 hazeParams, float hazeAlpha) 
     return f * f * (3.0 - 2.0 * f) * hazeAlpha;
 }
 
+static inline bool validDrapeSample(float4 color) {
+    return color.a > 0.01 || max(max(color.r, color.g), color.b) > 0.001;
+}
+
 half4 fragment fragmentMain(FragmentStage in [[stage_in]],
                             device const TerrainEvaluatedPropsUBO& props [[buffer(idTerrainEvaluatedPropsUBO)]],
                             texture2d<float, access::sample> demTexture [[texture(0)]],
@@ -320,7 +324,30 @@ half4 fragment fragmentMain(FragmentStage in [[stage_in]],
     float4 mapColor = (props.pad1 > 1.5 && props.pad1 < 2.5)
                           ? mapTexture.sample(mapSampler, drapeUV, level(0.0))
                           : mapTexture.sample(mapSampler, drapeUV);
-    if (mapColor.a > 0.01 || max(max(mapColor.r, mapColor.g), mapColor.b) > 0.001) {
+    if (!validDrapeSample(mapColor)) {
+        // .73 physical-device split. `.72` proved that the drawable and CPU
+        // binding hold the same texture object, but the affected fragments
+        // still sample zero. First force level 0: if implicit derivative LOD
+        // is the defect, this recovers the real imagery without a tint. If
+        // the exact level-0 sample is also invalid, classify the already-bad
+        // pixel without a synchronous GPU readback:
+        //   magenta = this UV is blank but the bound texture has usable data;
+        //   cyan    = representative level-0 probes are all blank.
+        const float4 levelZeroColor = mapTexture.sample(mapSampler, drapeUV, level(0.0));
+        if (validDrapeSample(levelZeroColor)) {
+            mapColor = levelZeroColor;
+        } else {
+            const bool boundLevelZeroHasContent =
+                validDrapeSample(mapTexture.sample(mapSampler, float2(0.25, 0.25), level(0.0))) ||
+                validDrapeSample(mapTexture.sample(mapSampler, float2(0.75, 0.25), level(0.0))) ||
+                validDrapeSample(mapTexture.sample(mapSampler, float2(0.50, 0.50), level(0.0))) ||
+                validDrapeSample(mapTexture.sample(mapSampler, float2(0.25, 0.75), level(0.0))) ||
+                validDrapeSample(mapTexture.sample(mapSampler, float2(0.75, 0.75), level(0.0)));
+            return boundLevelZeroHasContent ? half4(1.0h, 0.0h, 1.0h, 1.0h)
+                                            : half4(0.0h, 1.0h, 1.0h, 1.0h);
+        }
+    }
+    if (validDrapeSample(mapColor)) {
         // Drape targets are an opaque composited surface for terrain. Some
         // Metal offscreen paths preserve useful RGB while leaving alpha at
         // zero, so do not use alpha to punch holes in the terrain.
