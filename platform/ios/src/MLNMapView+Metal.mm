@@ -40,12 +40,17 @@ public:
       : backend(backend_), delegate([[MLNMapViewImplDelegate alloc] initWithImpl:&backend]) {}
 
   void bind() override {
-    if (!commandQueue) {
-      commandQueue = [mtlView.device newCommandQueue];
-    }
-
     if (!commandBuffer) {
-      commandBuffer = [commandQueue commandBuffer];
+      // Offscreen render targets (terrain drape canvases, hillshade prep,
+      // etc.) are submitted through RendererBackend::getCommandQueue().
+      // The main pass must use that same FIFO queue: committing an offscreen
+      // command buffer before a main-pass buffer on a different Metal queue
+      // establishes no execution dependency, so a newly baked texture can be
+      // sampled while it still contains its initial zeroes.
+      id<MTLCommandQueue> backendQueue =
+          (__bridge id<MTLCommandQueue>)backend.getCommandQueue().get();
+      assert(backendQueue);
+      commandBuffer = [backendQueue commandBuffer];
       commandBufferPtr = NS::RetainPtr((__bridge MTL::CommandBuffer*)commandBuffer);
     }
   }
@@ -103,7 +108,6 @@ public:
   MLNMapViewImplDelegate* delegate = nil;
   MTKView* mtlView = nil;
   id<MTLCommandBuffer> commandBuffer;
-  id<MTLCommandQueue> commandQueue;
   bool presentsWithTransaction = false;
 
   // Cached last-applied values comparing against MTKView's reflected state round-trips

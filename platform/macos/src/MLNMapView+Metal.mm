@@ -39,12 +39,15 @@ public:
       : backend(backend_), delegate([[MLNMapViewImplDelegate alloc] initWithImpl:&backend]) {}
 
   void bind() override {
-    if (!commandQueue) {
-      commandQueue = [mtlView.device newCommandQueue];
-    }
-
     if (!commandBuffer) {
-      commandBuffer = [commandQueue commandBuffer];
+      // Keep offscreen target bakes and the main pass on one FIFO queue.
+      // Separate Metal queues do not inherit ordering from CPU commit order,
+      // which lets the main pass sample a newly allocated target before its
+      // first clear/draw commands have executed.
+      id<MTLCommandQueue> backendQueue =
+          (__bridge id<MTLCommandQueue>)backend.getCommandQueue().get();
+      assert(backendQueue);
+      commandBuffer = [backendQueue commandBuffer];
       commandBufferPtr = NS::RetainPtr((__bridge MTL::CommandBuffer*)commandBuffer);
     }
   }
@@ -98,7 +101,6 @@ public:
   MLNMapViewImplDelegate* delegate = nil;
   MTKView* mtlView = nil;
   id<MTLCommandBuffer> commandBuffer;
-  id<MTLCommandQueue> commandQueue;
 
   // We count how often the context was activated/deactivated so that we can truly deactivate it
   // after the activation count drops to 0.
