@@ -1538,6 +1538,34 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
         nextBindings = currentBindings;
     }
 
+    // A terrain drawable owns the exact texture generation that was current
+    // when it was created. If a replacement target exists but is not content
+    // ready yet, keep both the drawable AND its old binding (texture + UV
+    // remap) together. Publishing the replacement binding while retaining the
+    // old drawable makes the final shader combine new UVs with an old texture;
+    // the next update can then mistake that mismatched pair for up-to-date.
+    uint32_t preservedDrawableBindings = 0;
+    for (auto& [idealID, binding] : nextBindings) {
+        if (binding.drapeReady || previousDrawableIDs.find(idealID) == previousDrawableIDs.end()) {
+            continue;
+        }
+        const auto existing = currentBindings.find(idealID);
+        if (existing == currentBindings.end() || !existing->second.drapeTexture) {
+            continue;
+        }
+        const bool bindingChanged = existing->second.sourceID != binding.sourceID ||
+                                    existing->second.texture != binding.texture ||
+                                    existing->second.drapeTexture != binding.drapeTexture ||
+                                    existing->second.drapeID != binding.drapeID ||
+                                    existing->second.drapeTL != binding.drapeTL ||
+                                    existing->second.drapeScale != binding.drapeScale ||
+                                    existing->second.drapeReady != binding.drapeReady;
+        if (bindingChanged) {
+            binding = existing->second;
+            ++preservedDrawableBindings;
+        }
+    }
+
     // The counters accumulated above describe the candidate cover. Recompute
     // the visible binding classes after the optional atomic hold so STAGE does
     // not attribute a rejected child's state to the old cover on screen.
@@ -1615,9 +1643,9 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
     // leaving tile's drawable until the ideals covering it appear here.
     std::unordered_set<OverscaledTileID> drawableBackedTiles;
     drawableBackedTiles.reserve(nextBindings.size());
-    uint32_t drawableHolds = 0;
+    uint32_t drawableHolds = preservedDrawableBindings;
     uint32_t drawableSkipsNotReady = 0;
-    for (const auto& [idealID, binding] : nextBindings) {
+    for (auto& [idealID, binding] : nextBindings) {
         if (auto existing = currentBindings.find(idealID); existing != currentBindings.end()) {
             if (existing->second.sourceID == binding.sourceID &&
                 existing->second.texture == binding.texture &&
@@ -1689,6 +1717,11 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
                                       " reason=refresh-drape-not-ready");
                     }
                     ++drawableHolds;
+                    // Keep the CPU binding record physically aligned with the
+                    // drawable that is intentionally retained. This is a
+                    // safety net for any transition not covered by the
+                    // pre-pass above.
+                    binding = existing->second;
                     drawableBackedTiles.insert(idealID);
                     continue;
                 }

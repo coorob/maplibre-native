@@ -33,52 +33,6 @@ bool klattraLogDrapeTrace() {
     return enabled;
 }
 
-bool klattra71DiagEnabled() {
-    static const bool enabled = [] {
-        const char* value = std::getenv("KLATTRA_71_DIAG");
-        return !value || !(*value == '0' || *value == 'f' || *value == 'F');
-    }();
-    return enabled;
-}
-
-bool klattra71WriterDiagEnabled() {
-    return klattra71DiagEnabled() || std::getenv("KLATTRA_TINT_WRITERS") != nullptr;
-}
-
-int klattra71TargetProbeIndex(const std::string& debugName) {
-    if (!klattra71DiagEnabled() || debugName.find(" sampled") == std::string::npos) {
-        return -1;
-    }
-
-    static constexpr const char* targets[] = {
-        "terrain-drape z12/2201/1120=>",
-        "terrain-drape z11/1099/560=>",
-        "terrain-drape z12/2190/1116=>",
-    };
-    for (int index = 0; index < 3; ++index) {
-        if (debugName.find(targets[index]) != std::string::npos) {
-            return index;
-        }
-    }
-    return -1;
-}
-
-bool klattra71TargetProbeTurn(const int index) {
-    if (index < 0 || index > 2) {
-        return false;
-    }
-
-    static int64_t lastSecondByTarget[] = {-1, -1, -1};
-    const int64_t now =
-        std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now().time_since_epoch())
-            .count();
-    if (now % 3 != index || lastSecondByTarget[index] == now) {
-        return false;
-    }
-    lastSecondByTarget[index] = now;
-    return true;
-}
-
 // .46-diag (flyover campaign): device-visible flight diagnostics, default
 // ON in this diag dist (KLATTRA_FLYDIAG=0 disables). Warning for the phone
 // syslog + stderr for the simulator; per-second budget caps the flood.
@@ -259,19 +213,9 @@ void klattraMaybeInspectTarget(gfx::OffscreenTexture& texture,
                                const uint64_t completedRenderCount) {
     const char* dumpFilter = std::getenv("KLATTRA_DUMP_RENDER_TARGETS");
     const char* statsFilter = std::getenv("KLATTRA_LOG_TARGET_PIXELS");
-    const int defaultProbeIndex = klattra71TargetProbeIndex(debugName);
-    const bool defaultProbe = defaultProbeIndex >= 0;
     const bool shouldDump = klattraTargetMatchesFilter(debugName, dumpFilter);
-    const bool shouldLogStats = defaultProbe || shouldDump || klattraTargetMatchesFilter(debugName, statsFilter);
+    const bool shouldLogStats = shouldDump || klattraTargetMatchesFilter(debugName, statsFilter);
     if (!shouldLogStats) {
-        return;
-    }
-
-    // Consumer-side probes are called once per terrain drawable, and a
-    // target can be shared by several drawables. Rotate the three exact
-    // route targets at one readback globally per second so CPU/GPU waiting
-    // cannot materially change the flyover timing we are measuring.
-    if (defaultProbe && !klattra71TargetProbeTurn(defaultProbeIndex)) {
         return;
     }
 
@@ -292,13 +236,13 @@ void klattraMaybeInspectTarget(gfx::OffscreenTexture& texture,
 
     const bool repeat = std::getenv("KLATTRA_DUMP_RENDER_TARGETS_REPEAT") != nullptr ||
                         std::getenv("KLATTRA_LOG_TARGET_PIXELS_REPEAT") != nullptr;
-    if (!defaultProbe && !repeat && completedRenderCount > 2) {
+    if (!repeat && completedRenderCount > 2) {
         return;
     }
 
     static uint64_t inspectedTargets = 0;
     const uint64_t maxTargets = std::max(0, klattraEnvInt("KLATTRA_DUMP_RENDER_TARGET_MAX", 80));
-    if (!defaultProbe && inspectedTargets >= maxTargets) {
+    if (inspectedTargets >= maxTargets) {
         return;
     }
     const uint64_t sequence = ++inspectedTargets;
@@ -324,9 +268,6 @@ void klattraMaybeInspectTarget(gfx::OffscreenTexture& texture,
     uint64_t bright = 0;
     uint64_t dark = 0;
     uint64_t greyish = 0;
-    uint64_t yellowClear = 0;
-    uint64_t magentaBackground = 0;
-    uint64_t originalGreen = 0;
 
     const uint8_t* data = image.data.get();
     for (uint64_t i = 0; i < total; ++i) {
@@ -352,16 +293,6 @@ void klattraMaybeInspectTarget(gfx::OffscreenTexture& texture,
         }
         if (std::max({r, g, b}) - std::min({r, g, b}) < 12 && r > 85 && r < 205) {
             greyish++;
-        }
-        if (a >= 250 && r >= 248 && g >= 248 && b <= 8) {
-            yellowClear++;
-        }
-        if (a >= 250 && r >= 248 && g <= 8 && b >= 248) {
-            magentaBackground++;
-        }
-        if (a >= 250 && std::abs(static_cast<int>(r) - 46) <= 4 &&
-            std::abs(static_cast<int>(g) - 56) <= 4 && std::abs(static_cast<int>(b) - 41) <= 4) {
-            originalGreen++;
         }
     }
 
@@ -389,30 +320,20 @@ void klattraMaybeInspectTarget(gfx::OffscreenTexture& texture,
         }
     }
 
-    const std::string message =
-        std::string(defaultProbe ? "[KLATTRA .71 TARGET_PIXELS]" : "[KLATTRA TARGET_PIXELS]") +
-        " level=0 target=" + debugName + " completed=" + std::to_string(completedRenderCount) +
-        " size=" + std::to_string(image.size.width) + "x" + std::to_string(image.size.height) +
-        " avg=" + std::to_string(sumR / std::max<uint64_t>(1, total)) + "," +
-        std::to_string(sumG / std::max<uint64_t>(1, total)) + "," +
-        std::to_string(sumB / std::max<uint64_t>(1, total)) + "," +
-        std::to_string(sumA / std::max<uint64_t>(1, total)) +
-        " alpha0_pct=" + klattraPercent(alphaZero, total) +
-        " rgb_with_alpha0_pct=" + klattraPercent(rgbWithAlphaZero, total) +
-        " bright_pct=" + klattraPercent(bright, total) + " dark_pct=" + klattraPercent(dark, total) +
-        " greyish_pct=" + klattraPercent(greyish, total) +
-        " yellow_clear_pct=" + klattraPercent(yellowClear, total) +
-        " magenta_background_pct=" + klattraPercent(magentaBackground, total) +
-        " original_green_pct=" + klattraPercent(originalGreen, total) +
-        (pngPath.empty() ? "" : " png=" + pngPath);
-    if (defaultProbe) {
-        // The Cocoa logging bridge drops these Info records in Release. A
-        // Warning is device-visible and lets the screenshot timestamp map
-        // directly to the sampled level-0 target contents.
-        Log::Warning(Event::Render, message);
-    } else {
-        Log::Info(Event::Render, message);
-    }
+    Log::Info(Event::Render,
+              "[KLATTRA TARGET_PIXELS] target=" + debugName +
+                  " completed=" + std::to_string(completedRenderCount) +
+                  " size=" + std::to_string(image.size.width) + "x" + std::to_string(image.size.height) +
+                  " avg=" + std::to_string(sumR / std::max<uint64_t>(1, total)) + "," +
+                      std::to_string(sumG / std::max<uint64_t>(1, total)) + "," +
+                      std::to_string(sumB / std::max<uint64_t>(1, total)) + "," +
+                      std::to_string(sumA / std::max<uint64_t>(1, total)) +
+                  " alpha0_pct=" + klattraPercent(alphaZero, total) +
+                  " rgb_with_alpha0_pct=" + klattraPercent(rgbWithAlphaZero, total) +
+                  " bright_pct=" + klattraPercent(bright, total) +
+                  " dark_pct=" + klattraPercent(dark, total) +
+                  " greyish_pct=" + klattraPercent(greyish, total) +
+                  (pngPath.empty() ? "" : " png=" + pngPath));
 }
 
 } // namespace
@@ -617,11 +538,8 @@ void RenderTarget::render(RenderOrchestrator& orchestrator, const RenderTree& re
     // basemap colour as the floor, a contentless bake reads as unloaded
     // basemap instead of a void.
     Color drapeClearColor = renderTree.getParameters().backgroundColor;
-    // .71 diagnostic: only terrain-drape target clears become yellow. Other
-    // offscreen targets (for example hillshade preparation) must retain
-    // their normal clear colour. KLATTRA_71_DIAG=0 disables the release
-    // diagnostic; the legacy writer-tint opt-in remains available.
-    if (debugName.rfind("terrain-drape ", 0) == 0 && klattra71WriterDiagEnabled()) {
+    // .60 tint (opt-in since .61): yellow canvas-clear attribution.
+    if (std::getenv("KLATTRA_TINT_WRITERS") != nullptr) {
         drapeClearColor = Color{1.0f, 1.0f, 0.0f, 1.0f};
     }
 

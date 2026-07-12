@@ -21,19 +21,6 @@ using namespace shaders;
 constexpr auto BackgroundPatternShaderName = "BackgroundPatternShader";
 #endif
 
-namespace {
-
-bool klattra71WriterDiagEnabled() {
-    static const bool enabled = [] {
-        const char* value = std::getenv("KLATTRA_71_DIAG");
-        const bool defaultDiag = !value || !(*value == '0' || *value == 'f' || *value == 'F');
-        return defaultDiag || std::getenv("KLATTRA_TINT_WRITERS") != nullptr;
-    }();
-    return enabled;
-}
-
-} // namespace
-
 void BackgroundLayerTweaker::execute(LayerGroupBase& layerGroup, const PaintParameters& parameters) {
     if (layerGroup.empty()) {
         return;
@@ -81,13 +68,8 @@ void BackgroundLayerTweaker::execute(LayerGroupBase& layerGroup, const PaintPara
         layerUniforms.createOrUpdate(idBackgroundPropsUBO, &propsUBO, context);
     } else {
         Color bgColor = evaluated.get<BackgroundColor>();
-        // .71 diagnostic: background pixels baked into a terrain drape are
-        // magenta. Together with the yellow target clear and cyan terrain
-        // fallback this identifies which writer owns the persistent flat
-        // regions that survive complete TileID/binding counters. Default on
-        // for this diagnostic release; KLATTRA_71_DIAG=0 restores normal
-        // colours. The legacy opt-in remains available for later builds.
-        if (drapeMode && klattra71WriterDiagEnabled()) {
+        // .60 tint (opt-in since .61): magenta background-drape attribution.
+        if (drapeMode && std::getenv("KLATTRA_TINT_WRITERS") != nullptr) {
             bgColor = Color{1.0f, 0.0f, 1.0f, 1.0f};
         }
         const BackgroundPropsUBO propsUBO = {.color = bgColor,

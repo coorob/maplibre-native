@@ -16,6 +16,7 @@
 #include <mbgl/util/projection.hpp>
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -26,15 +27,6 @@ namespace mbgl {
 using namespace shaders;
 
 namespace {
-
-bool klattra71WriterDiagEnabled() {
-    static const bool enabled = [] {
-        const char* value = std::getenv("KLATTRA_71_DIAG");
-        const bool defaultDiag = !value || !(*value == '0' || *value == 'f' || *value == 'F');
-        return defaultDiag || std::getenv("KLATTRA_TINT_WRITERS") != nullptr;
-    }();
-    return enabled;
-}
 
 bool klattraLogTerrainFinal() {
     static const bool enabled = std::getenv("KLATTRA_LOG_TERRAIN_FINAL") != nullptr;
@@ -181,11 +173,8 @@ void TerrainLayerTweaker::execute(LayerGroupBase& layerGroup, const PaintParamet
     const float hazeInvRange = 1.0f / std::max(hazeEndW - hazeStartW, 1.0f);
     Color fallback = terrain ? terrain->getDrapeFallbackColor()
                              : Color{0.95686275f, 0.91764706f, 0.81568627f, 1.0f};
-    // .71 diagnostic: the final terrain shader's no-valid-drape-pixel
-    // fallback is cyan. This repeats the writer attribution after .70 fixed
-    // startup floor availability but left deterministic mid/far surfaces.
-    // KLATTRA_71_DIAG=0 restores normal colours; the legacy opt-in remains.
-    if (klattra71WriterDiagEnabled()) {
+    // .60 tint (opt-in since .61): cyan no-valid-drape-pixel attribution.
+    if (std::getenv("KLATTRA_TINT_WRITERS") != nullptr) {
         fallback = Color{0.0f, 1.0f, 1.0f, 1.0f};
     }
 
@@ -247,6 +236,8 @@ void TerrainLayerTweaker::execute(LayerGroupBase& layerGroup, const PaintParamet
 
     // Visit each drawable to populate per-drawable UBOs
     std::size_t stderrDrawableCount = 0;
+    std::size_t repairedTextureBindings = 0;
+    std::string firstTextureRepair;
     visitLayerGroupDrawables(layerGroup, [&](gfx::Drawable& drawable) {
         if (!drawable.getTileID()) {
             return;
@@ -274,6 +265,27 @@ void TerrainLayerTweaker::execute(LayerGroupBase& layerGroup, const PaintParamet
         float drapeScale = 1.0f;
         float elevationOffsetScale = 1.0f;
         if (const auto* binding = terrain->getDEMBinding(*drawable.getTileID())) {
+            const auto& actualDEMTexture = drawable.getTexture(0);
+            const auto& actualDrapeTexture = drawable.getTexture(1);
+            const bool demMismatch = binding->texture && actualDEMTexture != binding->texture;
+            const bool drapeMismatch = binding->drapeTexture && actualDrapeTexture != binding->drapeTexture;
+            if (demMismatch || drapeMismatch) {
+                if (firstTextureRepair.empty()) {
+                    firstTextureRepair = " tile=" + klattraTileString(*drawable.getTileID()) +
+                                         " demActual=" + klattraTexturePtrString(actualDEMTexture) +
+                                         " demExpected=" + klattraTexturePtrString(binding->texture) +
+                                         " drapeActual=" + klattraTexturePtrString(actualDrapeTexture) +
+                                         " drapeExpected=" + klattraTexturePtrString(binding->drapeTexture);
+                }
+                if (demMismatch) {
+                    drawable.setTexture(binding->texture, 0);
+                }
+                if (drapeMismatch) {
+                    drawable.setTexture(binding->drapeTexture, 1);
+                }
+                ++repairedTextureBindings;
+            }
+
             demTL = binding->demTL;
             demScale = binding->demScale;
             metersPerTile = metersPerTileAtCenter(binding->sourceID.canonical);
@@ -362,6 +374,17 @@ void TerrainLayerTweaker::execute(LayerGroupBase& layerGroup, const PaintParamet
         drawable.setUBOIndex(i++);
 #endif
     });
+
+    if (repairedTextureBindings > 0) {
+        static std::chrono::steady_clock::time_point lastRepairLog{};
+        const auto now = std::chrono::steady_clock::now();
+        if (now - lastRepairLog >= std::chrono::seconds(1)) {
+            lastRepairLog = now;
+            Log::Warning(Event::Render,
+                         "[KLATTRA .72 BINDING_REPAIR] count=" + std::to_string(repairedTextureBindings) +
+                             firstTextureRepair);
+        }
+    }
 
 #if MLN_UBO_CONSOLIDATION
     const size_t drawableUBOVectorSize = sizeof(TerrainDrawableUBO) * drawableUBOVector.size();
