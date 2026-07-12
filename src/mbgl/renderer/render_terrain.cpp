@@ -68,7 +68,7 @@ bool klattraLogDrapeTrace() {
 bool klattraLogCoverSummary() {
     static const bool enabled = [] {
         const char* v = std::getenv("KLATTRA_LOG_COVER_SUMMARY");
-        return v && !(*v == '0' || *v == 'f' || *v == 'F');
+        return !v || !(*v == '0' || *v == 'f' || *v == 'F');
     }();
     return enabled;
 }
@@ -265,6 +265,23 @@ uint32_t klattraEnvFrameCount(const char* name, uint32_t fallback) {
     const unsigned long parsed = std::strtoul(value, &end, 10);
     if (end == value) return fallback;
     return static_cast<uint32_t>(std::clamp<unsigned long>(parsed, 0, 120));
+}
+
+bool klattraPacked565DrapeEnabled() {
+    // .69 device A/B: settled .68 imagery is clean in the RGBA8 near ring
+    // and exact style-background green survives only in the packed-565
+    // mid/far rings. The simulator cannot exercise B5G6R5Unorm (it maps the
+    // format to RGBA8), so make RGBA8 the device default for one isolated
+    // flight. Keep an explicit opt-in for memory comparisons and retain the
+    // old disable switch as an overriding kill switch.
+    static const bool enabled = [] {
+        if (std::getenv("KLATTRA_DISABLE_DRAPE_565") != nullptr) {
+            return false;
+        }
+        const char* value = std::getenv("KLATTRA_ENABLE_DRAPE_565");
+        return value && !(*value == '0' || *value == 'f' || *value == 'F');
+    }();
+    return enabled;
 }
 
 uint32_t klattraEnvLevelCount(const char* name, uint32_t fallback) {
@@ -919,7 +936,7 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
             }
 
             const bool wasAllocated = drapeCache.get(tileID) != nullptr;
-            // .58 memory diet: mid/far tiers bake into packed-565 targets —
+            // .58 memory diet: mid/far tiers can bake into packed-565 targets —
             // half the bytes of RGBA8 across the ~85% of the population that
             // isn't the near ring (device flights ran 720-910 MB of canvases
             // at a 2.4-2.7 GB footprint vs the ~3.4 GB kill line; this is
@@ -927,7 +944,7 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
             // targets clear to the style background, so the missing alpha
             // channel is never consulted. Near ring stays RGBA8 for
             // gradient fidelity where the camera looks.
-            static const bool drape565 = std::getenv("KLATTRA_DISABLE_DRAPE_565") == nullptr;
+            const bool drape565 = klattraPacked565DrapeEnabled();
             const auto channelType = (drape565 && targetSize < nearSize)
                                          ? gfx::TextureChannelDataType::UnsignedShort565
                                          : gfx::TextureChannelDataType::UnsignedByte;
@@ -1997,22 +2014,38 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
             // Format-aware gauge (.58): near-ring-sized targets are RGBA8
             // (4 B/px), everything smaller is packed 565 (2 B/px) unless
             // the diet is disabled.
-            static const bool gauge565 = std::getenv("KLATTRA_DISABLE_DRAPE_565") == nullptr;
+            const bool gauge565 = klattraPacked565DrapeEnabled();
             static const int32_t gaugeNearSize = klattraEnvTargetSize("KLATTRA_DRAPE_TARGET_SIZE_NEAR",
                                                                       DRAPE_TARGET_SIZE);
+            static const int32_t gaugeMidSize = klattraEnvTargetSize("KLATTRA_DRAPE_TARGET_SIZE_MID", 1024);
             const auto targetBytes = [&](const Size& s) {
                 const uint64_t px = static_cast<uint64_t>(s.width) * s.height;
                 return px * ((gauge565 && static_cast<int32_t>(s.width) < gaugeNearSize) ? 2 : 4);
             };
+            const auto targetTier = [&](const Size& s) {
+                if (static_cast<int32_t>(s.width) >= gaugeNearSize) return 0;
+                if (static_cast<int32_t>(s.width) >= gaugeMidSize) return 1;
+                return 2;
+            };
             uint64_t drapeBytes = 0;
+            std::array<uint32_t, 3> liveTiers{};
+            std::array<uint32_t, 3> retiredTiers{};
             drapeCache.visitAll([&](const OverscaledTileID&, TerrainDrapeTargetPtr& target) {
                 if (!target) return;
                 drapeBytes += targetBytes(target->getSize());
+                ++liveTiers[targetTier(target->getSize())];
             });
             for (const auto& [retiredID, retiredTarget] : retiredDrapeTargetsByTile) {
+                (void)retiredID;
                 if (!retiredTarget) continue;
                 drapeBytes += targetBytes(retiredTarget->getSize());
+                ++retiredTiers[targetTier(retiredTarget->getSize())];
             }
+            // TerrainDrapeCache has defaulted mipmaps off since .61. Only
+            // include the approximate 33% full-chain overhead when its
+            // existing opt-in switch is present.
+            const bool drapeMips = std::getenv("KLATTRA_DRAPE_MIPS") != nullptr;
+            const uint64_t estimatedDrapeBytes = drapeBytes * (drapeMips ? 133 : 100) / 100;
             klattraDumpEmit(
                 "[KLATTRA STAGE] now waitCover=" + std::to_string(waitCover) +
                 " waitTex=" + std::to_string(waitTex) +
@@ -2047,8 +2080,14 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
                 " rasterUnknown=" + std::to_string(boundRasterUnknownBindings) +
                 " unbound=" + std::to_string(unboundBindings) +
                 " allocFail=" + std::to_string(stageAllocFailEvents) +
+                " drape565=" + std::to_string(gauge565) +
+                " drapeMips=" + std::to_string(drapeMips) +
+                " liveTiers=" + std::to_string(liveTiers[0]) + "/" + std::to_string(liveTiers[1]) + "/" +
+                    std::to_string(liveTiers[2]) +
+                " retiredTiers=" + std::to_string(retiredTiers[0]) + "/" +
+                    std::to_string(retiredTiers[1]) + "/" + std::to_string(retiredTiers[2]) +
                 " physMB=" + std::to_string(static_cast<int64_t>(std::lround(klattraPhysFootprintMB()))) +
-                " drapeMB=" + std::to_string(static_cast<int64_t>(drapeBytes * 133 / 100 / 1048576)));
+                " drapeMB=" + std::to_string(static_cast<int64_t>(estimatedDrapeBytes / 1048576)));
             klattraDumpEmit(
                 "[KLATTRA STAGE] lat availMs=" + klattraStagePercentiles(stageAvailMs) +
                 " routeMs=" + klattraStagePercentiles(stageRouteMs) +

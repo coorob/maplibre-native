@@ -13,6 +13,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstddef>
+#include <cstdio>
 #include <cstdlib>
 #include <functional>
 #include <list>
@@ -30,7 +31,7 @@ namespace {
 bool klattraLogCoverSummary() {
     static const bool enabled = [] {
         const char* v = std::getenv("KLATTRA_LOG_COVER_SUMMARY");
-        return v && !(*v == '0' || *v == 'f' || *v == 'F');
+        return !v || !(*v == '0' || *v == 'f' || *v == 'F');
     }();
     return enabled;
 }
@@ -458,14 +459,18 @@ std::vector<OverscaledTileID> tileCover(const TileCoverParameters& state,
                         }
                     }
                 }
-                Log::Warning(Event::Render,
-                             "[KLATTRA COVER] pre=" + std::to_string(ranked.size()) +
-                                 " cap=" + std::to_string(state.tileCoverMaxTiles) +
-                                 " frustumCut=" + std::to_string(frustumCut) +
-                                 " keptByZ=" + klattraZoomHistogramString(keptByZ) +
-                                 " cutByZ=" + klattraZoomHistogramString(cutByZ) +
-                                 " pitchDeg=" + std::to_string(transform.getPitch() * 180.0 / pi) +
-                                 " idealZ=" + std::to_string(static_cast<int>(z)));
+                const std::string message =
+                    "[KLATTRA COVER] pre=" + std::to_string(ranked.size()) +
+                    " cap=" + std::to_string(state.tileCoverMaxTiles) +
+                    " frustumCut=" + std::to_string(frustumCut) +
+                    " keptByZ=" + klattraZoomHistogramString(keptByZ) +
+                    " cutByZ=" + klattraZoomHistogramString(cutByZ) +
+                    " pitchDeg=" + std::to_string(transform.getPitch() * 180.0 / pi) +
+                    " idealZ=" + std::to_string(static_cast<int>(z));
+                Log::Warning(Event::Render, message);
+                if (std::getenv("KLATTRA_TRACE_STDERR") != nullptr) {
+                    std::fprintf(stderr, "[KLATTRA_TRACE] %s\n", message.c_str());
+                }
             }
         }
     }

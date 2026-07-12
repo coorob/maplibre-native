@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <cstddef>
 #include <numbers>
@@ -64,7 +65,7 @@ double klattraEnvTerrainLodPitchDeg() {
 bool klattraLogCoverSummary() {
     static const bool enabled = [] {
         const char* v = std::getenv("KLATTRA_LOG_COVER_SUMMARY");
-        return v && !(*v == '0' || *v == 'f' || *v == 'F');
+        return !v || !(*v == '0' || *v == 'f' || *v == 'F');
     }();
     return enabled;
 }
@@ -240,14 +241,18 @@ void RenderRasterDEMSource::updateInternal(const Tileset& tileset,
                 ++byZ[std::min<std::size_t>(renderedID.canonical.z, byZ.size() - 1)];
                 ++rendered;
             }
-            Log::Warning(Event::Render,
-                         "[KLATTRA DEM] rendered=" + std::to_string(rendered) +
-                             " byZ=" + klattraZoomHistogramString(byZ) +
-                             " zoom=" + std::to_string(parameters.transformState.getZoom()) +
-                             " pitchDeg=" +
-                             std::to_string(parameters.transformState.getPitch() * 180.0 / std::numbers::pi) +
-                             " lodFloor=" + std::to_string(static_cast<int>(demParameters.tileLodMinZoom)) +
-                             " cap=" + std::to_string(demParameters.tileCoverMaxTiles));
+            const std::string message =
+                "[KLATTRA DEM] rendered=" + std::to_string(rendered) +
+                " byZ=" + klattraZoomHistogramString(byZ) +
+                " zoom=" + std::to_string(parameters.transformState.getZoom()) +
+                " pitchDeg=" +
+                std::to_string(parameters.transformState.getPitch() * 180.0 / std::numbers::pi) +
+                " lodFloor=" + std::to_string(static_cast<int>(demParameters.tileLodMinZoom)) +
+                " cap=" + std::to_string(demParameters.tileCoverMaxTiles);
+            Log::Warning(Event::Render, message);
+            if (std::getenv("KLATTRA_TRACE_STDERR") != nullptr) {
+                std::fprintf(stderr, "[KLATTRA_TRACE] %s\n", message.c_str());
+            }
         }
     }
 }
