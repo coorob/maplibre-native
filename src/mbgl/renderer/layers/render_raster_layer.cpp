@@ -83,6 +83,29 @@ bool klattraDrapeGapfillEnabled() {
     return enabled;
 }
 
+// .70: every live drape target keeps one ancestor-or-equal satellite
+// drawable as a full-canvas floor. A logically complete set of sharper child
+// TileIDs can still leave the target's background pixels exposed after GPU
+// transform/clipping; the old gap-fill never ran because the raster group was
+// non-empty. Coarse-first draw priority keeps this floor behind all detail.
+// Kill switch restores the empty-group-only .63/.64 behavior.
+bool klattraDrapeRasterFloorEnabled() {
+    static const bool enabled = std::getenv("KLATTRA_DISABLE_DRAPE_RASTER_FLOOR") == nullptr;
+    return enabled;
+}
+
+bool klattraDrapeHasRasterFloor(TileLayerGroup& group, const OverscaledTileID& drapeID) {
+    bool hasFloor = false;
+    visitLayerGroupDrawables(group, [&](gfx::Drawable& drawable) {
+        const auto& tileID = drawable.getTileID();
+        if (tileID && tileID->wrap == drapeID.wrap && tileID->canonical.z <= drapeID.canonical.z &&
+            LayerTweaker::tilesOverlap(*tileID, drapeID)) {
+            hasFloor = true;
+        }
+    });
+    return hasFloor;
+}
+
 // Device-visible probe emitter (Warning reaches the phone syslog; stderr
 // covers the simulator, which swallows mbgl Log::Warning).
 void klattraGapfillEmit(const std::string& message) {
@@ -760,173 +783,199 @@ void RenderRasterLayer::update(gfx::ShaderRegistry& shaders,
                         }
                     });
             }
-        }
+    }
 
-        // .63 phase 3: raster drape gap-fill (rationale on the helper up
-        // top). Runs AFTER the render-set routing above so canvases the
-        // normal path just filled are already excluded. One-shot per gap:
-        // a filled canvas has a non-empty group next update and drops out.
-        std::size_t probeGapsNow = 0, probeGapFilledNow = 0, probeGapDryNow = 0;
-        if (activeTerrain && !klattraDisableRasterDrape() && klattraDrapeGapfillEnabled() && drapeGapfillSource) {
-            std::vector<std::pair<OverscaledTileID, TerrainDrapeTargetPtr>> gaps;
-            activeTerrain->visitDrapeTargets(
-                [&](const OverscaledTileID& drapeID, TerrainDrapeTargetPtr& drapeTarget) {
-                    if (!drapeTarget) return;
-                    auto* drapeGroup = static_cast<TileLayerGroup*>(drapeTarget->getLayerGroup(layerIndex).get());
-                    if (!drapeGroup || drapeGroup->getDrawableCount() == 0) {
-                        gaps.emplace_back(drapeID, drapeTarget);
+    // .63 phase 3: raster drape gap-fill (rationale on the helper up
+    // top). .70 widens the invariant from "non-empty raster group" to
+    // "one ancestor-or-equal full-canvas floor": sharper children remain
+    // on top, but can no longer expose satellite-background pixels.
+    std::size_t probeGapsNow = 0, probeGapFilledNow = 0, probeGapDryNow = 0;
+    std::size_t probeFloorNeededNow = 0, probeFloorRoutedNow = 0, probeFloorDryNow = 0;
+    if (activeTerrain && !klattraDisableRasterDrape() && klattraDrapeGapfillEnabled() && drapeGapfillSource) {
+        struct CoverageNeed {
+            OverscaledTileID drapeID;
+            TerrainDrapeTargetPtr drapeTarget;
+            bool wasEmpty;
+        };
+        std::vector<CoverageNeed> coverageNeeds;
+        activeTerrain->visitDrapeTargets([&](const OverscaledTileID& drapeID, TerrainDrapeTargetPtr& drapeTarget) {
+            if (!drapeTarget) return;
+            auto* drapeGroup = static_cast<TileLayerGroup*>(drapeTarget->getLayerGroup(layerIndex).get());
+            const bool wasEmpty = !drapeGroup || drapeGroup->getDrawableCount() == 0;
+            const bool floorMissing = !drapeGroup || !klattraDrapeHasRasterFloor(*drapeGroup, drapeID);
+            if (wasEmpty) {
+                ++probeGapsNow;
+            }
+            if (wasEmpty || (klattraDrapeRasterFloorEnabled() && floorMissing)) {
+                coverageNeeds.push_back({drapeID, drapeTarget, wasEmpty});
+                if (floorMissing) {
+                    ++probeFloorNeededNow;
+                }
+            }
+        });
+        if (!coverageNeeds.empty()) {
+            // One pyramid sweep for the whole gap list: every loaded
+            // tile with a usable texture source (uploaded GPU texture
+            // or still-held CPU image — setTextures takes either).
+            std::vector<std::pair<OverscaledTileID, RasterBucket*>> candidates;
+            drapeGapfillSource->visitRasterTileBuckets([&](const OverscaledTileID& tid, RasterBucket& b) {
+                if (!b.hasData() || (!b.image && !b.texture2d)) return;
+                candidates.emplace_back(tid, &b);
+            });
+            // Mirror of the phase-2 emit above, minus the supersede
+            // scan (an empty group has nothing to supersede). Returns
+            // false only on builder/texture failure.
+            const auto emitGapDrawable = [&](const OverscaledTileID& drapeID,
+                                             TerrainDrapeTargetPtr& drapeTarget,
+                                             const OverscaledTileID& tileID,
+                                             RasterBucket& bucket) {
+                auto& tw = drapeLayerTweakers[drapeID];
+                if (!tw) {
+                    tw = std::make_shared<RasterLayerTweaker>(getID() + "-drape", evaluatedProperties, drapeID);
+                }
+                auto* drapeGroup = static_cast<TileLayerGroup*>(drapeTarget->getLayerGroup(layerIndex).get());
+                if (!drapeGroup) {
+                    auto newGroup = context.createTileLayerGroup(
+                        layerIndex, /*initialCapacity=*/4, getID() + "-raster-drape");
+                    if (!newGroup) return false;
+                    newGroup->addLayerTweaker(tw);
+                    drapeTarget->addLayerGroup(newGroup, /*replace=*/false);
+                    drapeGroup = newGroup.get();
+                }
+                auto gapBuilder = createBuilder();
+                if (!gapBuilder) return false;
+                setTextures(gapBuilder, bucket);
+                if (!gapBuilder->getTexture(idRasterImage0Texture) || !gapBuilder->getTexture(idRasterImage1Texture)) {
+                    return false;
+                }
+                buildVertexData(gapBuilder,
+                                /*drawable=*/nullptr,
+                                bucket,
+                                /*freshIndexBuffer=*/true,
+                                /*localVertexBuffers=*/true,
+                                /*fullTileQuad=*/klattraDrapeFullQuad());
+                gapBuilder->flush(context);
+                bool added = false;
+                for (auto& gapDrawable : gapBuilder->clearDrawables()) {
+                    gapDrawable->setTileID(tileID);
+                    gapDrawable->setLayerTweaker(tw);
+                    gapDrawable->setDrawPriority(static_cast<gfx::DrawPriority>(tileID.canonical.z));
+                    drapeGroup->addDrawable(renderPass, tileID, std::move(gapDrawable));
+                    ++stats.drawablesAdded;
+                    ++probeGapFilledNow;
+                    activeTerrain->diagNoteRasterRouted(drapeID, tileID.canonical.z);
+                    // Cumulative fill-resolution histogram: c1 = child
+                    // (sharper than the canvas), eq = exact zoom, aN =
+                    // ancestor N levels coarser (the .63 flight's
+                    // "green mush" = a3+/a4p fills — phone-63 named the
+                    // class but not the resolution; this does).
+                    const int dz = static_cast<int>(drapeID.canonical.z) - static_cast<int>(tileID.canonical.z);
+                    drapeGapfillDzHist[static_cast<std::size_t>(std::clamp(dz + 1, 0, 5))]++;
+                    added = true;
+                }
+                // A few named routes per second: WHERE got WHAT
+                // resolution (complements the dz histogram).
+                if (added && RenderTerrain::stageDiagEnabled()) {
+                    static std::chrono::steady_clock::time_point lastRouteEmit{};
+                    const auto nowR = std::chrono::steady_clock::now();
+                    if (nowR - lastRouteEmit >= std::chrono::seconds(1)) {
+                        lastRouteEmit = nowR;
+                        klattraGapfillEmit("[KLATTRA STAGE] gapfillRoute canvas=" + klattraDrapeIDString(drapeID) +
+                                           " from=" + klattraDrapeIDString(tileID) + " layer=" + getID());
                     }
-                });
-            probeGapsNow = gaps.size();
-            if (!gaps.empty()) {
-                // One pyramid sweep for the whole gap list: every loaded
-                // tile with a usable texture source (uploaded GPU texture
-                // or still-held CPU image — setTextures takes either).
-                std::vector<std::pair<OverscaledTileID, RasterBucket*>> candidates;
-                drapeGapfillSource->visitRasterTileBuckets([&](const OverscaledTileID& tid, RasterBucket& b) {
-                    if (!b.hasData() || (!b.image && !b.texture2d)) return;
-                    candidates.emplace_back(tid, &b);
-                });
-                // Mirror of the phase-2 emit above, minus the supersede
-                // scan (an empty group has nothing to supersede). Returns
-                // false only on builder/texture failure.
-                const auto emitGapDrawable = [&](const OverscaledTileID& drapeID,
-                                                 TerrainDrapeTargetPtr& drapeTarget,
-                                                 const OverscaledTileID& tileID,
-                                                 RasterBucket& bucket) {
-                    auto& tw = drapeLayerTweakers[drapeID];
-                    if (!tw) {
-                        tw = std::make_shared<RasterLayerTweaker>(getID() + "-drape", evaluatedProperties, drapeID);
-                    }
-                    auto* drapeGroup = static_cast<TileLayerGroup*>(drapeTarget->getLayerGroup(layerIndex).get());
-                    if (!drapeGroup) {
-                        auto newGroup = context.createTileLayerGroup(
-                            layerIndex, /*initialCapacity=*/4, getID() + "-raster-drape");
-                        if (!newGroup) return false;
-                        newGroup->addLayerTweaker(tw);
-                        drapeTarget->addLayerGroup(newGroup, /*replace=*/false);
-                        drapeGroup = newGroup.get();
-                    }
-                    auto gapBuilder = createBuilder();
-                    if (!gapBuilder) return false;
-                    setTextures(gapBuilder, bucket);
-                    if (!gapBuilder->getTexture(idRasterImage0Texture) ||
-                        !gapBuilder->getTexture(idRasterImage1Texture)) {
-                        return false;
-                    }
-                    buildVertexData(gapBuilder,
-                                    /*drawable=*/nullptr,
-                                    bucket,
-                                    /*freshIndexBuffer=*/true,
-                                    /*localVertexBuffers=*/true,
-                                    /*fullTileQuad=*/klattraDrapeFullQuad());
-                    gapBuilder->flush(context);
-                    bool added = false;
-                    for (auto& gapDrawable : gapBuilder->clearDrawables()) {
-                        gapDrawable->setTileID(tileID);
-                        gapDrawable->setLayerTweaker(tw);
-                        gapDrawable->setDrawPriority(static_cast<gfx::DrawPriority>(tileID.canonical.z));
-                        drapeGroup->addDrawable(renderPass, tileID, std::move(gapDrawable));
-                        ++stats.drawablesAdded;
-                        ++probeGapFilledNow;
-                        activeTerrain->diagNoteRasterRouted(drapeID, tileID.canonical.z);
-                        // Cumulative fill-resolution histogram: c1 = child
-                        // (sharper than the canvas), eq = exact zoom, aN =
-                        // ancestor N levels coarser (the .63 flight's
-                        // "green mush" = a3+/a4p fills — phone-63 named the
-                        // class but not the resolution; this does).
-                        const int dz = static_cast<int>(drapeID.canonical.z) -
-                                       static_cast<int>(tileID.canonical.z);
-                        drapeGapfillDzHist[static_cast<std::size_t>(std::clamp(dz + 1, 0, 5))]++;
-                        added = true;
-                    }
-                    // A few named routes per second: WHERE got WHAT
-                    // resolution (complements the dz histogram).
-                    if (added && RenderTerrain::stageDiagEnabled()) {
-                        static std::chrono::steady_clock::time_point lastRouteEmit{};
-                        const auto nowR = std::chrono::steady_clock::now();
-                        if (nowR - lastRouteEmit >= std::chrono::seconds(1)) {
-                            lastRouteEmit = nowR;
-                            klattraGapfillEmit("[KLATTRA STAGE] gapfillRoute canvas=" + klattraDrapeIDString(drapeID) +
-                                               " from=" + klattraDrapeIDString(tileID) + " layer=" + getID());
-                        }
-                    }
-                    return added;
-                };
+                }
+                return added;
+            };
 
-                for (auto& [drapeID, drapeTarget] : gaps) {
-                    // Underlay: deepest ancestor-or-equal candidate —
-                    // full-canvas coverage from ONE drawable, no
-                    // partial-fill holes.
-                    RasterBucket* underlayBucket = nullptr;
-                    std::optional<OverscaledTileID> underlayID;
-                    // .64: sharpening children — canvas z+1 tiles (≤4) from
-                    // the reservoir draw OVER the underlay via painter
-                    // order. Behind-camera canvases usually have their
-                    // exact/child tiles in the cache (they rendered moments
-                    // ago), so the .63 coarse-underlay-only fill smeared
-                    // z8–z9 mush over regions whose native imagery was
-                    // sitting right there (Robert's ".63 green" verdict).
-                    std::vector<std::pair<OverscaledTileID, RasterBucket*>> childFills;
-                    for (auto& [tid, candidateBucket] : candidates) {
-                        if (!LayerTweaker::tilesOverlap(tid, drapeID)) continue;
-                        if (tid.canonical.z <= drapeID.canonical.z) {
-                            if (!underlayID || tid.canonical.z > underlayID->canonical.z) {
-                                underlayID = tid;
-                                underlayBucket = candidateBucket;
-                            }
-                        } else if (tid.canonical.z == drapeID.canonical.z + 1u) {
-                            childFills.emplace_back(tid, candidateBucket);
+            for (auto& [drapeID, drapeTarget, wasEmpty] : coverageNeeds) {
+                // Underlay: deepest ancestor-or-equal candidate —
+                // full-canvas coverage from ONE drawable, no
+                // partial-fill holes.
+                RasterBucket* underlayBucket = nullptr;
+                std::optional<OverscaledTileID> underlayID;
+                // .64: sharpening children — canvas z+1 tiles (≤4) from
+                // the reservoir draw OVER the underlay via painter
+                // order. Behind-camera canvases usually have their
+                // exact/child tiles in the cache (they rendered moments
+                // ago), so the .63 coarse-underlay-only fill smeared
+                // z8–z9 mush over regions whose native imagery was
+                // sitting right there (Robert's ".63 green" verdict).
+                std::vector<std::pair<OverscaledTileID, RasterBucket*>> childFills;
+                for (auto& [tid, candidateBucket] : candidates) {
+                    if (tid.wrap != drapeID.wrap) continue;
+                    if (!LayerTweaker::tilesOverlap(tid, drapeID)) continue;
+                    if (tid.canonical.z <= drapeID.canonical.z) {
+                        if (!underlayID || tid.canonical.z > underlayID->canonical.z) {
+                            underlayID = tid;
+                            underlayBucket = candidateBucket;
                         }
+                    } else if (tid.canonical.z == drapeID.canonical.z + 1u) {
+                        childFills.emplace_back(tid, candidateBucket);
                     }
-                    // Without an underlay, a partial child set would leave
-                    // unwritten canvas pixels (per-pixel background — the
-                    // .57 lesson). All four children = full coverage.
-                    const bool childrenCover = childFills.size() >= 4;
-                    if (!underlayBucket && !childrenCover) {
-                        probeGapDryNow++;
+                }
+                // Without an underlay, a partial child set would leave
+                // unwritten canvas pixels (per-pixel background — the
+                // .57 lesson). All four children = logical coverage, but
+                // .70 still requires a floor on non-empty canvases because
+                // the physical device disproved that TileID-only proof.
+                const bool childrenCover = childFills.size() >= 4;
+                if (!underlayBucket) {
+                    ++probeFloorDryNow;
+                    if (wasEmpty && !childrenCover) {
+                        ++probeGapDryNow;
+                    }
+                    if (!wasEmpty || !childrenCover) {
                         continue;
                     }
-                    // The underlay always emits when present — one drawable
-                    // buys guaranteed coverage even if a child emit fails
-                    // (gap-fill is one-shot; a hole quarter would persist).
-                    bool anyRouted = false;
-                    if (underlayBucket && underlayID) {
-                        anyRouted |= emitGapDrawable(drapeID, drapeTarget, *underlayID, *underlayBucket);
+                }
+                // The underlay always emits when present — one drawable
+                // buys guaranteed coverage even if a child emit fails.
+                bool anyRouted = false;
+                if (underlayBucket && underlayID) {
+                    const bool floorRouted = emitGapDrawable(drapeID, drapeTarget, *underlayID, *underlayBucket);
+                    anyRouted |= floorRouted;
+                    if (floorRouted) {
+                        ++probeFloorRoutedNow;
+                    } else {
+                        ++probeFloorDryNow;
                     }
+                }
+                // Existing non-empty groups already contain their sharper
+                // drawables. Empty groups retain the .64 child sharpening.
+                if (wasEmpty) {
                     for (auto& [childID, childBucket] : childFills) {
                         anyRouted |= emitGapDrawable(drapeID, drapeTarget, childID, *childBucket);
                     }
-                    if (!anyRouted) {
-                        probeGapDryNow++;
-                    }
                 }
-            }
-            drapeGapfillFilled += probeGapFilledNow;
-            // 1 Hz device-visible gauge (STAGE family). filled is
-            // cumulative; gaps/dry are this-update gauges — dry stays hot
-            // for canvases with NO loaded candidate anywhere (e.g. a layer
-            // whose tileset never covered the region), so a standing dry
-            // count names the residual population the fix cannot reach.
-            if (RenderTerrain::stageDiagEnabled() && (probeGapsNow || drapeGapfillFilled)) {
-                static std::unordered_map<std::string, std::chrono::steady_clock::time_point> lastEmitByLayer;
-                auto& lastEmit = lastEmitByLayer[getID()];
-                const auto nowG = std::chrono::steady_clock::now();
-                if (nowG - lastEmit >= std::chrono::seconds(1)) {
-                    lastEmit = nowG;
-                    klattraGapfillEmit("[KLATTRA STAGE] gapfill layer=" + getID() +
-                                       " gaps=" + std::to_string(probeGapsNow) +
-                                       " filled=" + std::to_string(drapeGapfillFilled) +
-                                       " dry=" + std::to_string(probeGapDryNow) +
-                                       " dz=c1:" + std::to_string(drapeGapfillDzHist[0]) +
-                                       ",eq:" + std::to_string(drapeGapfillDzHist[1]) +
-                                       ",a1:" + std::to_string(drapeGapfillDzHist[2]) +
-                                       ",a2:" + std::to_string(drapeGapfillDzHist[3]) +
-                                       ",a3:" + std::to_string(drapeGapfillDzHist[4]) +
-                                       ",a4p:" + std::to_string(drapeGapfillDzHist[5]));
+                if (wasEmpty && !anyRouted) {
+                    ++probeGapDryNow;
                 }
             }
         }
+        drapeGapfillFilled += probeGapFilledNow;
+        // 1 Hz device-visible gauge (STAGE family). filled is
+        // cumulative; gaps/dry are this-update gauges — dry stays hot
+        // for canvases with NO loaded candidate anywhere (e.g. a layer
+        // whose tileset never covered the region), so a standing dry
+        // count names the residual population the fix cannot reach.
+        if (RenderTerrain::stageDiagEnabled() &&
+            (probeGapsNow || drapeGapfillFilled || probeFloorNeededNow || probeFloorDryNow)) {
+            static std::unordered_map<std::string, std::chrono::steady_clock::time_point> lastEmitByLayer;
+            auto& lastEmit = lastEmitByLayer[getID()];
+            const auto nowG = std::chrono::steady_clock::now();
+            if (nowG - lastEmit >= std::chrono::seconds(1)) {
+                lastEmit = nowG;
+                klattraGapfillEmit(
+                    "[KLATTRA STAGE] gapfill layer=" + getID() + " gaps=" + std::to_string(probeGapsNow) +
+                    " filled=" + std::to_string(drapeGapfillFilled) + " dry=" + std::to_string(probeGapDryNow) +
+                    " floorNeed=" + std::to_string(probeFloorNeededNow) + " floorRouted=" +
+                    std::to_string(probeFloorRoutedNow) + " floorDry=" + std::to_string(probeFloorDryNow) +
+                    " dz=c1:" + std::to_string(drapeGapfillDzHist[0]) + ",eq:" + std::to_string(drapeGapfillDzHist[1]) +
+                    ",a1:" + std::to_string(drapeGapfillDzHist[2]) + ",a2:" + std::to_string(drapeGapfillDzHist[3]) +
+                    ",a3:" + std::to_string(drapeGapfillDzHist[4]) + ",a4p:" + std::to_string(drapeGapfillDzHist[5]));
+            }
+        }
+    }
 
         // 1 Hz probe summary (stderr — the simulator swallows Log::Warning).
         if (std::getenv("KLATTRA_TRACE_STDERR") != nullptr &&
