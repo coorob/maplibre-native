@@ -27,6 +27,15 @@ using namespace shaders;
 
 namespace {
 
+bool klattra71WriterDiagEnabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("KLATTRA_71_DIAG");
+        const bool defaultDiag = !value || !(*value == '0' || *value == 'f' || *value == 'F');
+        return defaultDiag || std::getenv("KLATTRA_TINT_WRITERS") != nullptr;
+    }();
+    return enabled;
+}
+
 bool klattraLogTerrainFinal() {
     static const bool enabled = std::getenv("KLATTRA_LOG_TERRAIN_FINAL") != nullptr;
     return enabled;
@@ -172,10 +181,11 @@ void TerrainLayerTweaker::execute(LayerGroupBase& layerGroup, const PaintParamet
     const float hazeInvRange = 1.0f / std::max(hazeEndW - hazeStartW, 1.0f);
     Color fallback = terrain ? terrain->getDrapeFallbackColor()
                              : Color{0.95686275f, 0.91764706f, 0.81568627f, 1.0f};
-    // .60 tint (opt-in since .61): cyan no-valid-drape-pixel attribution —
-    // THE verdict tint: the week-long green patches were this branch,
-    // sampling empty deep mip levels at far-field minification.
-    if (std::getenv("KLATTRA_TINT_WRITERS") != nullptr) {
+    // .71 diagnostic: the final terrain shader's no-valid-drape-pixel
+    // fallback is cyan. This repeats the writer attribution after .70 fixed
+    // startup floor availability but left deterministic mid/far surfaces.
+    // KLATTRA_71_DIAG=0 restores normal colours; the legacy opt-in remains.
+    if (klattra71WriterDiagEnabled()) {
         fallback = Color{0.0f, 1.0f, 1.0f, 1.0f};
     }
 
