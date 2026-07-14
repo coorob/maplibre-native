@@ -344,8 +344,15 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
         return static_cast<uint32_t>((parsed > 0 && parsed < 100000) ? parsed : 90);
     }();
 
+    // GeoJSON sources are local and immediately renderable. Extending their
+    // previous cover provides no loading bridge, while terrain-draped line
+    // layers cannot use the main-pass stencil masks that normally de-duplicate
+    // retained parent/child tiles. Keep standard holdForFade handling below,
+    // but reserve the custom long-lived cover hold for network-backed sources.
+    const bool coverHoldEnabledForSource = !coverHoldDisabled && type != SourceType::GeoJSON;
+
     ++coverHoldUpdateIndex;
-    if (!coverHoldDisabled) {
+    if (coverHoldEnabledForSource) {
         for (const auto& idealTile : idealTiles) {
             recentIdealTiles[idealTile.toUnwrapped()] = coverHoldUpdateIndex;
         }
@@ -373,7 +380,7 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
             addRenderTile(previouslyRenderedTile.first, tile);
             continue;
         }
-        if (coverHoldDisabled || needsRelayout) {
+        if (!coverHoldEnabledForSource || needsRelayout) {
             continue;
         }
         if (!tile.isRenderable()) {
