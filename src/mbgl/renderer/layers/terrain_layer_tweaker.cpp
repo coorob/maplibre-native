@@ -150,21 +150,22 @@ void TerrainLayerTweaker::execute(LayerGroupBase& layerGroup, const PaintParamet
     const float debugColorMode = klattraTerrainDebugColorMode();
     const float debugVertexMode = klattraTerrainDebugVertexMode();
 
-    // .50 horizon haze: knobs in kilometres, converted per frame to the
-    // clip-w units the shader sees (clip w = view distance in world-pixel
-    // units, so km / metersPerPixel at the current latitude+zoom).
+    // .77 horizon clarity: keep a faint far-horizon blend, but do not wash
+    // out the route and terrain at normal flyover distances. The accepted
+    // .50 defaults (12-34 km at 0.85 alpha) produced a strong cyan veil when
+    // zoomed out. Knobs remain environment-overridable for controlled A/Bs.
     static const double hazeStartKm = [] {
         const char* v = std::getenv("KLATTRA_HAZE_START_KM");
-        return v ? std::atof(v) : 12.0;
+        return v ? std::atof(v) : 32.0;
     }();
     static const double hazeEndKm = [] {
         const char* v = std::getenv("KLATTRA_HAZE_END_KM");
-        return v ? std::atof(v) : 34.0;
+        return v ? std::atof(v) : 80.0;
     }();
     static const float hazeAlpha = [] {
         if (std::getenv("KLATTRA_DISABLE_HAZE") != nullptr) return 0.0f;
         const char* v = std::getenv("KLATTRA_HAZE_ALPHA");
-        return v ? static_cast<float>(std::atof(v)) : 0.85f;
+        return v ? static_cast<float>(std::atof(v)) : 0.22f;
     }();
     const double metersPerPixel = Projection::getMetersPerPixelAtLatitude(
         parameters.state.getLatLng().latitude(), parameters.state.getZoom());
