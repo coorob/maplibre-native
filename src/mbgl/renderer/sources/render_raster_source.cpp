@@ -1,4 +1,5 @@
 #include <mbgl/renderer/sources/render_raster_source.hpp>
+#include <mbgl/renderer/sources/klattra_terrain_cover.hpp>
 #include <mbgl/renderer/render_tile.hpp>
 #include <mbgl/tile/raster_tile.hpp>
 #include <mbgl/algorithm/update_tile_masks.hpp>
@@ -77,14 +78,10 @@ void RenderRasterSource::updateInternal(const Tileset& tileset,
         rasterParameters.tileCoverMinElevationMeters = -6000.0;
         rasterParameters.tileCoverMaxElevationMeters = 8000.0;
 
-        const char* mt = std::getenv("KLATTRA_TERRAIN_MAX_RENDER_TILES");
-        std::size_t maxTiles = 112;
-        if (mt && *mt) {
-            char* end = nullptr;
-            const unsigned long parsed = std::strtoul(mt, &end, 10);
-            if (end != mt) maxTiles = static_cast<std::size_t>(std::clamp<unsigned long>(parsed, 0, 256));
-        }
-        rasterParameters.tileCoverMaxTiles = maxTiles;
+        // Match the DEM cover exactly: any mesh emitted beyond the imagery
+        // budget would expose the style background through that terrain.
+        rasterParameters.tileCoverMaxTiles =
+            klattraTerrainRenderTileCap(parameters.transformState.getSize());
 
         const double rasterZoom = util::clamp<double>(parameters.transformState.getZoom() + parameters.tileLodZoomShift,
                                                       parameters.transformState.getMinZoom(),

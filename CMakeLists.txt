@@ -633,6 +633,7 @@ list(APPEND SRC_FILES
     ${PROJECT_SOURCE_DIR}/src/mbgl/renderer/renderer_impl.cpp
     ${PROJECT_SOURCE_DIR}/src/mbgl/renderer/renderer_impl.hpp
     ${PROJECT_SOURCE_DIR}/src/mbgl/renderer/renderer_state.cpp
+    ${PROJECT_SOURCE_DIR}/src/mbgl/renderer/sources/klattra_terrain_cover.hpp
     ${PROJECT_SOURCE_DIR}/src/mbgl/renderer/sources/render_custom_geometry_source.cpp
     ${PROJECT_SOURCE_DIR}/src/mbgl/renderer/sources/render_custom_geometry_source.hpp
     ${PROJECT_SOURCE_DIR}/src/mbgl/renderer/sources/render_geojson_source.cpp

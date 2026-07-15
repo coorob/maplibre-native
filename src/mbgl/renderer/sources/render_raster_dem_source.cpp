@@ -1,4 +1,5 @@
 #include <mbgl/renderer/sources/render_raster_dem_source.hpp>
+#include <mbgl/renderer/sources/klattra_terrain_cover.hpp>
 #include <mbgl/renderer/render_tile.hpp>
 #include <mbgl/tile/raster_dem_tile.hpp>
 #include <mbgl/algorithm/update_tile_masks.hpp>
@@ -22,24 +23,6 @@ namespace mbgl {
 using namespace style;
 
 namespace {
-
-std::size_t klattraEnvMaxTerrainRenderTiles() {
-    // Default 112 (was 72): with the DEM LOD pitch gate lowered to 40° the
-    // far field emits ~30-40 extra coarse rows; 72 truncated them back off
-    // and re-opened the horizon hole the gate change closes. The cut ranks
-    // by zoom-normalized distance (tile_cover.cpp), so a too-small cap
-    // always drops the farthest tiles first.
-    const char* value = std::getenv("KLATTRA_TERRAIN_MAX_RENDER_TILES");
-    if (!value || !*value) {
-        return 112;
-    }
-    char* end = nullptr;
-    const unsigned long parsed = std::strtoul(value, &end, 10);
-    if (end == value) {
-        return 112;
-    }
-    return static_cast<std::size_t>(std::clamp<unsigned long>(parsed, 0, 256));
-}
 
 double klattraEnvTerrainLodPitchDeg() {
     // The stock 60° variable-zoom gate sits INSIDE the trail-preview pitch
@@ -156,11 +139,14 @@ void RenderRasterDEMSource::updateInternal(const Tileset& tileset,
     demParameters.tileCoverMinElevationMeters = -6000.0;
     demParameters.tileCoverMaxElevationMeters = 8000.0;
     // Keep the depth-read background fix from exposing an unbounded pitched
-    // terrain horizon. The env override is read once per source update so
-    // device runs can A/B caps without rebuilding:
+    // terrain horizon. Compact viewports retain the phone-accepted 112-tile
+    // budget; tablet viewports scale to a bounded 384-tile budget that covers
+    // the measured 322-tile wide iPad frustum.
+    // The env override remains available for controlled A/Bs:
     //   KLATTRA_TERRAIN_MAX_RENDER_TILES=0   full cover
-    //   KLATTRA_TERRAIN_MAX_RENDER_TILES=72  default bounded cover
-    demParameters.tileCoverMaxTiles = klattraEnvMaxTerrainRenderTiles();
+    //   KLATTRA_TERRAIN_MAX_RENDER_TILES=112 force phone budget
+    demParameters.tileCoverMaxTiles =
+        klattraTerrainRenderTileCap(parameters.transformState.getSize());
 
     // Hard floor on the variable-zoom cover: never emit tiles more than 2
     // zoom levels below the camera's ideal zoom for this source. At ideal
@@ -247,6 +233,8 @@ void RenderRasterDEMSource::updateInternal(const Tileset& tileset,
                 " zoom=" + std::to_string(parameters.transformState.getZoom()) +
                 " pitchDeg=" +
                 std::to_string(parameters.transformState.getPitch() * 180.0 / std::numbers::pi) +
+                " viewport=" + std::to_string(parameters.transformState.getSize().width) + "x" +
+                std::to_string(parameters.transformState.getSize().height) +
                 " lodFloor=" + std::to_string(static_cast<int>(demParameters.tileLodMinZoom)) +
                 " cap=" + std::to_string(demParameters.tileCoverMaxTiles);
             Log::Warning(Event::Render, message);

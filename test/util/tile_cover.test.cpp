@@ -1,4 +1,5 @@
 #include <mbgl/util/tile_cover.hpp>
+#include <mbgl/renderer/sources/klattra_terrain_cover.hpp>
 #include <mbgl/util/geo.hpp>
 #include <mbgl/util/tile_coordinate.hpp>
 #include <mbgl/map/transform.hpp>
@@ -14,6 +15,16 @@
 using namespace mbgl;
 
 const Range<uint8_t> zoomRange(0, 14);
+
+TEST(TileCover, KlattraTerrainRenderCapScalesOnlyForLargeViewports) {
+    EXPECT_EQ(std::size_t{112}, klattraDefaultTerrainRenderTileCap({430, 932}));
+    EXPECT_EQ(std::size_t{112}, klattraDefaultTerrainRenderTileCap({932, 430}));
+    EXPECT_EQ(std::size_t{112}, klattraDefaultTerrainRenderTileCap({500, 1200}));
+    EXPECT_EQ(std::size_t{213}, klattraDefaultTerrainRenderTileCap({600, 1024}));
+    EXPECT_EQ(std::size_t{360}, klattraDefaultTerrainRenderTileCap({744, 1133}));
+    EXPECT_EQ(std::size_t{384}, klattraDefaultTerrainRenderTileCap({1024, 1366}));
+    EXPECT_EQ(std::size_t{384}, klattraDefaultTerrainRenderTileCap({1366, 1024}));
+}
 
 TEST(TileCover, Empty) {
     EXPECT_EQ((std::vector<UnwrappedTileID>{}), util::tileCover(LatLngBounds::empty(), 0));
@@ -627,7 +638,7 @@ TEST(TileCover, PitchedElevationDilationStaysInGrid) {
     params.tileCoverMinElevationMeters = -6000.0;
     params.tileCoverMaxElevationMeters = 8000.0;
 
-    const auto cover = util::tileCover(params, 8);
+    const auto cover = util::tileCover(params, 8, zoomRange);
     ASSERT_FALSE(cover.empty());
     std::size_t lowZ = 0;
     for (const auto& id : cover) {
@@ -676,9 +687,9 @@ TEST(TileCover, MaxTilesKeepsNearestInZoomConsistentUnits) {
     params.tileLodScale = 4.0;
     const uint8_t idealZ = 8;
 
-    const auto uncapped = util::tileCover(params, idealZ);
+    const auto uncapped = util::tileCover(params, idealZ, zoomRange);
     params.tileCoverMaxTiles = 8;
-    const auto capped = util::tileCover(params, idealZ);
+    const auto capped = util::tileCover(params, idealZ, zoomRange);
 
     ASSERT_GT(uncapped.size(), params.tileCoverMaxTiles);
     ASSERT_EQ(capped.size(), params.tileCoverMaxTiles);
@@ -714,9 +725,9 @@ TEST(TileCover, MaxTilesWithDilationKeepsLookAtTile) {
     params.tileCoverMaxElevationMeters = 8000.0;
     const uint8_t idealZ = 8;
 
-    const auto uncapped = util::tileCover(params, idealZ);
+    const auto uncapped = util::tileCover(params, idealZ, zoomRange);
     params.tileCoverMaxTiles = 24;
-    const auto capped = util::tileCover(params, idealZ);
+    const auto capped = util::tileCover(params, idealZ, zoomRange);
 
     ASSERT_GT(uncapped.size(), capped.size());
     ASSERT_EQ(capped.size(), params.tileCoverMaxTiles);

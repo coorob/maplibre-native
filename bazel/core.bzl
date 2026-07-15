@@ -288,6 +288,7 @@ MLN_CORE_SOURCE = [
     "src/mbgl/renderer/renderer_impl.cpp",
     "src/mbgl/renderer/renderer_impl.hpp",
     "src/mbgl/renderer/renderer_state.cpp",
+    "src/mbgl/renderer/sources/klattra_terrain_cover.hpp",
     "src/mbgl/renderer/sources/render_custom_geometry_source.cpp",
     "src/mbgl/renderer/sources/render_custom_geometry_source.hpp",
     "src/mbgl/renderer/sources/render_geojson_source.cpp",
