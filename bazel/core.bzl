@@ -309,6 +309,7 @@ MLN_CORE_SOURCE = [
     "src/mbgl/renderer/style_diff.hpp",
     "src/mbgl/renderer/tile_mask.hpp",
     "src/mbgl/renderer/tile_parameters.hpp",
+    "src/mbgl/renderer/cover_hold_budget.hpp",
     "src/mbgl/renderer/tile_pyramid.cpp",
     "src/mbgl/renderer/tile_pyramid.hpp",
     "src/mbgl/renderer/tile_render_data.cpp",

@@ -1,4 +1,5 @@
 #include <mbgl/renderer/tile_pyramid.hpp>
+#include <mbgl/renderer/cover_hold_budget.hpp>
 #include <mbgl/renderer/paint_parameters.hpp>
 #include <mbgl/renderer/render_source.hpp>
 #include <mbgl/renderer/tile_parameters.hpp>
@@ -351,7 +352,15 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
     // but reserve the custom long-lived cover hold for network-backed sources.
     const bool coverHoldEnabledForSource = !coverHoldDisabled && type != SourceType::GeoJSON;
 
+    const bool boundedRasterDEMCoverHold = coverHoldEnabledForSource && type == SourceType::RasterDEM;
+    const std::size_t coverHoldBudget = boundedRasterDEMCoverHold
+                                            ? cover_hold::rasterDEMCoverHoldBudget(parameters.tileCoverMaxTiles)
+                                            : 0;
+    const std::size_t recentIdealCap = boundedRasterDEMCoverHold ? cover_hold::recentIdealBudget(coverHoldBudget) : 0;
+
     ++coverHoldUpdateIndex;
+    std::size_t recentIdealExpired = 0;
+    std::size_t recentIdealEvicted = 0;
     if (coverHoldEnabledForSource) {
         for (const auto& idealTile : idealTiles) {
             recentIdealTiles[idealTile.toUnwrapped()] = coverHoldUpdateIndex;
@@ -359,17 +368,26 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
         for (auto it = recentIdealTiles.begin(); it != recentIdealTiles.end();) {
             if (coverHoldUpdateIndex - it->second > coverHoldWindow) {
                 it = recentIdealTiles.erase(it);
+                ++recentIdealExpired;
             } else {
                 ++it;
             }
         }
+        if (boundedRasterDEMCoverHold) {
+            recentIdealEvicted = cover_hold::boundRecentIdealTiles(
+                recentIdealTiles, coverHoldUpdateIndex, recentIdealCap);
+        }
     }
 
     std::size_t coverHeld = 0;
+    std::size_t coverEligible = 0;
+    std::size_t coverBudgetEvicted = 0;
+    std::size_t fadeHeld = 0;
     std::size_t coverRejectedAge = 0, coverRejectedNotRenderable = 0, coverRetiredCovered = 0;
     std::size_t coverExpiredOffscreen = 0;
     const std::size_t coverRejectedRelayout = needsRelayout ? previouslyRenderedTiles.size() : 0;
     std::map<UnwrappedTileID, uint16_t> nextCoverHoldAges;
+    std::vector<cover_hold::Candidate> boundedCandidates;
     for (auto previouslyRenderedTile : previouslyRenderedTiles) {
         Tile& tile = previouslyRenderedTile.second;
         tile.markRenderedPreviously();
@@ -378,6 +396,7 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
             // Don't mark the tile "Required" to avoid triggering a new network request
             retainTileFn(tile, TileNecessity::Optional);
             addRenderTile(previouslyRenderedTile.first, tile);
+            ++fadeHeld;
             continue;
         }
         if (!coverHoldEnabledForSource || needsRelayout) {
@@ -409,15 +428,8 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
             ++coverRetiredCovered;
             continue;
         }
-        bool inRecentViewport = false;
-        for (const auto& recentIdeal : recentIdealTiles) {
-            const UnwrappedTileID& idealID = recentIdeal.first;
-            if (idealID == previousID || idealID.isChildOf(previousID) || previousID.isChildOf(idealID)) {
-                inRecentViewport = true;
-                break;
-            }
-        }
-        if (!inRecentViewport) {
+        const auto overlapAge = cover_hold::newestOverlapAge(previousID, recentIdealTiles, coverHoldUpdateIndex);
+        if (!overlapAge) {
             ++coverExpiredOffscreen;
             continue;
         }
@@ -427,10 +439,30 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
             ++coverRejectedAge;
             continue;
         }
+        ++coverEligible;
+        if (boundedRasterDEMCoverHold) {
+            boundedCandidates.push_back({previousID, age, *overlapAge});
+            continue;
+        }
         nextCoverHoldAges[previousID] = static_cast<uint16_t>(age + 1);
         retainTileFn(tile, TileNecessity::Optional);
         addRenderTile(previousID, tile);
         ++coverHeld;
+    }
+
+    if (boundedRasterDEMCoverHold) {
+        const auto selected = cover_hold::selectCandidates(std::move(boundedCandidates), coverHoldBudget);
+        coverBudgetEvicted = coverEligible - selected.size();
+        for (const auto& candidate : selected) {
+            const auto previousIt = previouslyRenderedTiles.find(candidate.id);
+            assert(previousIt != previouslyRenderedTiles.end());
+            Tile& tile = previousIt->second;
+            nextCoverHoldAges[candidate.id] = static_cast<uint16_t>(candidate.holdAge + 1);
+            retainTileFn(tile, TileNecessity::Optional);
+            addRenderTile(candidate.id, tile);
+            ++coverHeld;
+        }
+        assert(coverHeld <= coverHoldBudget);
     }
     coverHoldAges = std::move(nextCoverHoldAges);
 
@@ -460,26 +492,37 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
             const bool heartbeat = coverHeld > 0 || type == SourceType::RasterDEM;
             if (changed || (heartbeat && now - st.lastLog >= std::chrono::seconds(1))) {
                 st.lastLog = now;
-                Log::Warning(Event::Render,
-                             "[KLATTRA COVERHOLD] source=" + sourceImpl.id +
-                                 " ideal=" + std::to_string(idealTiles.size()) +
-                                 " rendered=" + std::to_string(renderedTiles.size()) +
-                                 " held=" + std::to_string(coverHeld) +
-                                 " retired=" + std::to_string(coverRetiredCovered) +
-                                 " aged=" + std::to_string(coverRejectedAge) +
-                                 " expiredOff=" + std::to_string(coverExpiredOffscreen) +
-                                 " notRenderable=" + std::to_string(coverRejectedNotRenderable) +
-                                 " relayout=" + std::to_string(coverRejectedRelayout));
+                Log::Warning(
+                    Event::Render,
+                    "[KLATTRA COVERHOLD] source=" + sourceImpl.id + " ideal=" + std::to_string(idealTiles.size()) +
+                        " rendered=" + std::to_string(renderedTiles.size()) + " held=" + std::to_string(coverHeld) +
+                        " eligible=" + std::to_string(coverEligible) + " budget=" + std::to_string(coverHoldBudget) +
+                        " budgetEvicted=" + std::to_string(coverBudgetEvicted) + " fadeHeld=" +
+                        std::to_string(fadeHeld) + " recentIdeal=" + std::to_string(recentIdealTiles.size()) +
+                        " recentExpired=" + std::to_string(recentIdealExpired) + " recentEvicted=" +
+                        std::to_string(recentIdealEvicted) + " retired=" + std::to_string(coverRetiredCovered) +
+                        " aged=" + std::to_string(coverRejectedAge) +
+                        " expiredOff=" + std::to_string(coverExpiredOffscreen) +
+                        " notRenderable=" + std::to_string(coverRejectedNotRenderable) +
+                        " relayout=" + std::to_string(coverRejectedRelayout));
                 static const bool traceStderr = std::getenv("KLATTRA_TRACE_STDERR") != nullptr;
                 if (traceStderr) {
                     fprintf(stderr,
                             "[KLATTRA_TRACE] [KLATTRA COVERHOLD] source=%s ideal=%zu rendered=%zu "
-                            "held=%zu retired=%zu aged=%zu "
+                            "held=%zu eligible=%zu budget=%zu budgetEvicted=%zu fadeHeld=%zu "
+                            "recentIdeal=%zu recentExpired=%zu recentEvicted=%zu retired=%zu aged=%zu "
                             "expiredOff=%zu notRenderable=%zu relayout=%zu\n",
                             sourceImpl.id.c_str(),
                             idealTiles.size(),
                             renderedTiles.size(),
                             coverHeld,
+                            coverEligible,
+                            coverHoldBudget,
+                            coverBudgetEvicted,
+                            fadeHeld,
+                            recentIdealTiles.size(),
+                            recentIdealExpired,
+                            recentIdealEvicted,
                             coverRetiredCovered,
                             coverRejectedAge,
                             coverExpiredOffscreen,
