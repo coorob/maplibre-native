@@ -1,0 +1,44 @@
+name: Traska iOS renderer candidate
+
+on:
+  push:
+    branches:
+      - codex/rasterdem-retention-bound
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v4
+        with:
+          submodules: recursive
+
+      - name: Compile C++ policy tests
+        run: >-
+          bazel build //test:tests
+          '--copt=-Wno-error=#warnings'
+          --copt=-Wno-error=switch
+
+      - name: Build canonical optimized Metal XCFramework
+        run: bazel build -c opt //platform/ios:MapLibre.dynamic --//:renderer=metal
+
+      - name: Record artifact hashes
+        run: |
+          zip_path=bazel-bin/platform/ios/MapLibre.dynamic.xcframework.zip
+          shasum -a 256 "$zip_path" | tee MapLibre.xcframework.sha256
+          swift package compute-checksum "$zip_path" | tee MapLibre.swiftpm-checksum
+
+      - name: Upload candidate
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: MapLibre-rasterdem-retention-candidate
+          retention-days: 7
+          if-no-files-found: error
+          path: |
+            bazel-bin/platform/ios/MapLibre.dynamic.xcframework.zip
+            MapLibre.xcframework.sha256
+            MapLibre.swiftpm-checksum
