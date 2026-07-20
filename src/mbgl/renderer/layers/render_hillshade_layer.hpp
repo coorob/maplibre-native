@@ -81,6 +81,13 @@ private:
     // entry per overlapping DEM drape RenderTarget, each rebinding the
     // hillshade quad's matrix into that target's space.
     std::unordered_map<OverscaledTileID, HillshadeLayerTweakerPtr> drapeLayerTweakers;
+
+    // Last TileMask routed for each hillshade source tile. RasterDEM cover
+    // changes can reuse the same bucket while replacing its parent/child
+    // mask geometry; drape drawables must be rebuilt when that happens or
+    // stale parent and child shade footprints overlap and double-darken the
+    // terrain during small camera/zoom movements.
+    std::unordered_map<OverscaledTileID, TileMask> drapeTileMasks;
 };
 
 } // namespace mbgl

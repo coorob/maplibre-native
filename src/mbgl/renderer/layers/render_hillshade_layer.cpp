@@ -266,6 +266,13 @@ void RenderHillshadeLayer::update(gfx::ShaderRegistry& shaders,
             ++it;
         }
     }
+    for (auto it = drapeTileMasks.begin(); it != drapeTileMasks.end();) {
+        if (!hasRenderTile(it->first)) {
+            it = drapeTileMasks.erase(it);
+        } else {
+            ++it;
+        }
+    }
 
     // When terrain is active, drop main-pass hillshade drawables for tiles
     // with DEM coverage — they would render at z=0 and bleed past the
@@ -386,6 +393,46 @@ void RenderHillshadeLayer::update(gfx::ShaderRegistry& shaders,
         }
 
         auto& bucket = static_cast<HillshadeBucket&>(*bucket_);
+
+        // RasterDEMTile::setMask can change a HillshadeBucket's geometry
+        // without changing the bucket identity. The main-pass path updates
+        // that geometry, but terrain drape drawables used to hit the
+        // getDrawableCount guard below and retain their old footprint. During
+        // cover transitions that leaves stale parents painted under current
+        // children, so translucent hillshade is applied twice and appears to
+        // flash darker/lighter as the camera moves. Invalidate only this
+        // source tile's drape copies when its disjoint TileMask changes; the
+        // normal routing below recreates them with the current geometry in
+        // the same update.
+        bool drapeMaskChanged = false;
+        if (activeTerrain) {
+            const auto maskIt = drapeTileMasks.find(tileID);
+            if (maskIt == drapeTileMasks.end()) {
+                drapeTileMasks.emplace(tileID, bucket.mask);
+            } else if (maskIt->second != bucket.mask) {
+                maskIt->second = bucket.mask;
+                drapeMaskChanged = true;
+            }
+        }
+        if (drapeMaskChanged) {
+            std::size_t removedForMaskChange = 0;
+            activeTerrain->visitDrapeTargets(
+                [&](const OverscaledTileID&, TerrainDrapeTargetPtr& drapeTarget) {
+                    if (!drapeTarget) return;
+                    if (auto* drapeGroup = static_cast<TileLayerGroup*>(
+                            drapeTarget->getLayerGroup(layerIndex).get())) {
+                        removedForMaskChange += drapeGroup->removeDrawables(renderPass, tileID).size();
+                    }
+                });
+            stats.drawablesRemoved += removedForMaskChange;
+            if (removedForMaskChange && klattraLogDrapeStale()) {
+                Log::Info(Event::Render,
+                          "[Klättra DRAPE_STALE] layer=" + getID() +
+                              " kind=hillshade-mask-resync tile=" + klattraDrapeIDString(tileID) +
+                              " removed=" + std::to_string(removedForMaskChange) +
+                              " mask-cells=" + std::to_string(bucket.mask.size()));
+            }
+        }
 
         const auto prevBucketID = getRenderTileBucketID(tileID);
         if (prevBucketID != util::SimpleIdentity::Empty && prevBucketID != bucket.getID()) {
@@ -606,6 +653,11 @@ void RenderHillshadeLayer::update(gfx::ShaderRegistry& shaders,
                     for (auto& drapeDrawable : drapeBuilder->clearDrawables()) {
                         drapeDrawable->setTileID(tileID);
                         drapeDrawable->setLayerTweaker(tw);
+                        // Parent and child masks should be disjoint. Keep a
+                        // deterministic fallback order at their shared edges:
+                        // coarse coverage first, finer relief last, matching
+                        // the raster terrain-drape path.
+                        drapeDrawable->setDrawPriority(static_cast<gfx::DrawPriority>(tileID.canonical.z));
                         drapeGroup->addDrawable(renderPass, tileID, std::move(drapeDrawable));
                         ++stats.drawablesAdded;
                     }
