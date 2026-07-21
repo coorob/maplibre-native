@@ -536,19 +536,25 @@ void RenderHillshadeLayer::update(gfx::ShaderRegistry& shaders,
 
         // Phase 2 drape routing: emit a copy of this hillshade tile's prepared
         // colour quad into each overlapping DEM drape RenderTarget so the
-        // terrain mesh can sample hillshade as it displaces. Runs every frame
-        // (guarded by getDrawableCount) so a newly-allocated drape target
-        // picks up its drawable even when the source tile drawable below is
-        // updated in place. Done before the updateTile call because the
-        // updateExisting lambda may std::move(indices).
-        if (activeTerrain && bucket.renderTarget &&
-            !bucket.renderTarget->hasCompletedRender() &&
-            klattraLogDrapeStale()) {
+        // terrain mesh can sample hillshade as it displaces. A bucket re-parse
+        // replaces its prepare target before the new bake completes. The 2D
+        // path below already keeps the previous completed bake bound during
+        // that window; terrain drape used to remove the old drawable and skip
+        // routing altogether, producing a one-frame hillshade-off/on light
+        // jump. Route the same carried (or flat-neutral) fallback immediately,
+        // then update the existing drawable's texture when the fresh bake is
+        // ready. Done before updateTile because its lambda may move indices.
+        const bool currentBakePrepared = bucket.renderTarget && bucket.renderTarget->hasCompletedRender();
+        const gfx::Texture2DPtr drapeBakeTexture = currentBakePrepared
+                                                       ? bucket.renderTarget->getTexture()
+                                                       : unbakedFallback;
+        if (activeTerrain && !currentBakePrepared && drapeBakeTexture && klattraLogDrapeStale()) {
             Log::Info(Event::Render,
                       "[Klättra DRAPE_STALE] layer=" + getID() +
-                          " kind=hillshade-source-not-ready tile=" + klattraDrapeIDString(tileID) +
-                          " target=" + bucket.renderTarget->getDebugName() +
-                          " action=skip-drape-route");
+                          " kind=hillshade-drape-bake-carry tile=" + klattraDrapeIDString(tileID) +
+                          " fallback=" +
+                              std::string(drapeBakeTexture == neutralPrepareTexture ? "neutral" : "carried") +
+                          " action=route-fallback");
         }
         if (activeTerrain && klattraDisableHillshadeDrape()) {
             if (klattraLogDrapeStale()) {
@@ -556,7 +562,7 @@ void RenderHillshadeLayer::update(gfx::ShaderRegistry& shaders,
                           "[Klättra DRAPE_STALE] layer=" + getID() +
                               " kind=hillshade-drape-disabled tile=" + klattraDrapeIDString(tileID));
             }
-        } else if (activeTerrain && bucket.renderTarget && bucket.renderTarget->hasCompletedRender()) {
+        } else if (activeTerrain && drapeBakeTexture) {
             activeTerrain->visitDrapeTargets(
                 [&](const OverscaledTileID& drapeID, TerrainDrapeTargetPtr& drapeTarget) {
                     if (!drapeTarget || !LayerTweaker::tilesOverlap(tileID, drapeID)) return;
@@ -587,7 +593,15 @@ void RenderHillshadeLayer::update(gfx::ShaderRegistry& shaders,
                         drapeGroup = newGroup.get();
                     }
 
-                    if (drapeGroup->getDrawableCount(renderPass, tileID) > 0) return;
+                    // The group survives prepare-target replacement. Refresh
+                    // its binding every frame so the carried texture swaps to
+                    // the completed bake atomically instead of leaving a stale
+                    // texture or opening a contentless drape frame.
+                    if (drapeGroup->visitDrawables(renderPass, tileID, [&](gfx::Drawable& drawable) {
+                            drawable.setTexture(drapeBakeTexture, idHillshadeImageTexture);
+                        }) > 0) {
+                        return;
+                    }
 
                     auto drapeBuilder = context.createDrawableBuilder("hillshade-drape");
                     if (!drapeBuilder) return;
@@ -600,7 +614,7 @@ void RenderHillshadeLayer::update(gfx::ShaderRegistry& shaders,
                     drapeBuilder->setRawVertices({}, vertices->elements(), gfx::AttributeDataType::Short2);
                     drapeBuilder->setSegments(
                         gfx::Triangles(), indices->vector(), segments->data(), segments->size());
-                    drapeBuilder->setTexture(bucket.renderTarget->getTexture(), idHillshadeImageTexture);
+                    drapeBuilder->setTexture(drapeBakeTexture, idHillshadeImageTexture);
                     drapeBuilder->flush(context);
 
                     for (auto& drapeDrawable : drapeBuilder->clearDrawables()) {
