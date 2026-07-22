@@ -136,8 +136,17 @@ void RenderRasterDEMSource::updateInternal(const Tileset& tileset,
     // min/max. Until Native has per-tile min/max here, use a conservative
     // Sweden-safe elevation envelope so cover errs on the side of drawing a
     // connecting mesh.
-    demParameters.tileCoverMinElevationMeters = -6000.0;
-    demParameters.tileCoverMaxElevationMeters = 8000.0;
+    //
+    // This envelope is terrain-only. tileCover expands every selected tile by
+    // a four-tile safety radius whenever the envelope is non-zero. Applying it
+    // to a flat hillshade/color-relief source turned the 390x844 iPhone cover
+    // from a handful of on-screen tiles into 90-112 ideal DEM tiles at 0deg
+    // pitch, then allowed another 112 transition tiles to be retained. Flat
+    // visual layers are drawn on z=0 and need the ordinary frustum cover.
+    if (parameters.usedByTerrain) {
+        demParameters.tileCoverMinElevationMeters = -6000.0;
+        demParameters.tileCoverMaxElevationMeters = 8000.0;
+    }
     // Keep the depth-read background fix from exposing an unbounded pitched
     // terrain horizon. Compact viewports retain the phone-accepted 112-tile
     // budget; tablet viewports scale to a bounded 384-tile budget that covers
@@ -233,6 +242,7 @@ void RenderRasterDEMSource::updateInternal(const Tileset& tileset,
                 " zoom=" + std::to_string(parameters.transformState.getZoom()) +
                 " pitchDeg=" +
                 std::to_string(parameters.transformState.getPitch() * 180.0 / std::numbers::pi) +
+                " terrain=" + std::to_string(parameters.usedByTerrain ? 1 : 0) +
                 " viewport=" + std::to_string(parameters.transformState.getSize().width) + "x" +
                 std::to_string(parameters.transformState.getSize().height) +
                 " lodFloor=" + std::to_string(static_cast<int>(demParameters.tileLodMinZoom)) +

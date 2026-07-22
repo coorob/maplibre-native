@@ -51,6 +51,11 @@ public:
     double tileCoverMaxElevationMeters = 0.0;
     // Optional cap on visible source tiles. 0 preserves the full cover.
     std::size_t tileCoverMaxTiles = 0;
+    // Set per source by RenderOrchestrator when this source is the active
+    // terrain DEM. A RasterDEM source can also be used only by flat visual
+    // layers (hillshade/color-relief); those layers must not inherit the
+    // terrain mesh's elevation-expanded cover.
+    bool usedByTerrain = false;
     gfx::DynamicTextureAtlasPtr dynamicTextureAtlas;
     bool isUpdateSynchronous = false;
 };
