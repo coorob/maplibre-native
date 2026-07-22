@@ -12,6 +12,13 @@
 #include <mbgl/util/image.hpp>
 #include <mbgl/util/mat4.hpp>
 
+#include <memory>
+
+namespace mbgl::gfx {
+class Context;
+class Texture2D;
+} // namespace mbgl::gfx
+
 namespace mbgl {
 
 using HillshadeBinders = PaintPropertyBinders<style::HillshadePaintProperties::DataDrivenProperties>;
@@ -38,9 +45,25 @@ public:
     const DEMData& getDEMData() const;
     DEMData& getDEMData();
 
+    // The raw Terrain-RGB upload is sampled by both the hillshade prepare
+    // pass and RenderTerrain's displacement pass. Keep one texture on the
+    // source bucket so those consumers do not upload the same 514x514 RGBA
+    // image twice for every RasterDEM tile.
+    std::shared_ptr<gfx::Texture2D> getOrCreateDEMTexture(gfx::Context&);
+    const std::shared_ptr<gfx::Texture2D>& getDEMTexture() const noexcept { return demTexture; }
+
     bool isPrepared() const { return prepared; }
 
-    void setPrepared(bool preparedState) { prepared = preparedState; }
+    void setPrepared(bool preparedState) {
+        prepared = preparedState;
+        // RasterDEMTile calls this with false after neighbor-border backfill,
+        // which mutates the source image in place. Drop the shared GPU upload
+        // so both hillshade preparation and terrain displacement see the new
+        // border on their next update.
+        if (!preparedState) {
+            demTexture.reset();
+        }
+    }
 
     static HillshadeLayoutVertex layoutVertex(Point<int16_t> p, Point<uint16_t> t) {
         return HillshadeLayoutVertex{{{p.x, p.y}}, {{t.x, t.y}}};
@@ -59,6 +82,7 @@ public:
 
 private:
     DEMData demdata;
+    std::shared_ptr<gfx::Texture2D> demTexture;
     bool prepared = false;
 };
 

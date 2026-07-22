@@ -501,6 +501,11 @@ void RenderHillshadeLayer::update(gfx::ShaderRegistry& shaders,
         }
 
         if (!bucket.renderTargetPrepared) {
+            auto texture = bucket.getOrCreateDEMTexture(context);
+            if (!texture) {
+                continue;
+            }
+
             // Set up tile render target
             const uint16_t tilesize = bucket.getDEMData().dim;
             auto renderTarget = context.createRenderTarget({tilesize, tilesize},
@@ -548,12 +553,6 @@ void RenderHillshadeLayer::update(gfx::ShaderRegistry& shaders,
             hillshadePrepareBuilder->setSegments(
                 gfx::Triangles(), staticDataIndices.vector(), staticDataSegments.data(), staticDataSegments.size());
 
-            std::shared_ptr<gfx::Texture2D> texture = context.createTexture2D();
-            texture->setImage(bucket.getDEMData().getImagePtr());
-            // Use Nearest filtering to match GL JS behavior - the Sobel kernel samples exact pixel values
-            texture->setSamplerConfiguration({.filter = gfx::TextureFilterType::Nearest,
-                                              .wrapU = gfx::TextureWrapType::Clamp,
-                                              .wrapV = gfx::TextureWrapType::Clamp});
             hillshadePrepareBuilder->setTexture(texture, idHillshadeImageTexture);
 
             hillshadePrepareBuilder->flush(context);

@@ -1277,9 +1277,10 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
     // Refresh the GPU DEM texture cache. Keyed by the actual DEM tile's
     // OverscaledTileID (not the cover slot's ideal), so a single texture
     // can back multiple ideal drawables that all parent-fallback into the
-    // same source. Persists entries across frames as long as the source
-    // tile remains reachable from cover (= present in the source's
-    // renderTiles), so panning doesn't force a re-upload of cached DEMs.
+    // same source. The texture itself lives on HillshadeBucket and is shared
+    // with the hillshade prepare pass; previously terrain uploaded the same
+    // 514x514 Terrain-RGB image a second time for every rendered DEM tile.
+    std::size_t bucketSharedDEMTextures = 0;
     {
         std::unordered_map<OverscaledTileID, std::shared_ptr<gfx::Texture2D>> nextTextures;
         nextTextures.reserve(renderTiles->size());
@@ -1320,27 +1321,25 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
                 continue;
             }
 
-            if (auto existing = demTexturesByTile.find(sourceID); existing != demTexturesByTile.end()) {
-                nextTextures.emplace(sourceID, existing->second);
-                reusedTextures++;
-                if (traceDrape) {
-                    Log::Info(Event::Render,
-                              "[KLATTRA DRAPE_TRACE] dem-texture-reuse frame=" + std::to_string(drapeTraceFrame) +
-                                  " source=" + klattraTileString(sourceID) +
-                                  " texture=" + klattraTexturePtrString(existing->second));
-                }
-            } else if (auto texture = createDEMTexture(context, demData)) {
-                if (traceDrape) {
-                    Log::Info(Event::Render,
-                              "[KLATTRA DRAPE_TRACE] dem-texture-create frame=" + std::to_string(drapeTraceFrame) +
-                                  " source=" + klattraTileString(sourceID) +
-                                  " texture=" + klattraTexturePtrString(texture));
-                }
-                nextTextures.emplace(sourceID, std::move(texture));
-                createdTextures++;
-            } else {
+            const bool reusedBucketTexture = hillshadeBucket->getDEMTexture() != nullptr;
+            auto texture = hillshadeBucket->getOrCreateDEMTexture(context);
+            if (!texture) {
                 missingTextures++;
+                continue;
             }
+
+            if (traceDrape) {
+                Log::Info(Event::Render,
+                          std::string("[KLATTRA DRAPE_TRACE] dem-texture-bucket-") +
+                              (reusedBucketTexture ? "reuse" : "create") +
+                              " frame=" + std::to_string(drapeTraceFrame) +
+                              " source=" + klattraTileString(sourceID) +
+                              " texture=" + klattraTexturePtrString(texture));
+            }
+            nextTextures.emplace(sourceID, std::move(texture));
+            ++bucketSharedDEMTextures;
+            reusedTextures += reusedBucketTexture ? 1 : 0;
+            createdTextures += reusedBucketTexture ? 0 : 1;
         }
         demTexturesByTile = std::move(nextTextures);
         if (traceDrape) {
@@ -1348,6 +1347,7 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
                       "[KLATTRA DRAPE_TRACE] dem-texture-summary frame=" + std::to_string(drapeTraceFrame) +
                           " reused=" + std::to_string(reusedTextures) +
                           " created=" + std::to_string(createdTextures) +
+                          " bucketShared=" + std::to_string(bucketSharedDEMTextures) +
                           " missing=" + std::to_string(missingTextures) +
                           " active=" + std::to_string(demTexturesByTile.size()));
         }
@@ -2111,6 +2111,7 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
                  " boundRasterUnknown=" + std::to_string(boundRasterUnknownBindings) +
                  " parked=" + std::to_string(retiredDrapeTargetsByTile.size()) +
                  " demTextures=" + std::to_string(demTexturesByTile.size()) +
+                 " demShared=" + std::to_string(bucketSharedDEMTextures) +
                  " drapeTargets=" + std::to_string(drapeCache.size()) +
                  " terrainDrawables=" + std::to_string(lg->getDrawableCount()));
     // .46-diag: 1 Hz device-visible summary — the per-class bind counts are
@@ -2132,6 +2133,7 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
                             " parked=" + std::to_string(retiredDrapeTargetsByTile.size()) +
                             " targets=" + std::to_string(drapeCache.size()) +
                             " demTex=" + std::to_string(demTexturesByTile.size()) +
+                            " demShared=" + std::to_string(bucketSharedDEMTextures) +
                             " rawOverlap=" + std::to_string(rawSourceOverlapPairs) +
                             " leafOverlap=" + std::to_string(sourceMeshOverlapPairs) +
                             " meshOverlap=" + std::to_string(drawableMeshOverlapPairs) +
@@ -2288,6 +2290,7 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
                 " rasterUnknown=" + std::to_string(boundRasterUnknownBindings) +
                 " unbound=" + std::to_string(unboundBindings) +
                 " allocFail=" + std::to_string(stageAllocFailEvents) +
+                " demShared=" + std::to_string(bucketSharedDEMTextures) +
                 " drape565=" + std::to_string(gauge565) +
                 " drapeMips=" + std::to_string(drapeMips) +
                 " liveTiers=" + std::to_string(liveTiers[0]) + "/" + std::to_string(liveTiers[1]) + "/" +
@@ -2719,30 +2722,6 @@ std::shared_ptr<gfx::Texture2D> RenderTerrain::getOrCreateEmptyDEMTexture(gfx::C
 
     emptyDEMTexture = std::move(texture);
     return emptyDEMTexture;
-}
-
-std::shared_ptr<gfx::Texture2D> RenderTerrain::createDEMTexture(gfx::Context& context, const DEMData& demData) {
-    auto imagePtr = demData.getImagePtr();
-    if (!imagePtr || imagePtr->size.isEmpty()) {
-        return nullptr;
-    }
-
-    auto texture = context.createTexture2D();
-    if (!texture) {
-        Log::Error(Event::Render, "Failed to create DEM texture");
-        return nullptr;
-    }
-
-    texture->setImage(imagePtr);
-
-    // Linear filtering for smooth elevation interpolation between texels.
-    texture->setSamplerConfiguration({
-        .filter = gfx::TextureFilterType::Linear,
-        .wrapU = gfx::TextureWrapType::Clamp,
-        .wrapV = gfx::TextureWrapType::Clamp
-    });
-
-    return texture;
 }
 
 std::unique_ptr<gfx::Drawable> RenderTerrain::createDrawableForTile(gfx::Context& context,

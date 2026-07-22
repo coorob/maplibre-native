@@ -1,6 +1,7 @@
 #include <mbgl/renderer/buckets/hillshade_bucket.hpp>
 #include <mbgl/renderer/layers/render_hillshade_layer.hpp>
 #include <mbgl/gfx/context.hpp>
+#include <mbgl/gfx/texture2d.hpp>
 
 namespace mbgl {
 
@@ -22,6 +23,32 @@ const DEMData& HillshadeBucket::getDEMData() const {
 
 DEMData& HillshadeBucket::getDEMData() {
     return demdata;
+}
+
+std::shared_ptr<gfx::Texture2D> HillshadeBucket::getOrCreateDEMTexture(gfx::Context& context) {
+    if (demTexture) {
+        return demTexture;
+    }
+
+    const auto image = demdata.getImagePtr();
+    if (!image || image->size.isEmpty()) {
+        return nullptr;
+    }
+
+    auto texture = context.createTexture2D();
+    if (!texture) {
+        return nullptr;
+    }
+
+    texture->setImage(image);
+    // Hillshade preparation requires exact Terrain-RGB texels. Terrain
+    // displacement manually decodes and bilinearly interpolates four texels,
+    // so it does not depend on this sampler's filter mode.
+    texture->setSamplerConfiguration({.filter = gfx::TextureFilterType::Nearest,
+                                      .wrapU = gfx::TextureWrapType::Clamp,
+                                      .wrapV = gfx::TextureWrapType::Clamp});
+    demTexture = std::move(texture);
+    return demTexture;
 }
 
 void HillshadeBucket::upload([[maybe_unused]] gfx::UploadPass& uploadPass) {

@@ -566,14 +566,6 @@ private:
     static constexpr int32_t TERRAIN_LAYER_INDEX = 1000000;
 
     /**
-     * @brief Create a DEM texture from DEMData
-     * @param context Graphics context
-     * @param demData DEM elevation data
-     * @return Shared pointer to created texture
-     */
-    std::shared_ptr<gfx::Texture2D> createDEMTexture(gfx::Context& context, const DEMData& demData);
-
-    /**
      * @brief Lazy-create the 1×1 empty DEM texture used when a tile in
      * cover has no real DEM data yet.
      */
