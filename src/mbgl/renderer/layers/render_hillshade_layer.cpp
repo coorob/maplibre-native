@@ -31,6 +31,8 @@
 #include <mbgl/gfx/shader_registry.hpp>
 
 #include <cstdlib>
+#include <optional>
+#include <unordered_map>
 #include <unordered_set>
 
 namespace mbgl {
@@ -59,9 +61,42 @@ bool klattraHillshadeDrapeSameZoomOnly() {
     return enabled;
 }
 
+bool klattraSingleHillshadeDrapeWriter() {
+    static const bool enabled = std::getenv("KLATTRA_DISABLE_HILLSHADE_SINGLE_WRITER") == nullptr;
+    return enabled;
+}
+
 bool klattraDisableBakeCarry() {
     static const bool disabled = std::getenv("KLATTRA_DISABLE_BAKE_CARRY") != nullptr;
     return disabled;
+}
+
+bool klattraHillshadeTileCoversTarget(const OverscaledTileID& sourceID,
+                                      const OverscaledTileID& drapeID) {
+    return sourceID.wrap == drapeID.wrap &&
+           sourceID.canonical.z <= drapeID.canonical.z &&
+           LayerTweaker::tilesOverlap(sourceID, drapeID);
+}
+
+bool klattraPreferHillshadeTile(const OverscaledTileID& candidate,
+                                const OverscaledTileID& current,
+                                const OverscaledTileID& drapeID) {
+    // Both candidates cover the complete drape target. Prefer the closest
+    // canonical source zoom, then the overscaled identity closest to the
+    // target. The final stable-ID tie break prevents camera-order churn.
+    if (candidate.canonical.z != current.canonical.z) {
+        return candidate.canonical.z > current.canonical.z;
+    }
+    const auto candidateDelta = candidate.overscaledZ > drapeID.overscaledZ
+                                    ? candidate.overscaledZ - drapeID.overscaledZ
+                                    : drapeID.overscaledZ - candidate.overscaledZ;
+    const auto currentDelta = current.overscaledZ > drapeID.overscaledZ
+                                  ? current.overscaledZ - drapeID.overscaledZ
+                                  : drapeID.overscaledZ - current.overscaledZ;
+    if (candidateDelta != currentDelta) {
+        return candidateDelta < currentDelta;
+    }
+    return candidate < current;
 }
 
 std::string klattraDrapeIDString(const OverscaledTileID& id) {
@@ -298,10 +333,22 @@ void RenderHillshadeLayer::update(gfx::ShaderRegistry& shaders,
                             const auto& dID = drawable.getTileID();
                             if (!dID) return false;
                             if (!hasRenderTile(*dID)) {
+                                // A terrain target can remain live while the
+                                // RasterDEM source cover changes. In the
+                                // single-writer path, keep its one completed
+                                // full-cover hillshade until a prepared
+                                // replacement is selected below. This carries
+                                // continuity across tile-ID changes as well as
+                                // same-tile bucket replacement.
+                                if (klattraSingleHillshadeDrapeWriter() &&
+                                    klattraHillshadeTileCoversTarget(*dID, drapeID)) {
+                                    return false;
+                                }
                                 removedNotInCover++;
                                 return true;
                             }
-                            if (!LayerTweaker::tilesOverlap(*dID, drapeID)) {
+                            if (dID->wrap != drapeID.wrap ||
+                                !LayerTweaker::tilesOverlap(*dID, drapeID)) {
                                 removedNoOverlap++;
                                 return true;
                             }
@@ -374,6 +421,45 @@ void RenderHillshadeLayer::update(gfx::ShaderRegistry& shaders,
         if (neutralPrepareTexture) {
             neutralPrepareTexture->setImage(std::move(img));
         }
+    }
+
+    // The RasterDEM continuity cover can legitimately contain parent,
+    // child, and multiple overscaled identities at once. Routing every one
+    // into a terrain target alpha-composites hillshade repeatedly: the device
+    // trace captured 42 writers normally and 86 even under a same-zoom
+    // control. Those repeated translucent passes wash the official green and
+    // yellow land-cover colours toward the hillshade palette while later
+    // roads and contours remain crisp.
+    //
+    // Select one source tile that covers each entire drape target. The exact
+    // tile wins, otherwise the nearest loaded ancestor supplies continuous
+    // relief. Partial child tiles are deliberately excluded: accepting them
+    // would require a disjoint stencil cover to preserve the one-writer-per-
+    // pixel invariant.
+    std::unordered_map<OverscaledTileID, OverscaledTileID> selectedHillshadeTiles;
+    if (activeTerrain && klattraSingleHillshadeDrapeWriter()) {
+        activeTerrain->visitDrapeTargets(
+            [&](const OverscaledTileID& drapeID, TerrainDrapeTargetPtr& drapeTarget) {
+                if (!drapeTarget) return;
+
+                std::optional<OverscaledTileID> selected;
+                for (const RenderTile& candidateTile : *renderTiles) {
+                    const auto& candidateID = candidateTile.getOverscaledTileID();
+                    if (!klattraHillshadeTileCoversTarget(candidateID, drapeID)) {
+                        continue;
+                    }
+                    auto* candidateBucket = candidateTile.getBucket(*baseImpl);
+                    if (!candidateBucket || !candidateBucket->hasData()) {
+                        continue;
+                    }
+                    if (!selected || klattraPreferHillshadeTile(candidateID, *selected, drapeID)) {
+                        selected = candidateID;
+                    }
+                }
+                if (selected) {
+                    selectedHillshadeTiles.emplace(drapeID, *selected);
+                }
+            });
     }
 
     for (const RenderTile& tile : *renderTiles) {
@@ -566,6 +652,12 @@ void RenderHillshadeLayer::update(gfx::ShaderRegistry& shaders,
             activeTerrain->visitDrapeTargets(
                 [&](const OverscaledTileID& drapeID, TerrainDrapeTargetPtr& drapeTarget) {
                     if (!drapeTarget || !LayerTweaker::tilesOverlap(tileID, drapeID)) return;
+                    if (klattraSingleHillshadeDrapeWriter()) {
+                        const auto selected = selectedHillshadeTiles.find(drapeID);
+                        if (selected == selectedHillshadeTiles.end() || selected->second != tileID) {
+                            return;
+                        }
+                    }
                     if (klattraHillshadeDrapeSameZoomOnly() && tileID.canonical.z != drapeID.canonical.z) {
                         if (klattraLogDrapeStale()) {
                             Log::Info(Event::Render,
@@ -597,10 +689,29 @@ void RenderHillshadeLayer::update(gfx::ShaderRegistry& shaders,
                     // its binding every frame so the carried texture swaps to
                     // the completed bake atomically instead of leaving a stale
                     // texture or opening a contentless drape frame.
-                    if (drapeGroup->visitDrawables(renderPass, tileID, [&](gfx::Drawable& drawable) {
+                    const auto refreshed = drapeGroup->visitDrawables(renderPass, tileID, [&](gfx::Drawable& drawable) {
                             drawable.setTexture(drapeBakeTexture, idHillshadeImageTexture);
-                        }) > 0) {
+                        });
+                    if (refreshed > 0) {
+                        if (klattraSingleHillshadeDrapeWriter()) {
+                            stats.drawablesRemoved += drapeGroup->removeDrawablesIf([&](gfx::Drawable& drawable) {
+                                const auto& drawableID = drawable.getTileID();
+                                return drawableID && *drawableID != tileID;
+                            });
+                        }
                         return;
+                    }
+
+                    if (klattraSingleHillshadeDrapeWriter() && !drapeGroup->empty()) {
+                        if (drapeBakeTexture == neutralPrepareTexture) {
+                            // Do not replace a completed cross-tile bake with
+                            // the flat-neutral startup texture. The selected
+                            // tile will atomically take over when its prepared
+                            // or carried bake is available.
+                            return;
+                        }
+                        stats.drawablesRemoved +=
+                            drapeGroup->removeDrawablesIf([](gfx::Drawable&) { return true; });
                     }
 
                     auto drapeBuilder = context.createDrawableBuilder("hillshade-drape");
@@ -622,6 +733,15 @@ void RenderHillshadeLayer::update(gfx::ShaderRegistry& shaders,
                         drapeDrawable->setLayerTweaker(tw);
                         drapeGroup->addDrawable(renderPass, tileID, std::move(drapeDrawable));
                         ++stats.drawablesAdded;
+                    }
+                    if (klattraSingleHillshadeDrapeWriter()) {
+                        static bool loggedSingleWriterIdentity = false;
+                        if (!loggedSingleWriterIdentity) {
+                            Log::Info(Event::Render,
+                                      "[Klättra DRAPE_STALE] kind=hillshade-drape-single-writer "
+                                      "action=replace-overlap");
+                            loggedSingleWriterIdentity = true;
+                        }
                     }
                 });
         }
