@@ -26,6 +26,30 @@ TEST(TileCover, KlattraTerrainRenderCapScalesOnlyForLargeViewports) {
     EXPECT_EQ(std::size_t{384}, klattraDefaultTerrainRenderTileCap({1366, 1024}));
 }
 
+// Regression (klattra flat-2D memory): the conservative terrain elevation
+// envelope deliberately expands each frustum tile by a four-tile safety halo.
+// That is required for raised terrain meshes, but a flat hillshade/color-
+// relief source uses the z=0 plane and should retain the ordinary small cover.
+TEST(TileCover, FlatPhoneCoverAvoidsTerrainElevationHalo) {
+    Transform transform;
+    transform.resize({390, 844});
+    transform.jumpTo(
+        CameraOptions().withCenter(LatLng{59.3293, 18.0686}).withZoom(10.0).withBearing(0.0).withPitch(0.0));
+
+    util::TileCoverParameters flatParameters{transform.getState()};
+    flatParameters.tileCoverMaxTiles = klattraDefaultTerrainRenderTileCap(transform.getState().getSize());
+    const auto flatCover = util::tileCover(flatParameters, 10, zoomRange);
+
+    auto terrainParameters = flatParameters;
+    terrainParameters.tileCoverMinElevationMeters = -6000.0;
+    terrainParameters.tileCoverMaxElevationMeters = 8000.0;
+    const auto terrainCover = util::tileCover(terrainParameters, 10, zoomRange);
+
+    EXPECT_LE(flatCover.size(), 12u);
+    EXPECT_GE(terrainCover.size(), 81u);
+    EXPECT_GT(terrainCover.size(), flatCover.size() * 8u);
+}
+
 TEST(TileCover, Empty) {
     EXPECT_EQ((std::vector<UnwrappedTileID>{}), util::tileCover(LatLngBounds::empty(), 0));
 }
