@@ -375,6 +375,14 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
         const long parsed = v ? std::strtol(v, nullptr, 10) : 0;
         return static_cast<uint32_t>((parsed > 0 && parsed < 100000) ? parsed : 90);
     }();
+    // DIAG: RasterDEM parents contain complete elevation data, unlike sparse
+    // vector parents. Allow a newly renderable exact ideal parent to retire
+    // retained children from the previous zoom generation. Keep this launch
+    // gated until physical-device movement confirms continuity.
+    static const bool rasterDEMRetireLoadedAncestors = [] {
+        const char* v = std::getenv("KLATTRA_RASTER_DEM_RETIRE_LOADED_ANCESTORS");
+        return v && *v && !(*v == '0' || *v == 'f' || *v == 'F');
+    }();
 
     // GeoJSON sources are local and immediately renderable. Extending their
     // previous cover provides no loading bridge, while terrain-draped line
@@ -388,6 +396,14 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
                                             ? cover_hold::rasterDEMCoverHoldBudget(parameters.tileCoverMaxTiles)
                                             : 0;
     const std::size_t recentIdealCap = boundedRasterDEMCoverHold ? cover_hold::recentIdealBudget(coverHoldBudget) : 0;
+    const bool retireLoadedRasterDEMAncestors =
+        boundedRasterDEMCoverHold && parameters.usedByTerrain && rasterDEMRetireLoadedAncestors;
+    std::set<UnwrappedTileID> currentIdealTiles;
+    if (retireLoadedRasterDEMAncestors) {
+        for (const auto& idealTile : idealTiles) {
+            currentIdealTiles.insert(idealTile.toUnwrapped());
+        }
+    }
 
     ++coverHoldUpdateIndex;
     std::size_t recentIdealExpired = 0;
@@ -415,6 +431,7 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
     std::size_t coverBudgetEvicted = 0;
     std::size_t fadeHeld = 0;
     std::size_t coverRejectedAge = 0, coverRejectedNotRenderable = 0, coverRetiredCovered = 0;
+    std::size_t coverRetiredAncestor = 0;
     std::size_t coverExpiredOffscreen = 0;
     const std::size_t coverRejectedRelayout = needsRelayout ? previouslyRenderedTiles.size() : 0;
     std::map<UnwrappedTileID, uint16_t> nextCoverHoldAges;
@@ -438,12 +455,19 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
             continue;
         }
         const UnwrappedTileID& previousID = previouslyRenderedTile.first;
-        // Same-or-deeper coverage ONLY (v3): a shallower rendered parent can
+        if (retireLoadedRasterDEMAncestors &&
+            cover_hold::hasRenderableIdealAncestor(previousID, currentIdealTiles, renderedTiles)) {
+            ++coverRetiredCovered;
+            ++coverRetiredAncestor;
+            continue;
+        }
+        // Generic same-or-deeper coverage ONLY (v3): a shallower rendered parent can
         // be feature-empty at coarse zooms (the topo archive carries no land
         // polygons below ~z10) — it covers the area geometrically while
         // painting nothing, which IS the flash (traska.36 device data:
         // z7-z9 parents inside every dip set, holds credited them, land
-        // fills still painted 1-3 tile fragments). A previously rendered
+        // fills still painted 1-3 tile fragments). RasterDEM's launch-gated,
+        // exact-ideal-parent exception is handled above. A previously rendered
         // tile is replaced only once all four child quadrants are rendered;
         // everything else rides the age cap (~250 ms, masked behind newer
         // tiles by updateTileMasks) — which is also what retires zoom-out
@@ -533,6 +557,8 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
                         std::to_string(fadeHeld) + " recentIdeal=" + std::to_string(recentIdealTiles.size()) +
                         " recentExpired=" + std::to_string(recentIdealExpired) + " recentEvicted=" +
                         std::to_string(recentIdealEvicted) + " retired=" + std::to_string(coverRetiredCovered) +
+                        " ancestorMode=" + std::to_string(retireLoadedRasterDEMAncestors ? 1 : 0) +
+                        " ancestorRetired=" + std::to_string(coverRetiredAncestor) +
                         " aged=" + std::to_string(coverRejectedAge) +
                         " expiredOff=" + std::to_string(coverExpiredOffscreen) +
                         " notRenderable=" + std::to_string(coverRejectedNotRenderable) +
@@ -544,7 +570,8 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
                     fprintf(stderr,
                             "[KLATTRA_TRACE] [KLATTRA COVERHOLD] source=%s ideal=%zu rendered=%zu "
                             "held=%zu eligible=%zu budget=%zu budgetEvicted=%zu fadeHeld=%zu "
-                            "recentIdeal=%zu recentExpired=%zu recentEvicted=%zu retired=%zu aged=%zu "
+                            "recentIdeal=%zu recentExpired=%zu recentEvicted=%zu retired=%zu "
+                            "ancestorMode=%d ancestorRetired=%zu aged=%zu "
                             "expiredOff=%zu notRenderable=%zu relayout=%zu physMB=%lld physPeakMB=%lld\n",
                             sourceImpl.id.c_str(),
                             idealTiles.size(),
@@ -558,6 +585,8 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
                             recentIdealExpired,
                             recentIdealEvicted,
                             coverRetiredCovered,
+                            retireLoadedRasterDEMAncestors ? 1 : 0,
+                            coverRetiredAncestor,
                             coverRejectedAge,
                             coverExpiredOffscreen,
                             coverRejectedNotRenderable,

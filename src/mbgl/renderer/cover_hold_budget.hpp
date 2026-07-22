@@ -8,6 +8,7 @@
 #include <limits>
 #include <map>
 #include <optional>
+#include <set>
 #include <vector>
 
 namespace mbgl::cover_hold {
@@ -67,6 +68,25 @@ inline std::vector<Candidate> selectCandidates(std::vector<Candidate> candidates
         candidates.erase(candidates.begin() + static_cast<std::ptrdiff_t>(budget), candidates.end());
     }
     return candidates;
+}
+
+// RasterDEM is continuous at every source zoom. Once an exact tile from the
+// current ideal cover is renderable, it can safely replace retained children
+// from the previous, higher-zoom cover. Sparse vector sources cannot make the
+// same promise because a coarse parent can be feature-empty.
+template <typename RenderedTiles>
+inline bool hasRenderableIdealAncestor(const UnwrappedTileID& previous,
+                                       const std::set<UnwrappedTileID>& currentIdealTiles,
+                                       const RenderedTiles& renderedTiles) {
+    for (uint8_t ancestorZ = previous.canonical.z; ancestorZ > 0;) {
+        --ancestorZ;
+        const UnwrappedTileID ancestor{previous.wrap, previous.canonical.scaledTo(ancestorZ)};
+        if (currentIdealTiles.find(ancestor) != currentIdealTiles.end() &&
+            renderedTiles.find(ancestor) != renderedTiles.end()) {
+            return true;
+        }
+    }
+    return false;
 }
 
 // Keep current and immediately preceding ideal-cover IDs. The map is only an

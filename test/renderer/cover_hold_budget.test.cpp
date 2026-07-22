@@ -70,6 +70,28 @@ TEST(CoverHoldBudget, MatchesExactParentAndChildRecentCover) {
     EXPECT_FALSE(cover_hold::newestOverlapAge(UnwrappedTileID{10, 300, 300}, recent, 100));
 }
 
+TEST(CoverHoldBudget, RetiresPreviousChildOnlyForRenderableCurrentIdealAncestor) {
+    const UnwrappedTileID previous{12, 1600, 2400};
+    const UnwrappedTileID parent{11, 800, 1200};
+    const UnwrappedTileID grandparent{10, 400, 600};
+    const UnwrappedTileID siblingParent{11, 801, 1200};
+    const UnwrappedTileID child{13, 3200, 4800};
+
+    EXPECT_TRUE(cover_hold::hasRenderableIdealAncestor(
+        previous, std::set<UnwrappedTileID>{parent}, std::set<UnwrappedTileID>{parent}));
+    EXPECT_TRUE(cover_hold::hasRenderableIdealAncestor(
+        previous, std::set<UnwrappedTileID>{grandparent}, std::set<UnwrappedTileID>{grandparent}));
+
+    EXPECT_FALSE(cover_hold::hasRenderableIdealAncestor(
+        previous, std::set<UnwrappedTileID>{parent}, std::set<UnwrappedTileID>{}));
+    EXPECT_FALSE(cover_hold::hasRenderableIdealAncestor(
+        previous, std::set<UnwrappedTileID>{}, std::set<UnwrappedTileID>{parent}));
+    EXPECT_FALSE(cover_hold::hasRenderableIdealAncestor(
+        previous, std::set<UnwrappedTileID>{siblingParent}, std::set<UnwrappedTileID>{siblingParent}));
+    EXPECT_FALSE(cover_hold::hasRenderableIdealAncestor(
+        previous, std::set<UnwrappedTileID>{child}, std::set<UnwrappedTileID>{child}));
+}
+
 TEST(CoverHoldBudget, BoundsRecentIdealHistoryAndKeepsNewestIDsDeterministically) {
     std::map<UnwrappedTileID, uint32_t> recent{{UnwrappedTileID{5, 0, 0}, 96},
                                                {UnwrappedTileID{5, 1, 0}, 99},
