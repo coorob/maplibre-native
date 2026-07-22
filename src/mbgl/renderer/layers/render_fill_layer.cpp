@@ -379,13 +379,13 @@ void RenderFillLayer::update(gfx::ShaderRegistry& shaders,
         };
 #endif
 
-        // If we already have drawables for this tile, update them.
-        auto updateExisting = [&](gfx::Drawable& drawable) {
-            if (drawable.getLayerTweaker() != layerTweaker) {
-                // This drawable was produced on a previous style/bucket, and should not be updated.
-                return false;
-            }
-
+        // Keep both the main-pass and per-terrain-target copies attached to
+        // the current bucket data. Drape copies outlive an individual upload
+        // and used to be deduplicated without receiving this refresh. During
+        // a fast camera-driven bucket repopulation they could therefore keep
+        // an empty/stale shared-vertex binding until an angle change happened
+        // to rebuild the target, temporarily dropping broad land-cover fills.
+        const auto updateDrawableGeometry = [&](gfx::Drawable& drawable) {
             switch (static_cast<FillVariant>(drawable.getType())) {
                 case FillVariant::Fill:
                 case FillVariant::FillPattern:
@@ -426,12 +426,20 @@ void RenderFillLayer::update(gfx::ShaderRegistry& shaders,
 
             return true;
         };
-        if (updateTile(renderPass, tileID, std::move(updateExisting))) {
+        const auto updateExisting = [&](gfx::Drawable& drawable) {
+            if (drawable.getLayerTweaker() != layerTweaker) {
+                // This drawable was produced on a previous style/bucket, and should not be updated.
+                return false;
+            }
+            return updateDrawableGeometry(drawable);
+        };
+        const bool mainTileUpdated = updateTile(renderPass, tileID, updateExisting);
+        if (mainTileUpdated && !activeTerrain) {
             continue;
         }
 
         const auto finish = [&](gfx::DrawableBuilder& builder, FillVariant type) {
-            if (activeTerrain && activeTerrain->hasElevationCoverage(tileID)) {
+            if (mainTileUpdated || (activeTerrain && activeTerrain->hasElevationCoverage(tileID))) {
                 // Skip main-pass — flushed drawables would only be drawn at
                 // z=0 in the main framebuffer where the terrain mesh would
                 // ideally occlude them; the drape variant emitted by
@@ -501,13 +509,37 @@ void RenderFillLayer::update(gfx::ShaderRegistry& shaders,
                         drapeGroup = newGroup.get();
                     }
 
-                    // Per-variant dedup so Fill and FillOutline can coexist
-                    // for the same source tile in the same drape group.
-                    bool alreadyHasVariant = false;
-                    drapeGroup->visitDrawables(renderPass, tileID, [&](const gfx::Drawable& d) {
-                        if (d.getType() == static_cast<size_t>(variant)) alreadyHasVariant = true;
+                    // Per-variant refresh/dedup so Fill and FillOutline can
+                    // coexist while every surviving drape copy follows the
+                    // current bucket's vertices, binders, and RenderTile.
+                    // This mirrors the main-pass update above; the old
+                    // dedup-only path is what left stale/empty fill geometry
+                    // bound after camera-driven bucket churn.
+                    bool refreshedVariant = false;
+                    drapeGroup->visitDrawables(renderPass, tileID, [&](gfx::Drawable& drawable) {
+                        if (drawable.getType() != static_cast<size_t>(variant)) return;
+                        if (!updateDrawableGeometry(drawable)) return;
+                        drawable.setBinders(renderData->bucket, &binders);
+                        drawable.setRenderTile(renderTilesOwner, &tile);
+                        if (variant == FillVariant::FillPattern || variant == FillVariant::FillOutlinePattern) {
+                            drawable.clearTweakers();
+                            if (const auto& tweaker = getAtlasTweaker()) {
+                                drawable.addTweaker(tweaker);
+                            }
+                        }
+                        refreshedVariant = true;
                     });
-                    if (alreadyHasVariant) return;
+                    if (refreshedVariant) {
+                        if (klattraLogDrapeStale()) {
+                            static bool loggedRefreshIdentity = false;
+                            if (!loggedRefreshIdentity) {
+                                Log::Info(Event::Render,
+                                          "[Klättra DRAPE_STALE] kind=fill-drape-live-refresh action=refresh-existing");
+                                loggedRefreshIdentity = true;
+                            }
+                        }
+                        return;
+                    }
 
                     auto drapeShader = std::static_pointer_cast<gfx::ShaderProgramBase>(
                         shaderGroup->getOrCreateShader(context, propertiesAsUniforms));
