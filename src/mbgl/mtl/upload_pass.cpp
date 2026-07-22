@@ -123,7 +123,7 @@ const gfx::UniqueVertexBufferResource& UploadPass::getBuffer(const gfx::VertexVe
 }
 
 gfx::AttributeBindingArray UploadPass::buildAttributeBindings(
-    [[maybe_unused]] const std::size_t vertexCount,
+    const std::size_t vertexCount,
     [[maybe_unused]] const gfx::AttributeDataType vertexType,
     [[maybe_unused]] const std::size_t vertexAttributeIndex,
     [[maybe_unused]] const std::vector<std::uint8_t>& vertexData,
@@ -161,17 +161,34 @@ gfx::AttributeBindingArray UploadPass::buildAttributeBindings(
         }
 
         // If the attribute references data shared with a bucket, get the corresponding buffer.
-        if (const auto& buffer_ = getBuffer(effectiveAttr.getSharedRawData(), usage, !lastUpdate)) {
-            // Defensive: previously `assert`. Fires during fast camera
-            // pans when a drape drawable's source bucket has been
-            // partially repopulated and the offset math underruns the
-            // (already-resized) vector. Log and clamp instead.
-            const auto offsetBytes = effectiveAttr.getSharedStride() * effectiveAttr.getSharedVertexOffset();
-            const auto totalBytes = effectiveAttr.getSharedRawData()->getRawSize() *
-                                    effectiveAttr.getSharedRawData()->getRawCount();
-            if (!(offsetBytes < totalBytes)) {
+        const auto& sharedData = effectiveAttr.getSharedRawData();
+        if (const auto& buffer_ = getBuffer(sharedData, usage, !lastUpdate)) {
+            // A released VertexVector intentionally drops its CPU-side bytes
+            // after upload while retaining the resident Metal buffer. Drape
+            // drawables can legitimately outlive the bucket that released
+            // that vector, so validating against getRawCount() incorrectly
+            // rejected a still-valid buffer and bound a constant default. For
+            // a position attribute that collapses the fill geometry to a
+            // point, presenting as broad land-cover patches disappearing.
+            //
+            // Validate the complete attribute range against the resource that
+            // Metal will actually read. Keep the default-binding fallback for
+            // genuinely stale or malformed ranges so this remains crash-safe.
+            const auto stride = static_cast<std::uint64_t>(effectiveAttr.getSharedStride());
+            const auto vertexOffset = static_cast<std::uint64_t>(effectiveAttr.getSharedVertexOffset());
+            const auto attributeOffset = static_cast<std::uint64_t>(effectiveAttr.getSharedOffset());
+            const auto attributeSize = static_cast<std::uint64_t>(
+                VertexAttribute::getStrideOf(effectiveAttr.getSharedType()));
+            const auto residentBytes = static_cast<std::uint64_t>(
+                static_cast<const VertexBufferResource&>(*buffer_).getSizeInBytes());
+            const auto vertexSpan = vertexCount > 0 ? stride * static_cast<std::uint64_t>(vertexCount - 1) : 0;
+            const auto requiredBytes = stride * vertexOffset + attributeOffset + vertexSpan + attributeSize;
+            const bool validRange = stride > 0 && attributeSize > 0 && attributeOffset + attributeSize <= stride &&
+                                    requiredBytes <= residentBytes;
+
+            if (!validRange) {
                 Log::Warning(Event::Render,
-                             "Drape attribute offset out of range; binding with default to avoid crash");
+                             "Drape resident attribute range invalid; binding with default to avoid crash");
                 bindings[index] = {
                     /*.attribute = */ {defaultAttr.getDataType(), /*offset=*/0},
                     /*.vertexStride = */ static_cast<uint32_t>(VertexAttribute::getStrideOf(defaultAttr.getDataType())),
@@ -180,6 +197,16 @@ gfx::AttributeBindingArray UploadPass::buildAttributeBindings(
                     /*.bufferIndex = */ bufferIndex,
                 };
                 return;
+            }
+
+            if (sharedData->isReleased() && sharedData->getRawCount() == 0) {
+                static bool loggedReleasedBufferIdentity = false;
+                if (!loggedReleasedBufferIdentity) {
+                    Log::Info(Event::Render,
+                              "[Klättra DRAPE_BUFFER] kind=drape-resident-buffer-range "
+                              "action=bind-released-buffer");
+                    loggedReleasedBufferIdentity = true;
+                }
             }
 
             bindings[index] = {
