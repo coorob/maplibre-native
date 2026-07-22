@@ -16,8 +16,13 @@
 
 #include <mapbox/geometry/envelope.hpp>
 
+#if defined(__APPLE__)
+#include <mach/mach.h>
+#endif
+
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <unordered_map>
@@ -51,6 +56,32 @@ size_t klattraRasterCacheScale() {
         return static_cast<size_t>(4);
     }();
     return scale;
+}
+
+// DIAG: sample the same physical-footprint counter used by iOS jetsam while
+// the flat 2D RasterDEM path is active. RenderTerrain owns the older sampler,
+// but 2D never enters that code. Keep a sampled peak so the log remains useful
+// when the current footprint falls between COVERHOLD heartbeats.
+struct KlattraMemorySample {
+    int64_t physicalMB = -1;
+    int64_t sampledPeakMB = -1;
+};
+
+KlattraMemorySample klattraMemorySample() {
+#if defined(__APPLE__)
+    task_vm_info_data_t info{};
+    mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+    if (task_info(mach_task_self(), TASK_VM_INFO, reinterpret_cast<task_info_t>(&info), &count) == KERN_SUCCESS) {
+        static uint64_t sampledPeakBytes = 0;
+        sampledPeakBytes = std::max(sampledPeakBytes, static_cast<uint64_t>(info.phys_footprint));
+        constexpr double bytesPerMB = 1024.0 * 1024.0;
+        return {
+            static_cast<int64_t>(std::lround(static_cast<double>(info.phys_footprint) / bytesPerMB)),
+            static_cast<int64_t>(std::lround(static_cast<double>(sampledPeakBytes) / bytesPerMB)),
+        };
+    }
+#endif
+    return {};
 }
 } // namespace
 
@@ -492,6 +523,7 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
             const bool heartbeat = coverHeld > 0 || type == SourceType::RasterDEM;
             if (changed || (heartbeat && now - st.lastLog >= std::chrono::seconds(1))) {
                 st.lastLog = now;
+                const auto memory = klattraMemorySample();
                 Log::Warning(
                     Event::Render,
                     "[KLATTRA COVERHOLD] source=" + sourceImpl.id + " ideal=" + std::to_string(idealTiles.size()) +
@@ -504,14 +536,16 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
                         " aged=" + std::to_string(coverRejectedAge) +
                         " expiredOff=" + std::to_string(coverExpiredOffscreen) +
                         " notRenderable=" + std::to_string(coverRejectedNotRenderable) +
-                        " relayout=" + std::to_string(coverRejectedRelayout));
+                        " relayout=" + std::to_string(coverRejectedRelayout) +
+                        " physMB=" + std::to_string(memory.physicalMB) +
+                        " physPeakMB=" + std::to_string(memory.sampledPeakMB));
                 static const bool traceStderr = std::getenv("KLATTRA_TRACE_STDERR") != nullptr;
                 if (traceStderr) {
                     fprintf(stderr,
                             "[KLATTRA_TRACE] [KLATTRA COVERHOLD] source=%s ideal=%zu rendered=%zu "
                             "held=%zu eligible=%zu budget=%zu budgetEvicted=%zu fadeHeld=%zu "
                             "recentIdeal=%zu recentExpired=%zu recentEvicted=%zu retired=%zu aged=%zu "
-                            "expiredOff=%zu notRenderable=%zu relayout=%zu\n",
+                            "expiredOff=%zu notRenderable=%zu relayout=%zu physMB=%lld physPeakMB=%lld\n",
                             sourceImpl.id.c_str(),
                             idealTiles.size(),
                             renderedTiles.size(),
@@ -527,7 +561,9 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
                             coverRejectedAge,
                             coverExpiredOffscreen,
                             coverRejectedNotRenderable,
-                            coverRejectedRelayout);
+                            coverRejectedRelayout,
+                            static_cast<long long>(memory.physicalMB),
+                            static_cast<long long>(memory.sampledPeakMB));
                 }
             }
             st.last = coverHeld;
