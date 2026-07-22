@@ -57,6 +57,17 @@ bool klattraDisableFillDrape() {
     return disabled;
 }
 
+// Terrain drape targets outlive the vector source's instantaneous camera
+// cover. Keep the last paintable fill copy until replacement content routes;
+// otherwise a cover shift clears opaque land-cover polygons from a still-live
+// target and exposes the beige base until an angle change happens to route the
+// source tile again. The kill switch restores the old remove-on-cover-exit
+// behavior for controlled A/B testing.
+bool klattraKeepStaleFillDrape() {
+    static const bool enabled = std::getenv("KLATTRA_DISABLE_STALE_FILL_KEEP") == nullptr;
+    return enabled;
+}
+
 std::string klattraDrapeIDString(const OverscaledTileID& id) {
     return "z" + std::to_string(static_cast<int>(id.canonical.z)) + "/" +
            std::to_string(id.canonical.x) + "/" + std::to_string(id.canonical.y);
@@ -230,11 +241,11 @@ void RenderFillLayer::update(gfx::ShaderRegistry& shaders,
         });
     }
 
-    // Mirror the same cover-set cleanup for every drape group this layer
-    // owns inside the terrain drape cache, and drop drapeLayerTweakers
-    // entries whose drape target has been evicted. Without this, source
-    // tiles that pan out of view keep their drape drawables alive until
-    // the DEM tile itself unloads.
+    // Clean invalid overlaps from every drape group this layer owns and drop
+    // tweakers whose target was evicted. Source tiles that merely leave the
+    // instantaneous camera cover are retained by default: the target can stay
+    // live after its vector cover moves, and replacement-aware cleanup in the
+    // emit path below bounds those retained copies.
     if (activeTerrain) {
         std::unordered_set<OverscaledTileID> liveDrapeIDs;
         activeTerrain->visitDrapeTargets(
@@ -250,6 +261,18 @@ void RenderFillLayer::update(gfx::ShaderRegistry& shaders,
                             const auto& dID = drawable.getTileID();
                             if (!dID) return false;
                             if (!hasRenderTile(*dID)) {
+                                if (klattraKeepStaleFillDrape()) {
+                                    if (klattraLogDrapeStale()) {
+                                        static bool loggedCoverHoldIdentity = false;
+                                        if (!loggedCoverHoldIdentity) {
+                                            Log::Info(Event::Render,
+                                                      "[Klättra DRAPE_STALE] kind=fill-drape-cover-hold "
+                                                      "action=retain-until-replacement");
+                                            loggedCoverHoldIdentity = true;
+                                        }
+                                    }
+                                    return false;
+                                }
                                 removedNotInCover++;
                                 return true;
                             }
@@ -305,7 +328,7 @@ void RenderFillLayer::update(gfx::ShaderRegistry& shaders,
             // when a later frame walks the drape group. Triggered in
             // practice by camera pans that swap a tile's bucket while a
             // drape target is still live.
-            if (activeTerrain) {
+            if (activeTerrain && !klattraKeepStaleFillDrape()) {
                 activeTerrain->visitDrapeTargets(
                     [&](const OverscaledTileID&, TerrainDrapeTargetPtr& drapeTarget) {
                         if (!drapeTarget) return;
@@ -521,6 +544,7 @@ void RenderFillLayer::update(gfx::ShaderRegistry& shaders,
                         if (!updateDrawableGeometry(drawable)) return;
                         drawable.setBinders(renderData->bucket, &binders);
                         drawable.setRenderTile(renderTilesOwner, &tile);
+                        drawable.setDrawPriority(static_cast<gfx::DrawPriority>(tileID.canonical.z));
                         if (variant == FillVariant::FillPattern || variant == FillVariant::FillOutlinePattern) {
                             drawable.clearTweakers();
                             if (const auto& tweaker = getAtlasTweaker()) {
@@ -578,12 +602,36 @@ void RenderFillLayer::update(gfx::ShaderRegistry& shaders,
                     }
                     drapeBuilder->flush(context);
 
-                    for (auto& drapeDrawable : drapeBuilder->clearDrawables()) {
+                    auto freshDrawables = drapeBuilder->clearDrawables();
+                    if (!freshDrawables.empty() && klattraKeepStaleFillDrape()) {
+                        // Supersede only stale copies whose whole footprint is
+                        // covered by this fresh source tile. A finer child must
+                        // not evict a coarser full-target parent because it only
+                        // replaces one quadrant; retaining that parent provides
+                        // a floor until complete replacement coverage exists.
+                        // Fill and outline variants are managed independently.
+                        drapeGroup->removeDrawablesIf([&](gfx::Drawable& drawable) {
+                            const auto& dID = drawable.getTileID();
+                            if (!dID || drawable.getType() != static_cast<size_t>(variant) ||
+                                *dID == tileID || hasRenderTile(*dID) ||
+                                !LayerTweaker::tilesOverlap(*dID, tileID)) {
+                                return false;
+                            }
+                            if (dID->canonical.z <= drapeID.canonical.z) {
+                                return tileID.canonical.z <= drapeID.canonical.z;
+                            }
+                            return tileID.canonical.z <= dID->canonical.z;
+                        });
+                    }
+                    for (auto& drapeDrawable : freshDrawables) {
                         drapeDrawable->setTileID(tileID);
                         drapeDrawable->setType(static_cast<size_t>(variant));
                         drapeDrawable->setLayerTweaker(tw);
                         drapeDrawable->setBinders(renderData->bucket, &binders);
                         drapeDrawable->setRenderTile(renderTilesOwner, &tile);
+                        // Coarse retained parents paint first and current
+                        // higher-resolution tiles replace their detail.
+                        drapeDrawable->setDrawPriority(static_cast<gfx::DrawPriority>(tileID.canonical.z));
                         drapeGroup->addDrawable(renderPass, tileID, std::move(drapeDrawable));
                         ++stats.drawablesAdded;
                     }
