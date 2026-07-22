@@ -189,6 +189,65 @@ bool klattraDrapeTargetReadyForTile(const TerrainDrapeTargetPtr& target, const O
     return RenderTerrain::isDrapeTargetReadyForTile(target, tileID);
 }
 
+// .84 diagnostic: classify the official Lantmateriet land-cover fills that
+// visibly disappear on the physical iPhone. This observes the CPU-side groups
+// on the exact RenderTargets sampled by terrain; it does not alter readiness,
+// routing, ordering, or draw state.
+struct KlattraTopoFillTargetStats {
+    bool hasLandOpenGroup = false;
+    bool hasLandAkerGroup = false;
+    std::size_t forestGroups = 0;
+    std::size_t landOpenDrawables = 0;
+    std::size_t landAkerDrawables = 0;
+    std::size_t forestDrawables = 0;
+    std::array<uint32_t, 26> landOpenSourceZooms{};
+    std::array<uint32_t, 26> landAkerSourceZooms{};
+    std::array<uint32_t, 26> forestSourceZooms{};
+};
+
+bool klattraIsForestDrapeGroup(const std::string& name) {
+    constexpr const char* suffix = "-drape";
+    constexpr std::size_t suffixLength = 6;
+    return name.rfind("skog-", 0) == 0 && name.size() >= suffixLength &&
+           name.compare(name.size() - suffixLength, suffixLength, suffix) == 0;
+}
+
+void klattraRecordDrawableSourceZooms(LayerGroupBase& group, std::array<uint32_t, 26>& counts) {
+    if (group.getType() != LayerGroupBase::Type::TileLayerGroup) return;
+    static_cast<TileLayerGroup&>(group).visitDrawables([&](gfx::Drawable& drawable) {
+        if (const auto& tileID = drawable.getTileID(); tileID && tileID->canonical.z < counts.size()) {
+            counts[tileID->canonical.z]++;
+        }
+    });
+}
+
+KlattraTopoFillTargetStats klattraTopoFillTargetStats(const TerrainDrapeTargetPtr& target) {
+    KlattraTopoFillTargetStats stats;
+    if (!target) return stats;
+
+    target->visitLayerGroups([&](LayerGroupBase& group) {
+        const auto& name = group.getName();
+        if (name == "land-open-drape") {
+            stats.hasLandOpenGroup = true;
+            stats.landOpenDrawables += group.getDrawableCount();
+            klattraRecordDrawableSourceZooms(group, stats.landOpenSourceZooms);
+        } else if (name == "land-aker-drape") {
+            stats.hasLandAkerGroup = true;
+            stats.landAkerDrawables += group.getDrawableCount();
+            klattraRecordDrawableSourceZooms(group, stats.landAkerSourceZooms);
+        } else if (klattraIsForestDrapeGroup(name)) {
+            stats.forestGroups++;
+            stats.forestDrawables += group.getDrawableCount();
+            klattraRecordDrawableSourceZooms(group, stats.forestSourceZooms);
+        }
+    });
+    return stats;
+}
+
+void klattraAccumulateZooms(std::array<uint32_t, 26>& into, const std::array<uint32_t, 26>& from) {
+    for (std::size_t i = 0; i < into.size(); ++i) into[i] += from[i];
+}
+
 // .62: does this canvas hold ANY raster drape drawable? The .61 flight
 // showed level-0 canvas regions that are pure cleared background (black
 // under relief shade) — this names the population directly at bind time.
@@ -1578,6 +1637,29 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
     std::size_t boundRasterEmptyBindings = 0;
     std::size_t boundRasterPartialBindings = 0;
     std::size_t boundRasterUnknownBindings = 0;
+    std::unordered_map<const RenderTarget*, KlattraTopoFillTargetStats> topoFillTargets;
+    std::size_t topoFillResolvedBindings = 0;
+    std::size_t landOpenBindings = 0;
+    std::size_t landAkerBindings = 0;
+    std::size_t forestBindings = 0;
+    std::size_t noTopoFillBindings = 0;
+    std::size_t landOpenTargets = 0;
+    std::size_t landAkerTargets = 0;
+    std::size_t forestTargets = 0;
+    std::size_t zeroLandOpenTargets = 0;
+    std::size_t zeroLandAkerTargets = 0;
+    std::size_t zeroForestTargets = 0;
+    std::size_t landOpenDrawables = 0;
+    std::size_t landAkerDrawables = 0;
+    std::size_t forestDrawables = 0;
+    std::array<uint32_t, 26> landOpenSourceZooms{};
+    std::array<uint32_t, 26> landAkerSourceZooms{};
+    std::array<uint32_t, 26> forestSourceZooms{};
+    std::array<uint32_t, 26> boundDrapeZooms{};
+    static std::chrono::steady_clock::time_point lastTopoFillScan{};
+    const auto topoFillNow = std::chrono::steady_clock::now();
+    const bool topoFillScanDue = lastTopoFillScan == std::chrono::steady_clock::time_point{} ||
+                                 topoFillNow - lastTopoFillScan >= std::chrono::milliseconds(250);
     for (const auto& [idealID, binding] : nextBindings) {
         if (binding.drapeReady) ++readyBindings;
         if (binding.usedEmptyDEM) ++emptyDemBindings;
@@ -1621,6 +1703,44 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
             ++boundRasterUnknownBindings;
             continue;
         }
+
+        if (topoFillScanDue) {
+            ++topoFillResolvedBindings;
+            if (binding.drapeID && binding.drapeID->canonical.z < boundDrapeZooms.size()) {
+                boundDrapeZooms[binding.drapeID->canonical.z]++;
+            }
+            auto [fillIt, inserted] = topoFillTargets.try_emplace(boundTarget.get());
+            if (inserted) {
+                fillIt->second = klattraTopoFillTargetStats(boundTarget);
+                const auto& fill = fillIt->second;
+                if (fill.hasLandOpenGroup) {
+                    ++landOpenTargets;
+                    if (!fill.landOpenDrawables) ++zeroLandOpenTargets;
+                }
+                if (fill.hasLandAkerGroup) {
+                    ++landAkerTargets;
+                    if (!fill.landAkerDrawables) ++zeroLandAkerTargets;
+                }
+                if (fill.forestGroups) {
+                    ++forestTargets;
+                    if (!fill.forestDrawables) ++zeroForestTargets;
+                }
+                landOpenDrawables += fill.landOpenDrawables;
+                landAkerDrawables += fill.landAkerDrawables;
+                forestDrawables += fill.forestDrawables;
+                klattraAccumulateZooms(landOpenSourceZooms, fill.landOpenSourceZooms);
+                klattraAccumulateZooms(landAkerSourceZooms, fill.landAkerSourceZooms);
+                klattraAccumulateZooms(forestSourceZooms, fill.forestSourceZooms);
+            }
+            const auto& fill = fillIt->second;
+            if (fill.landOpenDrawables) ++landOpenBindings;
+            if (fill.landAkerDrawables) ++landAkerBindings;
+            if (fill.forestDrawables) ++forestBindings;
+            if (!fill.landOpenDrawables && !fill.landAkerDrawables && !fill.forestDrawables) {
+                ++noTopoFillBindings;
+            }
+        }
+
         if (!binding.drapeReady && !binding.usedDrapeFallback && boundTarget->numLayerGroups() == 0) {
             ++bgOnlyZeroGroupBindings;
         }
@@ -1632,6 +1752,61 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
             ++boundRasterEmptyBindings;
         } else if (!boundTarget->hasRasterDrawableCoveringTile(idealID)) {
             ++boundRasterPartialBindings;
+        }
+    }
+
+    // Warning-level, default-on telemetry for local diagnostic build 112.
+    // Emit at most 4 Hz while values change and at 1 Hz while stable, which is
+    // enough to correlate the two user screenshots without flooding syslog.
+    if (topoFillScanDue) {
+        lastTopoFillScan = topoFillNow;
+        const std::string signature =
+            std::to_string(nextBindings.size()) + ":" + std::to_string(topoFillResolvedBindings) + ":" +
+            std::to_string(topoFillTargets.size()) + ":" + std::to_string(fallbackDrapeBindings) + ":" +
+            std::to_string(landOpenBindings) + ":" + std::to_string(landAkerBindings) + ":" +
+            std::to_string(forestBindings) + ":" + std::to_string(noTopoFillBindings) + ":" +
+            std::to_string(landOpenTargets) + ":" + std::to_string(landAkerTargets) + ":" +
+            std::to_string(forestTargets) + ":" + std::to_string(zeroLandOpenTargets) + ":" +
+            std::to_string(zeroLandAkerTargets) + ":" + std::to_string(zeroForestTargets) + ":" +
+            std::to_string(landOpenDrawables) + ":" + std::to_string(landAkerDrawables) + ":" +
+            std::to_string(forestDrawables) + ":" + klattraZoomHistogramString(boundDrapeZooms) + ":" +
+            klattraZoomHistogramString(landOpenSourceZooms) + ":" +
+            klattraZoomHistogramString(landAkerSourceZooms) + ":" +
+            klattraZoomHistogramString(forestSourceZooms);
+        static std::string lastSignature;
+        static std::chrono::steady_clock::time_point lastEmit{};
+        const auto now = std::chrono::steady_clock::now();
+        const bool changed = signature != lastSignature;
+        const bool changeDue = changed && (lastEmit == std::chrono::steady_clock::time_point{} ||
+                                           now - lastEmit >= std::chrono::milliseconds(250));
+        const bool heartbeatDue = lastEmit == std::chrono::steady_clock::time_point{} ||
+                                  now - lastEmit >= std::chrono::seconds(1);
+        if (changeDue || heartbeatDue) {
+            lastSignature = signature;
+            lastEmit = now;
+            klattraDumpEmit(
+                "[KLATTRA FILL_COVER] diag=84 bindings=" + std::to_string(nextBindings.size()) +
+                " resolved=" + std::to_string(topoFillResolvedBindings) +
+                " targets=" + std::to_string(topoFillTargets.size()) +
+                " fallback=" + std::to_string(fallbackDrapeBindings) +
+                " openBindings=" + std::to_string(landOpenBindings) +
+                " akerBindings=" + std::to_string(landAkerBindings) +
+                " forestBindings=" + std::to_string(forestBindings) +
+                " noTopoFillBindings=" + std::to_string(noTopoFillBindings) +
+                " openTargets=" + std::to_string(landOpenTargets) +
+                " akerTargets=" + std::to_string(landAkerTargets) +
+                " forestTargets=" + std::to_string(forestTargets) +
+                " zeroTargets=" + std::to_string(zeroLandOpenTargets) + "/" +
+                    std::to_string(zeroLandAkerTargets) + "/" + std::to_string(zeroForestTargets) +
+                " drawables=" + std::to_string(landOpenDrawables) + "/" +
+                    std::to_string(landAkerDrawables) + "/" + std::to_string(forestDrawables) +
+                " drapeZ=" + klattraZoomHistogramString(boundDrapeZooms) +
+                " openZ=" + klattraZoomHistogramString(landOpenSourceZooms) +
+                " akerZ=" + klattraZoomHistogramString(landAkerSourceZooms) +
+                " forestZ=" + klattraZoomHistogramString(forestSourceZooms) +
+                " zoom=" + std::to_string(state.getZoom()) +
+                " pitchDeg=" + std::to_string(state.getPitch() * 180.0 / M_PI) +
+                " bearingDeg=" + std::to_string(state.getBearing() * 180.0 / M_PI));
         }
     }
 
@@ -2753,9 +2928,18 @@ void RenderTerrain::reduceMemoryUse(UniqueChangeRequestVec& changes) {
     // quality dip beats a jetsam kill. drapeRingByTile's keys are exactly the
     // last update's cover set (pruned to it every frame), which update()
     // keeps only as a local.
+    const std::size_t cacheBefore = drapeCache.size();
+    const std::size_t retiredBefore = retiredDrapeTargetsByTile.size();
+    const std::size_t ringSize = drapeRingByTile.size();
     retiredDrapeTargetsByTile.clear();
     auto evicted = drapeCache.pruneIf(
         [&](const OverscaledTileID& id) { return drapeRingByTile.find(id) == drapeRingByTile.end(); });
+    klattraDumpEmit("[KLATTRA MEMORY_PRUNE] diag=84 cacheBefore=" + std::to_string(cacheBefore) +
+                    " cacheAfter=" + std::to_string(drapeCache.size()) +
+                    " evicted=" + std::to_string(evicted.size()) +
+                    " retiredCleared=" + std::to_string(retiredBefore) +
+                    " ring=" + std::to_string(ringSize) +
+                    " bindings=" + std::to_string(currentBindings.size()));
     for (auto& [tileID, target] : evicted) {
         (void)tileID;
         changes.emplace_back(std::make_unique<RemoveRenderTargetRequest>(std::move(target)));
