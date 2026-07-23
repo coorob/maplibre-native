@@ -48,6 +48,15 @@ void klattraTrace(const std::string& message) {
     std::fprintf(stderr, "[KLATTRA_TRACE] %s\n", message.c_str());
 }
 
+void klattraTerrainDepthProjectionEmitOnce() {
+    static bool emitted = false;
+    if (!emitted) {
+        emitted = true;
+        Log::Warning(Event::Render,
+                     "[KLATTRA TERRAIN-PROJECTION] kind=terrain-near-clipped-depth");
+    }
+}
+
 float klattraTerrainDebugColorMode() {
     static const float mode = [] {
         if (std::getenv("KLATTRA_TERRAIN_DEBUG_FALLBACK")) return 3.0f;
@@ -110,6 +119,8 @@ void TerrainLayerTweaker::execute(LayerGroupBase& layerGroup, const PaintParamet
     if (layerGroup.empty() || !terrain) {
         return;
     }
+
+    klattraTerrainDepthProjectionEmitOnce();
 
     const auto& state = parameters.state;
     auto& context = parameters.context;
@@ -246,9 +257,14 @@ void TerrainLayerTweaker::execute(LayerGroupBase& layerGroup, const PaintParamet
 
         const UnwrappedTileID tileID = drawable.getTileID()->toUnwrapped();
 
-        // Calculate transformation matrix for this terrain tile.
-        // This uses the same matrix calculation as other layers.
-        mat4 matrix = parameters.matrixForTile(tileID);
+        // Final terrain and the deferred sea-level extrusion both participate
+        // in one physical depth comparison. Fill extrusions already use the
+        // near-clipped projection to preserve 3D depth precision, so write the
+        // final terrain into that same clip-space depth range.
+        mat4 matrix;
+        parameters.state.matrixFor(matrix, tileID);
+        matrix::multiply(
+            matrix, parameters.transformParams.nearClippedProjMatrix, matrix);
 
 #if !MLN_UBO_CONSOLIDATION
         auto& drawableUniforms = drawable.mutableUniformBuffers();
