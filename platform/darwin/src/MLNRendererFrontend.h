@@ -73,6 +73,11 @@ public:
     renderer->reduceMemoryUse();
   }
 
+  void reduceMemoryUseForMemoryPressure() {
+    if (!renderer) return;
+    renderer->reduceMemoryUseForMemoryPressure();
+  }
+
 private:
   std::unique_ptr<mbgl::Renderer> renderer;
   __weak MLNMapView* nativeView = nullptr;

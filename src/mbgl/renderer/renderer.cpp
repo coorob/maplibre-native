@@ -157,6 +157,12 @@ void Renderer::reduceMemoryUse() {
     impl->orchestrator.reduceMemoryUse();
 }
 
+void Renderer::reduceMemoryUseForMemoryPressure() {
+    gfx::BackendScope guard{impl->backend};
+    impl->reduceMemoryUse();
+    impl->orchestrator.reduceMemoryUseForMemoryPressure();
+}
+
 void Renderer::clearData() {
     impl->orchestrator.clearData();
 }

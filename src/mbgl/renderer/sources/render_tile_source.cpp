@@ -566,6 +566,10 @@ void RenderTileSource::reduceMemoryUse() {
     tilePyramid.reduceMemoryUse();
 }
 
+void RenderTileSource::reduceMemoryUseForMemoryPressure() {
+    tilePyramid.reduceMemoryUseForMemoryPressure();
+}
+
 void RenderTileSource::dumpDebugLogs() const {
     tilePyramid.dumpDebugLogs();
 }

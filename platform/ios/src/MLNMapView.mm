@@ -1087,7 +1087,7 @@ public:
   MLNAssertIsMainThread();
 
   if (!self.dormant && _rendererFrontend) {
-    _rendererFrontend->reduceMemoryUse();
+    _rendererFrontend->reduceMemoryUseForMemoryPressure();
   }
 }
 

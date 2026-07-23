@@ -114,6 +114,7 @@ public:
     virtual void setCacheEnabled(bool) {};
 
     virtual void reduceMemoryUse() = 0;
+    virtual void reduceMemoryUseForMemoryPressure() { reduceMemoryUse(); }
 
     virtual void dumpDebugLogs() const = 0;
 

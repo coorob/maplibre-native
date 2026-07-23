@@ -902,11 +902,23 @@ bool RenderOrchestrator::getTileCacheEnabled() const {
 }
 
 void RenderOrchestrator::reduceMemoryUse() {
+    reduceMemoryUse(false);
+}
+
+void RenderOrchestrator::reduceMemoryUseForMemoryPressure() {
+    reduceMemoryUse(true);
+}
+
+void RenderOrchestrator::reduceMemoryUse(bool memoryPressure) {
     MLN_TRACE_FUNC();
 
     filteredLayersForSource.shrink_to_fit();
     for (const auto& entry : renderSources) {
-        entry.second->reduceMemoryUse();
+        if (memoryPressure) {
+            entry.second->reduceMemoryUseForMemoryPressure();
+        } else {
+            entry.second->reduceMemoryUse();
+        }
     }
     imageManager->reduceMemoryUse();
     if (renderTerrain) {

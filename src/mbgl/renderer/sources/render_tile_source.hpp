@@ -48,6 +48,7 @@ public:
 
     void setCacheEnabled(bool) override;
     void reduceMemoryUse() override;
+    void reduceMemoryUseForMemoryPressure() override;
     void dumpDebugLogs() const override;
 
 protected:

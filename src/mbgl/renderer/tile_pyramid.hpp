@@ -62,6 +62,7 @@ public:
 
     void setCacheEnabled(bool);
     void reduceMemoryUse();
+    void reduceMemoryUseForMemoryPressure();
 
     void setObserver(TileObserver*);
     void dumpDebugLogs() const;
@@ -98,10 +99,10 @@ private:
     std::map<UnwrappedTileID, uint16_t> coverHoldAges;
     std::map<UnwrappedTileID, uint32_t> recentIdealTiles;
     uint32_t coverHoldUpdateIndex = 0;
-    // Launch-gated DIAG state set by reduceMemoryUse(). Normal retention is
-    // unchanged until the platform asks the renderer to shed memory.
+    // Launch-gated DIAG state set only by the explicit memory-pressure path.
+    // Routine resign-active/background cleanup leaves retention unchanged.
     bool rasterDEMPressureHalfHold = false;
-    uint32_t memoryReductionEvents = 0;
+    uint32_t memoryPressureEvents = 0;
     TileObserver* observer = nullptr;
 
     float prevLng = 0;

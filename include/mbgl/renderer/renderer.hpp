@@ -111,6 +111,7 @@ public:
     void setTileCacheEnabled(bool);
     bool getTileCacheEnabled() const;
     void reduceMemoryUse();
+    void reduceMemoryUseForMemoryPressure();
     void clearData();
 
 #if MLN_RENDER_BACKEND_OPENGL

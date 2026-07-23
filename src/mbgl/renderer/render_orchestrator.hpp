@@ -98,6 +98,7 @@ public:
     void setTileCacheEnabled(bool);
     bool getTileCacheEnabled() const;
     void reduceMemoryUse();
+    void reduceMemoryUseForMemoryPressure();
     void dumpDebugLogs();
     void collectPlacedSymbolData(bool);
     const std::vector<PlacedSymbolData>& getPlacedSymbolsData() const;
@@ -178,6 +179,7 @@ public:
     bool hillshadeBakesPending() const;
 
 private:
+    void reduceMemoryUse(bool memoryPressure);
     bool isLoaded() const;
     bool hasTransitions(TimePoint) const;
 

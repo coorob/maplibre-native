@@ -384,8 +384,8 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
         return v && *v && !(*v == '0' || *v == 'f' || *v == 'F');
     }();
     // DIAG: do not reduce normal continuity quality pre-emptively. After the
-    // platform invokes reduceMemoryUse(), halve only the custom RasterDEM
-    // fallback allowance for active terrain. The current active cover,
+    // platform reports an actual memory warning, halve only the custom
+    // RasterDEM fallback allowance for active terrain. The current active cover,
     // holdForFade tiles, and RenderTerrain's atomic complete-cover swap are
     // independent of this budget.
     static const bool rasterDEMPressureHalfHoldEnabled = [] {
@@ -573,7 +573,7 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
                         " ancestorMode=" + std::to_string(retireLoadedRasterDEMAncestors ? 1 : 0) +
                         " ancestorRetired=" + std::to_string(coverRetiredAncestor) +
                         " pressureMode=" + std::to_string(pressureHalfHold ? 1 : 0) +
-                        " pressureEvents=" + std::to_string(memoryReductionEvents) +
+                        " pressureEvents=" + std::to_string(memoryPressureEvents) +
                         " aged=" + std::to_string(coverRejectedAge) +
                         " expiredOff=" + std::to_string(coverExpiredOffscreen) +
                         " notRenderable=" + std::to_string(coverRejectedNotRenderable) +
@@ -603,7 +603,7 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
                             retireLoadedRasterDEMAncestors ? 1 : 0,
                             coverRetiredAncestor,
                             pressureHalfHold ? 1 : 0,
-                            memoryReductionEvents,
+                            memoryPressureEvents,
                             coverRejectedAge,
                             coverExpiredOffscreen,
                             coverRejectedNotRenderable,
@@ -867,7 +867,11 @@ void TilePyramid::setCacheEnabled(bool enable) {
 
 void TilePyramid::reduceMemoryUse() {
     cache.clear();
-    ++memoryReductionEvents;
+}
+
+void TilePyramid::reduceMemoryUseForMemoryPressure() {
+    reduceMemoryUse();
+    ++memoryPressureEvents;
     static const bool rasterDEMPressureHalfHoldEnabled = [] {
         const char* v = std::getenv("KLATTRA_RASTER_DEM_PRESSURE_HALF_HOLD");
         return v && *v && !(*v == '0' || *v == 'f' || *v == 'F');
