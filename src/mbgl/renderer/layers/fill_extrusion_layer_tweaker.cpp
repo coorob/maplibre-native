@@ -6,6 +6,7 @@
 #include <mbgl/gfx/renderer_backend.hpp>
 #include <mbgl/renderer/buckets/fill_extrusion_bucket.hpp>
 #include <mbgl/renderer/layer_group.hpp>
+#include <mbgl/renderer/render_terrain.hpp>
 #include <mbgl/renderer/render_tile.hpp>
 #include <mbgl/renderer/render_tree.hpp>
 #include <mbgl/renderer/paint_parameters.hpp>
@@ -13,6 +14,11 @@
 #include <mbgl/shaders/fill_extrusion_layer_ubo.hpp>
 #include <mbgl/shaders/shader_program_base.hpp>
 #include <mbgl/style/layers/fill_extrusion_layer_properties.hpp>
+#include <mbgl/util/logging.hpp>
+
+#include <cmath>
+#include <cstdlib>
+#include <string_view>
 
 #if MLN_RENDER_BACKEND_METAL
 #include <mbgl/shaders/mtl/fill_extrusion.hpp>
@@ -22,6 +28,41 @@ namespace mbgl {
 
 using namespace shaders;
 using namespace style;
+
+namespace {
+
+constexpr std::string_view klattraSeaLevelLayerSuffix{"__sea-level"};
+
+bool isKlattraSeaLevelLayer(const std::string& layerID) {
+    return layerID.size() >= klattraSeaLevelLayerSuffix.size() &&
+           layerID.compare(layerID.size() - klattraSeaLevelLayerSuffix.size(),
+                           klattraSeaLevelLayerSuffix.size(),
+                           klattraSeaLevelLayerSuffix) == 0;
+}
+
+float klattraTerrainVerticalOffset(const RenderTerrain& terrain, const TransformState& state) {
+    if (std::getenv("KLATTRA_TERRAIN_ABSOLUTE_HEIGHTS") != nullptr) {
+        return 0.0f;
+    }
+
+    const float fallbackElevationOrigin =
+        std::abs(state.getLatLng().latitude()) >= 60.0 ? 1000.0f : 0.0f;
+    const float elevationOrigin =
+        terrain.getElevationOriginMeters().value_or(fallbackElevationOrigin);
+    return -elevationOrigin * terrain.getExaggeration();
+}
+
+void klattraSeaLevelOriginEmitOnce(float verticalOffset) {
+    static bool emitted = false;
+    if (!emitted) {
+        emitted = true;
+        Log::Warning(Event::Render,
+                     "[KLATTRA SEA-LEVEL] kind=terrain-origin-aligned offset=" +
+                         std::to_string(verticalOffset));
+    }
+}
+
+} // namespace
 
 void FillExtrusionLayerTweaker::execute(LayerGroupBase& layerGroup, const PaintParameters& parameters) {
     if (layerGroup.empty()) {
@@ -33,6 +74,15 @@ void FillExtrusionLayerTweaker::execute(LayerGroupBase& layerGroup, const PaintP
     const auto& evaluated = props.evaluated;
     const auto& crossfade = props.crossfade;
     const auto& state = parameters.state;
+    const bool alignToTerrainOrigin =
+        parameters.activeTerrain && isKlattraSeaLevelLayer(id);
+    const float terrainVerticalOffset =
+        alignToTerrainOrigin
+            ? klattraTerrainVerticalOffset(*parameters.activeTerrain, state)
+            : 0.0f;
+    if (alignToTerrainOrigin) {
+        klattraSeaLevelOriginEmitOnce(terrainVerticalOffset);
+    }
 
 #if !defined(NDEBUG)
     const auto label = layerGroup.getName() + "-update-uniforms";
@@ -87,8 +137,16 @@ void FillExtrusionLayerTweaker::execute(LayerGroupBase& layerGroup, const PaintP
         const auto anchor = evaluated.get<FillExtrusionTranslateAnchor>();
         constexpr bool inViewportPixelUnits = false; // from RenderTile::translatedMatrix
         constexpr bool nearClipped = true;
-        const auto matrix = getTileMatrix(
+        auto matrix = getTileMatrix(
             tileID, parameters, translation, anchor, nearClipped, inViewportPixelUnits, drawable);
+        if (alignToTerrainOrigin) {
+            // The custom final terrain mesh is rebased every frame around the
+            // DEM elevation under the camera. Sea-level geometry rendered
+            // after that mesh must use the identical vertical origin or the
+            // apparent water level changes as the camera moves.
+            mbgl::matrix::translate(
+                matrix, matrix, 0.0, 0.0, terrainVerticalOffset);
+        }
 
         const auto tileRatio = 1 / tileID.pixelsToTileUnits(1, state.getIntegerZoom());
         const auto zoomScale = state.zoomScale(tileID.canonical.z);
