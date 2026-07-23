@@ -103,6 +103,7 @@ private:
     // proactive physical-footprint high-water path. Routine
     // resign-active/background cleanup leaves retention unchanged.
     bool rasterDEMPressureHalfHold = false;
+    bool nonRasterDEMPressureCoverHold = false;
     uint32_t memoryPressureEvents = 0;
     uint32_t memoryHighWaterTrips = 0;
     TileObserver* observer = nullptr;

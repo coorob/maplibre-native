@@ -32,6 +32,16 @@ constexpr std::size_t rasterDEMPressureCoverHoldBudget(const std::size_t normalB
     return normalBudget <= 1 ? normalBudget : normalBudget / 2 + normalBudget % 2;
 }
 
+// Under explicit memory pressure, bound the custom continuity hold for other
+// tiled sources without making any coverage claim about sparse vector data.
+// Keep at least one current-cover-sized fallback; active/renderable tiles and
+// ordinary fade holds are retained independently of this budget. A zero
+// configured cap keeps the diagnostic disabled.
+constexpr std::size_t nonRasterDEMPressureCoverHoldBudget(const std::size_t configuredCap,
+                                                          const std::size_t activeIdealCount) noexcept {
+    return configuredCap == 0 ? 0 : std::max(configuredCap, activeIdealCount);
+}
+
 constexpr std::size_t recentIdealBudget(const std::size_t coverHoldBudget) noexcept {
     return coverHoldBudget > std::numeric_limits<std::size_t>::max() / 2 ? std::numeric_limits<std::size_t>::max()
                                                                          : coverHoldBudget * 2;

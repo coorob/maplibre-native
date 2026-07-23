@@ -30,6 +30,13 @@ TEST(CoverHoldBudget, MirrorsTheActiveRasterDEMCoverCap) {
     EXPECT_EQ(cover_hold::recentIdealBudget(56), 112u);
 }
 
+TEST(CoverHoldBudget, KeepsOneCoverWhenBoundingNonRasterDEMFallbacksUnderPressure) {
+    EXPECT_EQ(cover_hold::nonRasterDEMPressureCoverHoldBudget(16, 7), 16u);
+    EXPECT_EQ(cover_hold::nonRasterDEMPressureCoverHoldBudget(16, 16), 16u);
+    EXPECT_EQ(cover_hold::nonRasterDEMPressureCoverHoldBudget(16, 24), 24u);
+    EXPECT_EQ(cover_hold::nonRasterDEMPressureCoverHoldBudget(0, 24), 0u);
+}
+
 TEST(CoverHoldBudget, KeepsTheYoungestCompleteCoverInsteadOfOlderHistory) {
     std::vector<cover_hold::Candidate> candidates;
     for (uint32_t x = 0; x < 4; ++x) {
