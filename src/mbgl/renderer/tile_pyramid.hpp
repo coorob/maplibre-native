@@ -99,10 +99,12 @@ private:
     std::map<UnwrappedTileID, uint16_t> coverHoldAges;
     std::map<UnwrappedTileID, uint32_t> recentIdealTiles;
     uint32_t coverHoldUpdateIndex = 0;
-    // Launch-gated DIAG state set only by the explicit memory-pressure path.
-    // Routine resign-active/background cleanup leaves retention unchanged.
+    // Launch-gated DIAG state set by the explicit memory-pressure path or the
+    // proactive physical-footprint high-water path. Routine
+    // resign-active/background cleanup leaves retention unchanged.
     bool rasterDEMPressureHalfHold = false;
     uint32_t memoryPressureEvents = 0;
+    uint32_t memoryHighWaterTrips = 0;
     TileObserver* observer = nullptr;
 
     float prevLng = 0;

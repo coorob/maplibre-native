@@ -392,6 +392,17 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
         const char* v = std::getenv("KLATTRA_RASTER_DEM_PRESSURE_HALF_HOLD");
         return v && *v && !(*v == '0' || *v == 'f' || *v == 'F');
     }();
+    // DIAG: iOS 18.1.1 on the physical iPhone 13 can jump directly from a
+    // healthy process footprint to the fatal per-process jetsam limit without
+    // delivering UIApplicationDidReceiveMemoryWarning. When explicitly set,
+    // use the same sticky half-hold safety policy before that final surge.
+    static const int64_t rasterDEMHighWaterHalfHoldMB = [] {
+        const char* v = std::getenv("KLATTRA_RASTER_DEM_HIGHWATER_HALF_HOLD_MB");
+        if (!v || !*v) return int64_t{0};
+        char* end = nullptr;
+        const long parsed = std::strtol(v, &end, 10);
+        return end != v && parsed > 0 ? static_cast<int64_t>(parsed) : int64_t{0};
+    }();
 
     // GeoJSON sources are local and immediately renderable. Extending their
     // previous cover provides no loading bridge, while terrain-draped line
@@ -403,8 +414,37 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
     const bool boundedRasterDEMCoverHold = coverHoldEnabledForSource && type == SourceType::RasterDEM;
     const std::size_t normalCoverHoldBudget =
         boundedRasterDEMCoverHold ? cover_hold::rasterDEMCoverHoldBudget(parameters.tileCoverMaxTiles) : 0;
+    KlattraMemorySample highWaterMemory;
+    const bool highWaterHalfHoldEnabled = boundedRasterDEMCoverHold && parameters.usedByTerrain &&
+                                          rasterDEMHighWaterHalfHoldMB > 0;
+    if (highWaterHalfHoldEnabled) {
+        highWaterMemory = klattraMemorySample();
+        if (!rasterDEMPressureHalfHold && highWaterMemory.physicalMB >= rasterDEMHighWaterHalfHoldMB) {
+            // Match the explicit iOS memory-pressure path: shed cached tiles
+            // immediately, then keep the reduced cover-hold budget sticky for
+            // the rest of this source's lifetime.
+            cache.clear();
+            rasterDEMPressureHalfHold = true;
+            ++memoryHighWaterTrips;
+            Log::Warning(Event::Render,
+                         "[KLATTRA DEM HIGHWATER] source=" + sourceImpl.id +
+                             " thresholdMB=" + std::to_string(rasterDEMHighWaterHalfHoldMB) +
+                             " physMB=" + std::to_string(highWaterMemory.physicalMB) +
+                             " trips=" + std::to_string(memoryHighWaterTrips));
+            static const bool traceStderr = std::getenv("KLATTRA_TRACE_STDERR") != nullptr;
+            if (traceStderr) {
+                fprintf(stderr,
+                        "[KLATTRA_TRACE] [KLATTRA DEM HIGHWATER] source=%s thresholdMB=%lld physMB=%lld trips=%u\n",
+                        sourceImpl.id.c_str(),
+                        static_cast<long long>(rasterDEMHighWaterHalfHoldMB),
+                        static_cast<long long>(highWaterMemory.physicalMB),
+                        memoryHighWaterTrips);
+            }
+        }
+    }
+    const bool halfHoldEnabled = rasterDEMPressureHalfHoldEnabled || highWaterHalfHoldEnabled;
     const bool pressureHalfHold = boundedRasterDEMCoverHold && parameters.usedByTerrain &&
-                                  rasterDEMPressureHalfHoldEnabled && rasterDEMPressureHalfHold;
+                                  halfHoldEnabled && rasterDEMPressureHalfHold;
     const std::size_t coverHoldBudget =
         pressureHalfHold ? cover_hold::rasterDEMPressureCoverHoldBudget(normalCoverHoldBudget)
                          : normalCoverHoldBudget;
@@ -574,6 +614,8 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
                         " ancestorRetired=" + std::to_string(coverRetiredAncestor) +
                         " pressureMode=" + std::to_string(pressureHalfHold ? 1 : 0) +
                         " pressureEvents=" + std::to_string(memoryPressureEvents) +
+                        " highWaterMB=" + std::to_string(rasterDEMHighWaterHalfHoldMB) +
+                        " highWaterTrips=" + std::to_string(memoryHighWaterTrips) +
                         " aged=" + std::to_string(coverRejectedAge) +
                         " expiredOff=" + std::to_string(coverExpiredOffscreen) +
                         " notRenderable=" + std::to_string(coverRejectedNotRenderable) +
@@ -587,7 +629,8 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
                             "held=%zu eligible=%zu budget=%zu budgetEvicted=%zu fadeHeld=%zu "
                             "recentIdeal=%zu recentExpired=%zu recentEvicted=%zu retired=%zu "
                             "ancestorMode=%d ancestorRetired=%zu pressureMode=%d pressureEvents=%u aged=%zu "
-                            "expiredOff=%zu notRenderable=%zu relayout=%zu physMB=%lld physPeakMB=%lld\n",
+                            "highWaterMB=%lld highWaterTrips=%u expiredOff=%zu notRenderable=%zu relayout=%zu "
+                            "physMB=%lld physPeakMB=%lld\n",
                             sourceImpl.id.c_str(),
                             idealTiles.size(),
                             renderedTiles.size(),
@@ -605,6 +648,8 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
                             pressureHalfHold ? 1 : 0,
                             memoryPressureEvents,
                             coverRejectedAge,
+                            static_cast<long long>(rasterDEMHighWaterHalfHoldMB),
+                            memoryHighWaterTrips,
                             coverExpiredOffscreen,
                             coverRejectedNotRenderable,
                             coverRejectedRelayout,
