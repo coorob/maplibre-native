@@ -485,6 +485,12 @@ private:
     // tiles). Read by the orchestrator via hasPendingDrapeWork().
     bool drapeWorkPending = false;
 
+    // Launch-gated sticky response to the shared high-water signal or an
+    // explicit platform memory warning. It reduces only out-of-view drape
+    // population; visible terrain meshes remain protected by the selection
+    // loop in update().
+    bool drapePressureCapActive = false;
+
     // Recent camera centres in global mercator [0,1) units. The displacement
     // across this short window is the ground-velocity estimate that drives
     // the forward drape pre-bake strip (the lookahead block in update()).

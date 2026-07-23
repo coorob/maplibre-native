@@ -1,5 +1,6 @@
 #include <mbgl/renderer/render_terrain.hpp>
 #include <mbgl/algorithm/update_tile_masks.hpp>
+#include <mbgl/renderer/cover_hold_budget.hpp>
 #include <mbgl/renderer/update_parameters.hpp>
 #include <mbgl/renderer/render_source.hpp>
 #include <mbgl/renderer/render_tile.hpp>
@@ -315,6 +316,11 @@ uint32_t klattraEnvTileCount(const char* name, uint32_t fallback) {
     const unsigned long parsed = std::strtoul(value, &end, 10);
     if (end == value) return fallback;
     return static_cast<uint32_t>(std::clamp<unsigned long>(parsed, 0, 512));
+}
+
+uint32_t klattraDrapePressureTotalCap() {
+    static const uint32_t cap = klattraEnvTileCount("KLATTRA_DRAPE_PRESSURE_TOTAL_CAP", 0);
+    return cap;
 }
 
 uint32_t klattraEnvFrameCount(const char* name, uint32_t fallback) {
@@ -683,6 +689,8 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
     double drapeProjY = centerY;
     uint32_t lookaheadStripAdded = 0;
     double lookaheadSpanTiles = 0.0;
+    uint32_t activeDrapePopulationCap = 0;
+    std::size_t drapePopulationCapEvicted = 0;
     {
         const auto nowTime = std::chrono::steady_clock::now();
         drapeCameraSamples.push_back({centerX, centerY, nowTime});
@@ -858,7 +866,20 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
         // canvases faster than the prune releases them.
         static const uint32_t drapeTotalCapStable = klattraEnvTileCount("KLATTRA_DRAPE_TOTAL_CAP", 240);
         static const uint32_t drapeTotalCapMoving = klattraEnvTileCount("KLATTRA_DRAPE_TOTAL_CAP_MOVING", 200);
-        const uint32_t drapeTotalCap = useHighQualityDrape ? drapeTotalCapStable : drapeTotalCapMoving;
+        const uint32_t normalDrapeTotalCap =
+            useHighQualityDrape ? drapeTotalCapStable : drapeTotalCapMoving;
+        if (!drapePressureCapActive && klattraDrapePressureTotalCap() > 0 &&
+            cover_hold::processPressureActive()) {
+            drapePressureCapActive = true;
+            klattraDumpEmit("[KLATTRA DRAPE PRESSURE] active=1 reason=shared-highwater cap=" +
+                            std::to_string(klattraDrapePressureTotalCap()));
+        }
+        const uint32_t drapeTotalCap = static_cast<uint32_t>(
+            cover_hold::pressureDrapePopulationBudget(normalDrapeTotalCap,
+                                                      klattraDrapePressureTotalCap(),
+                                                      drapePressureCapActive,
+                                                      terrainMeshIDs.size()));
+        activeDrapePopulationCap = drapeTotalCap;
         if (drapeTotalCap > 0 && rankedDrapeIDs.size() > drapeTotalCap) {
             std::size_t kept = rankedDrapeIDs.size();
             for (std::size_t i = rankedDrapeIDs.size(); i > 0 && kept > drapeTotalCap; --i) {
@@ -868,6 +889,7 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
                 }
                 currentDrapeIDs.erase(candidate);
                 kept--;
+                drapePopulationCapEvicted++;
             }
             if (kept < rankedDrapeIDs.size()) {
                 rankedDrapeIDs.erase(std::remove_if(rankedDrapeIDs.begin(),
@@ -2293,6 +2315,11 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
                 " demShared=" + std::to_string(bucketSharedDEMTextures) +
                 " drape565=" + std::to_string(gauge565) +
                 " drapeMips=" + std::to_string(drapeMips) +
+                " drapePressureMode=" + std::to_string(drapePressureCapActive) +
+                " drapePressureCap=" + std::to_string(klattraDrapePressureTotalCap()) +
+                " drapeCap=" + std::to_string(activeDrapePopulationCap) +
+                " drapeVisible=" + std::to_string(terrainMeshIDs.size()) +
+                " drapeCapEvicted=" + std::to_string(drapePopulationCapEvicted) +
                 " liveTiers=" + std::to_string(liveTiers[0]) + "/" + std::to_string(liveTiers[1]) + "/" +
                     std::to_string(liveTiers[2]) +
                 " retiredTiers=" + std::to_string(retiredTiers[0]) + "/" +
@@ -2907,6 +2934,11 @@ void RenderTerrain::reduceMemoryUse(UniqueChangeRequestVec& changes) {
     // quality dip beats a jetsam kill. drapeRingByTile's keys are exactly the
     // last update's cover set (pruned to it every frame), which update()
     // keeps only as a local.
+    if (!drapePressureCapActive && klattraDrapePressureTotalCap() > 0) {
+        drapePressureCapActive = true;
+        klattraDumpEmit("[KLATTRA DRAPE PRESSURE] active=1 reason=platform-warning cap=" +
+                        std::to_string(klattraDrapePressureTotalCap()));
+    }
     const std::size_t cacheBefore = drapeCache.size();
     const std::size_t retiredBefore = retiredDrapeTargetsByTile.size();
     const std::size_t ringSize = drapeRingByTile.size();

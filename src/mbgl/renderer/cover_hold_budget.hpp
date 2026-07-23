@@ -3,6 +3,7 @@
 #include <mbgl/tile/tile_id.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -40,6 +41,35 @@ constexpr std::size_t rasterDEMPressureCoverHoldBudget(const std::size_t normalB
 constexpr std::size_t nonRasterDEMPressureCoverHoldBudget(const std::size_t configuredCap,
                                                           const std::size_t activeIdealCount) noexcept {
     return configuredCap == 0 ? 0 : std::max(configuredCap, activeIdealCount);
+}
+
+// DIAG: the drape population already protects visible terrain meshes
+// separately. Under pressure, reduce only the total target allowance that
+// normally also includes overscan and parent-fallback canvases. A disabled or
+// larger pressure cap leaves the established moving/stable budget untouched.
+constexpr std::size_t pressureDrapePopulationBudget(const std::size_t normalBudget,
+                                                    const std::size_t configuredPressureCap,
+                                                    const bool pressureActive,
+                                                    const std::size_t visibleTerrainCount) noexcept {
+    const std::size_t selectedBudget =
+        pressureActive && configuredPressureCap > 0 ? std::min(normalBudget, configuredPressureCap) : normalBudget;
+    return std::max(selectedBudget, visibleTerrainCount);
+}
+
+// Sticky process-wide signal shared by the terrain DEM sampler, the other
+// TilePyramids, and RenderTerrain. The launch-gated consumers decide what to
+// shed; setting this flag alone does not alter production behavior.
+inline std::atomic_bool& processPressureState() noexcept {
+    static std::atomic_bool active{false};
+    return active;
+}
+
+inline void activateProcessPressure() noexcept {
+    processPressureState().store(true, std::memory_order_release);
+}
+
+inline bool processPressureActive() noexcept {
+    return processPressureState().load(std::memory_order_acquire);
 }
 
 constexpr std::size_t recentIdealBudget(const std::size_t coverHoldBudget) noexcept {

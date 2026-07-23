@@ -37,6 +37,14 @@ TEST(CoverHoldBudget, KeepsOneCoverWhenBoundingNonRasterDEMFallbacksUnderPressur
     EXPECT_EQ(cover_hold::nonRasterDEMPressureCoverHoldBudget(0, 24), 0u);
 }
 
+TEST(CoverHoldBudget, ReducesOnlyTheExtraDrapePopulationAfterPressure) {
+    EXPECT_EQ(cover_hold::pressureDrapePopulationBudget(240, 128, false, 112), 240u);
+    EXPECT_EQ(cover_hold::pressureDrapePopulationBudget(240, 0, true, 112), 240u);
+    EXPECT_EQ(cover_hold::pressureDrapePopulationBudget(240, 128, true, 112), 128u);
+    EXPECT_EQ(cover_hold::pressureDrapePopulationBudget(200, 128, true, 184), 184u);
+    EXPECT_EQ(cover_hold::pressureDrapePopulationBudget(200, 256, true, 112), 200u);
+}
+
 TEST(CoverHoldBudget, KeepsTheYoungestCompleteCoverInsteadOfOlderHistory) {
     std::vector<cover_hold::Candidate> candidates;
     for (uint32_t x = 0; x < 4; ++x) {

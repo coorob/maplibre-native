@@ -89,11 +89,6 @@ KlattraMemorySample klattraMemorySample() {
 // process. The active terrain DEM samples the physical footprint once per
 // update; when it trips, the other tiled sources can react on their next
 // update without each issuing its own task_info call.
-std::atomic_bool& klattraCoverHoldPressureActive() {
-    static std::atomic_bool active{false};
-    return active;
-}
-
 std::atomic_bool& klattraCoverHoldHighWaterTripped() {
     static std::atomic_bool tripped{false};
     return tripped;
@@ -455,7 +450,7 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
             cache.clear();
             rasterDEMPressureHalfHold = true;
             klattraCoverHoldHighWaterTripped().store(true, std::memory_order_release);
-            klattraCoverHoldPressureActive().store(true, std::memory_order_release);
+            cover_hold::activateProcessPressure();
             ++memoryHighWaterTrips;
             Log::Warning(Event::Render,
                          "[KLATTRA DEM HIGHWATER] source=" + sourceImpl.id +
@@ -474,7 +469,7 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
         }
     }
     if (nonRasterDEMPressureCapEnabled && !nonRasterDEMPressureCoverHold &&
-        klattraCoverHoldPressureActive().load(std::memory_order_acquire)) {
+        cover_hold::processPressureActive()) {
         cache.clear();
         nonRasterDEMPressureCoverHold = true;
         if (klattraCoverHoldHighWaterTripped().load(std::memory_order_acquire)) {
@@ -991,7 +986,7 @@ void TilePyramid::reduceMemoryUseForMemoryPressure() {
     }
     if (klattraNonRasterDEMPressureCoverHoldCap() > 0) {
         nonRasterDEMPressureCoverHold = true;
-        klattraCoverHoldPressureActive().store(true, std::memory_order_release);
+        cover_hold::activateProcessPressure();
     }
 }
 
