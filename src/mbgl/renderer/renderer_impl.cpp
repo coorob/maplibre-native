@@ -8,6 +8,7 @@
 #include <mbgl/gfx/renderer_backend.hpp>
 #include <mbgl/gfx/renderable.hpp>
 #include <mbgl/gfx/upload_pass.hpp>
+#include <mbgl/renderer/layer_group.hpp>
 #include <mbgl/renderer/paint_parameters.hpp>
 #include <mbgl/renderer/pattern_atlas.hpp>
 #include <mbgl/renderer/renderer_observer.hpp>
@@ -80,6 +81,24 @@ double klattraPrebakeGateTimeoutMs() {
         return 2500.0;
     }();
     return ms;
+}
+
+bool hasEnabled3DDrawables(LayerGroupBase& layerGroup, RenderPass pass) {
+    bool has3D = false;
+    visitLayerGroupDrawables(layerGroup, [&](const gfx::Drawable& drawable) {
+        has3D =
+            has3D || (drawable.getEnabled() && drawable.getIs3D() && drawable.hasRenderPass(pass));
+    });
+    return has3D;
+}
+
+void klattraPostTerrain3DEmitOnce() {
+    static const bool trace = std::getenv("KLATTRA_TRACE_POST_TERRAIN_3D") != nullptr;
+    static bool emitted = false;
+    if (trace && !emitted) {
+        emitted = true;
+        klattraPrebakeEmit("[KLATTRA POST-TERRAIN-3D] kind=post-terrain-depth-tested");
+    }
 }
 
 } // namespace
@@ -484,10 +503,15 @@ void Renderer::Impl::render(const RenderTree& renderTree, const std::shared_ptr<
 
         // draw layer groups, translucent pass
         auto* terrain = orchestrator.getRenderTerrain();
-        const auto terrainLayerGroup = terrain ? terrain->getLayerGroup() : nullptr;
+        const auto terrainLayerGroup =
+            terrain && terrain->isEnabled() ? terrain->getLayerGroup() : nullptr;
         parameters.currentLayer = static_cast<uint32_t>(orchestrator.numLayerGroups()) - 1;
         orchestrator.visitLayerGroups([&](LayerGroupBase& layerGroup) {
-            if (terrainLayerGroup && terrainLayerGroup.get() == &layerGroup) {
+            const bool deferUntilAfterTerrain =
+                terrainLayerGroup && terrainLayerGroup.get() != &layerGroup &&
+                hasEnabled3DDrawables(layerGroup, parameters.pass);
+            if ((terrainLayerGroup && terrainLayerGroup.get() == &layerGroup) ||
+                deferUntilAfterTerrain) {
                 if (parameters.currentLayer > 0) {
                     parameters.currentLayer--;
                 }
@@ -538,6 +562,35 @@ void Renderer::Impl::render(const RenderTree& renderTree, const std::shared_ptr<
         parameters.depthRangeSize = 1.0f;
         parameters.currentLayer = 0;
         terrain->getLayerGroup()->render(orchestrator, parameters);
+    };
+
+    const auto drawablePostTerrain3DPass = [&] {
+        auto* terrain = orchestrator.getRenderTerrain();
+        if (!terrain || !terrain->isEnabled() || !terrain->getLayerGroup() ||
+            !parameters.renderPass) {
+            return;
+        }
+
+        // The custom terrain pass intentionally clears the flat-map depth
+        // plane and draws the displaced terrain last. Rendering ordinary 3D
+        // drawables before that pass makes the terrain paint over them
+        // regardless of their height. Defer those groups and draw them now,
+        // in the same pass, so they depth-test against the terrain mesh.
+        klattraPostTerrain3DEmitOnce();
+        const auto debugGroup(parameters.renderPass->createDebugGroup("post-terrain-3d"));
+        const auto terrainLayerGroup = terrain->getLayerGroup();
+        parameters.pass = RenderPass::Translucent;
+        parameters.depthRangeSize = 1.0f;
+        parameters.currentLayer = static_cast<uint32_t>(orchestrator.numLayerGroups()) - 1;
+        orchestrator.visitLayerGroups([&](LayerGroupBase& layerGroup) {
+            if (terrainLayerGroup.get() != &layerGroup &&
+                hasEnabled3DDrawables(layerGroup, parameters.pass)) {
+                layerGroup.render(orchestrator, parameters);
+            }
+            if (parameters.currentLayer > 0) {
+                parameters.currentLayer--;
+            }
+        });
     };
 
     const auto drawableDebugOverlays = [&] {
@@ -598,6 +651,7 @@ void Renderer::Impl::render(const RenderTree& renderTree, const std::shared_ptr<
         drawableOpaquePass();
         drawableTranslucentPass();
         drawableTerrainPass();
+        drawablePostTerrain3DPass();
         drawableDebugOverlays();
     }
 
