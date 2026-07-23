@@ -21,7 +21,13 @@ TEST(CoverHoldBudget, MirrorsTheActiveRasterDEMCoverCap) {
     EXPECT_EQ(cover_hold::rasterDEMCoverHoldBudget(112), 112u);
     EXPECT_EQ(cover_hold::rasterDEMCoverHoldBudget(384), 384u);
     EXPECT_EQ(cover_hold::rasterDEMCoverHoldBudget(0), cover_hold::rasterDEMFallbackBudget);
+    EXPECT_EQ(cover_hold::rasterDEMPressureCoverHoldBudget(112), 56u);
+    EXPECT_EQ(cover_hold::rasterDEMPressureCoverHoldBudget(384), 192u);
+    EXPECT_EQ(cover_hold::rasterDEMPressureCoverHoldBudget(3), 2u);
+    EXPECT_EQ(cover_hold::rasterDEMPressureCoverHoldBudget(1), 1u);
+    EXPECT_EQ(cover_hold::rasterDEMPressureCoverHoldBudget(0), 0u);
     EXPECT_EQ(cover_hold::recentIdealBudget(112), 224u);
+    EXPECT_EQ(cover_hold::recentIdealBudget(56), 112u);
 }
 
 TEST(CoverHoldBudget, KeepsTheYoungestCompleteCoverInsteadOfOlderHistory) {

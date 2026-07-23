@@ -98,6 +98,10 @@ private:
     std::map<UnwrappedTileID, uint16_t> coverHoldAges;
     std::map<UnwrappedTileID, uint32_t> recentIdealTiles;
     uint32_t coverHoldUpdateIndex = 0;
+    // Launch-gated DIAG state set by reduceMemoryUse(). Normal retention is
+    // unchanged until the platform asks the renderer to shed memory.
+    bool rasterDEMPressureHalfHold = false;
+    uint32_t memoryReductionEvents = 0;
     TileObserver* observer = nullptr;
 
     float prevLng = 0;

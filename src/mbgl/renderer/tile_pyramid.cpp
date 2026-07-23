@@ -383,6 +383,15 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
         const char* v = std::getenv("KLATTRA_RASTER_DEM_RETIRE_LOADED_ANCESTORS");
         return v && *v && !(*v == '0' || *v == 'f' || *v == 'F');
     }();
+    // DIAG: do not reduce normal continuity quality pre-emptively. After the
+    // platform invokes reduceMemoryUse(), halve only the custom RasterDEM
+    // fallback allowance for active terrain. The current active cover,
+    // holdForFade tiles, and RenderTerrain's atomic complete-cover swap are
+    // independent of this budget.
+    static const bool rasterDEMPressureHalfHoldEnabled = [] {
+        const char* v = std::getenv("KLATTRA_RASTER_DEM_PRESSURE_HALF_HOLD");
+        return v && *v && !(*v == '0' || *v == 'f' || *v == 'F');
+    }();
 
     // GeoJSON sources are local and immediately renderable. Extending their
     // previous cover provides no loading bridge, while terrain-draped line
@@ -392,9 +401,13 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
     const bool coverHoldEnabledForSource = !coverHoldDisabled && type != SourceType::GeoJSON;
 
     const bool boundedRasterDEMCoverHold = coverHoldEnabledForSource && type == SourceType::RasterDEM;
-    const std::size_t coverHoldBudget = boundedRasterDEMCoverHold
-                                            ? cover_hold::rasterDEMCoverHoldBudget(parameters.tileCoverMaxTiles)
-                                            : 0;
+    const std::size_t normalCoverHoldBudget =
+        boundedRasterDEMCoverHold ? cover_hold::rasterDEMCoverHoldBudget(parameters.tileCoverMaxTiles) : 0;
+    const bool pressureHalfHold = boundedRasterDEMCoverHold && parameters.usedByTerrain &&
+                                  rasterDEMPressureHalfHoldEnabled && rasterDEMPressureHalfHold;
+    const std::size_t coverHoldBudget =
+        pressureHalfHold ? cover_hold::rasterDEMPressureCoverHoldBudget(normalCoverHoldBudget)
+                         : normalCoverHoldBudget;
     const std::size_t recentIdealCap = boundedRasterDEMCoverHold ? cover_hold::recentIdealBudget(coverHoldBudget) : 0;
     const bool retireLoadedRasterDEMAncestors =
         boundedRasterDEMCoverHold && parameters.usedByTerrain && rasterDEMRetireLoadedAncestors;
@@ -559,6 +572,8 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
                         std::to_string(recentIdealEvicted) + " retired=" + std::to_string(coverRetiredCovered) +
                         " ancestorMode=" + std::to_string(retireLoadedRasterDEMAncestors ? 1 : 0) +
                         " ancestorRetired=" + std::to_string(coverRetiredAncestor) +
+                        " pressureMode=" + std::to_string(pressureHalfHold ? 1 : 0) +
+                        " pressureEvents=" + std::to_string(memoryReductionEvents) +
                         " aged=" + std::to_string(coverRejectedAge) +
                         " expiredOff=" + std::to_string(coverExpiredOffscreen) +
                         " notRenderable=" + std::to_string(coverRejectedNotRenderable) +
@@ -571,7 +586,7 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
                             "[KLATTRA_TRACE] [KLATTRA COVERHOLD] source=%s ideal=%zu rendered=%zu "
                             "held=%zu eligible=%zu budget=%zu budgetEvicted=%zu fadeHeld=%zu "
                             "recentIdeal=%zu recentExpired=%zu recentEvicted=%zu retired=%zu "
-                            "ancestorMode=%d ancestorRetired=%zu aged=%zu "
+                            "ancestorMode=%d ancestorRetired=%zu pressureMode=%d pressureEvents=%u aged=%zu "
                             "expiredOff=%zu notRenderable=%zu relayout=%zu physMB=%lld physPeakMB=%lld\n",
                             sourceImpl.id.c_str(),
                             idealTiles.size(),
@@ -587,6 +602,8 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
                             coverRetiredCovered,
                             retireLoadedRasterDEMAncestors ? 1 : 0,
                             coverRetiredAncestor,
+                            pressureHalfHold ? 1 : 0,
+                            memoryReductionEvents,
                             coverRejectedAge,
                             coverExpiredOffscreen,
                             coverRejectedNotRenderable,
@@ -850,6 +867,14 @@ void TilePyramid::setCacheEnabled(bool enable) {
 
 void TilePyramid::reduceMemoryUse() {
     cache.clear();
+    ++memoryReductionEvents;
+    static const bool rasterDEMPressureHalfHoldEnabled = [] {
+        const char* v = std::getenv("KLATTRA_RASTER_DEM_PRESSURE_HALF_HOLD");
+        return v && *v && !(*v == '0' || *v == 'f' || *v == 'F');
+    }();
+    if (rasterDEMPressureHalfHoldEnabled) {
+        rasterDEMPressureHalfHold = true;
+    }
 }
 
 void TilePyramid::setObserver(TileObserver* observer_) {

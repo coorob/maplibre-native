@@ -24,6 +24,14 @@ constexpr std::size_t rasterDEMCoverHoldBudget(const std::size_t activeCoverCap)
     return activeCoverCap > 0 ? activeCoverCap : rasterDEMFallbackBudget;
 }
 
+// DIAG: once iOS reports memory pressure, keep half of the normal custom
+// RasterDEM continuity allowance. The active/renderable cover and ordinary
+// fade holds are outside this budget. Rounding up preserves a useful fallback
+// even for controlled tiny-cover tests.
+constexpr std::size_t rasterDEMPressureCoverHoldBudget(const std::size_t normalBudget) noexcept {
+    return normalBudget <= 1 ? normalBudget : normalBudget / 2 + normalBudget % 2;
+}
+
 constexpr std::size_t recentIdealBudget(const std::size_t coverHoldBudget) noexcept {
     return coverHoldBudget > std::numeric_limits<std::size_t>::max() / 2 ? std::numeric_limits<std::size_t>::max()
                                                                          : coverHoldBudget * 2;
