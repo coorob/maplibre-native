@@ -44,11 +44,11 @@ double klattraEnvTerrainLodPitchDeg() {
 }
 
 // Shared with tile_cover.cpp's cut telemetry (each file carries its own
-// copy — anonymous namespace). Opt out: KLATTRA_LOG_COVER_SUMMARY=0.
+// copy — anonymous namespace). Opt in with KLATTRA_LOG_COVER_SUMMARY=1.
 bool klattraLogCoverSummary() {
     static const bool enabled = [] {
         const char* v = std::getenv("KLATTRA_LOG_COVER_SUMMARY");
-        return !v || !(*v == '0' || *v == 'f' || *v == 'F');
+        return v && *v && !(*v == '0' || *v == 'f' || *v == 'F');
     }();
     return enabled;
 }
@@ -222,8 +222,8 @@ void RenderRasterDEMSource::updateInternal(const Tileset& tileset,
     // 1 Hz rendered-cover summary at Warning (passes the release log
     // filter). Pairs with [KLATTRA COVER] (emission/cap side) and
     // [KLATTRA TERRAIN] (drawable side): rendered-vs-kept gaps here mean
-    // tiles requested but not yet (or never) loaded. Opt out:
-    // KLATTRA_LOG_COVER_SUMMARY=0.
+    // tiles requested but not yet (or never) loaded. Opt in:
+    // KLATTRA_LOG_COVER_SUMMARY=1.
     if (klattraLogCoverSummary()) {
         static std::chrono::steady_clock::time_point lastLog{};
         const auto now = std::chrono::steady_clock::now();

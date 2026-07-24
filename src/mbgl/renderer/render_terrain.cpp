@@ -64,12 +64,12 @@ bool klattraLogDrapeTrace() {
 }
 
 // Shared with tile_cover.cpp / render_raster_dem_source.cpp telemetry (each
-// file carries its own copy — anonymous namespace). Opt out:
-// KLATTRA_LOG_COVER_SUMMARY=0.
+// file carries its own copy — anonymous namespace). Explicit diagnostic opt-in:
+// KLATTRA_LOG_COVER_SUMMARY=1.
 bool klattraLogCoverSummary() {
     static const bool enabled = [] {
         const char* v = std::getenv("KLATTRA_LOG_COVER_SUMMARY");
-        return !v || !(*v == '0' || *v == 'f' || *v == 'F');
+        return v && *v && !(*v == '0' || *v == 'f' || *v == 'F');
     }();
     return enabled;
 }
@@ -419,10 +419,12 @@ void klattraAddDrapeOverscan(std::unordered_set<OverscaledTileID>& drapeIDs,
 } // namespace
 
 bool RenderTerrain::stageDiagEnabled() {
-    // Default ON — this is a diag dist and device builds cannot set env.
+    // The instrumentation maintains per-tile maps and performs renderer-wide
+    // scans. Keep it out of normal builds and RAM measurements unless a
+    // diagnostic launch explicitly opts in.
     static const bool enabled = [] {
         const char* v = std::getenv("KLATTRA_STAGEDIAG");
-        return !(v && (*v == '0' || *v == 'f' || *v == 'F'));
+        return v && *v && !(*v == '0' || *v == 'f' || *v == 'F');
     }();
     return enabled;
 }
@@ -499,7 +501,9 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
     demSource = impl->sourceID.empty() ? nullptr : orchestrator.getRenderSource(impl->sourceID);
     if (!demSource && !impl->sourceID.empty()) {
         Log::Warning(Event::Render, "Terrain could not find DEM source: " + impl->sourceID);
-        klattraTrace("terrain no-dem-source source=" + impl->sourceID);
+        if (klattraTraceStderr()) {
+            klattraTrace("terrain no-dem-source source=" + impl->sourceID);
+        }
     }
 
     // Create layer group if we don't have one
@@ -523,7 +527,9 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
 
     // If we don't have a DEM source, we can't create terrain drawables
     if (!demSource) {
-        klattraTrace("terrain update-no-dem source=" + impl->sourceID);
+        if (klattraTraceStderr()) {
+            klattraTrace("terrain update-no-dem source=" + impl->sourceID);
+        }
         if (traceDrape) {
             Log::Info(Event::Render,
                       "[KLATTRA DRAPE_TRACE] update-no-dem frame=" + std::to_string(drapeTraceFrame) +
@@ -535,9 +541,11 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
 
     auto renderTiles = demSource->getRawRenderTiles();
     if (renderTiles->empty()) {
-        klattraTrace("terrain update-empty-cover source=" + impl->sourceID +
-                     " previousBindings=" + std::to_string(currentBindings.size()) +
-                     " previousDrapeTargets=" + std::to_string(drapeCache.size()));
+        if (klattraTraceStderr()) {
+            klattraTrace("terrain update-empty-cover source=" + impl->sourceID +
+                         " previousBindings=" + std::to_string(currentBindings.size()) +
+                         " previousDrapeTargets=" + std::to_string(drapeCache.size()));
+        }
         if (traceDrape) {
             Log::Info(Event::Render,
                       "[KLATTRA DRAPE_TRACE] update-empty-cover frame=" + std::to_string(drapeTraceFrame) +
@@ -564,12 +572,14 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
                       " previousDrapeTargets=" + std::to_string(drapeCache.size()) +
                       " terrainDrawables=" + std::to_string(lg->getDrawableCount()));
     }
-    klattraTrace("terrain update-begin source=" + impl->sourceID +
-                 " renderTiles=" + std::to_string(renderTiles->size()) +
-                 " previousBindings=" + std::to_string(currentBindings.size()) +
-                 " previousDemTextures=" + std::to_string(demTexturesByTile.size()) +
-                 " previousDrapeTargets=" + std::to_string(drapeCache.size()) +
-                 " terrainDrawables=" + std::to_string(lg->getDrawableCount()));
+    if (klattraTraceStderr()) {
+        klattraTrace("terrain update-begin source=" + impl->sourceID +
+                     " renderTiles=" + std::to_string(renderTiles->size()) +
+                     " previousBindings=" + std::to_string(currentBindings.size()) +
+                     " previousDemTextures=" + std::to_string(demTexturesByTile.size()) +
+                     " previousDrapeTargets=" + std::to_string(drapeCache.size()) +
+                     " terrainDrawables=" + std::to_string(lg->getDrawableCount()));
+    }
 
     // The raw render set intentionally contains overlapping IDs: available
     // children, a parent fallback for missing siblings, stock fade-held tiles,
@@ -636,20 +646,25 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
     // allocation, with an atomic previous-cover hold below if any new leaf is
     // unbound. Keep this raw count as a diagnostic; it may stay non-zero while
     // the post-mask mesh overlap must be zero.
+    const bool structuralDiagnostics = stageDiagEnabled() || klattraFlyDiag() || klattraTraceStderr();
     std::size_t rawSourceOverlapPairs = 0;
-    for (auto a = rawIdealIDs.begin(); a != rawIdealIDs.end(); ++a) {
-        for (auto b = std::next(a); b != rawIdealIDs.end(); ++b) {
-            if (klattraIsAncestorOf(*a, *b) || klattraIsAncestorOf(*b, *a)) {
-                ++rawSourceOverlapPairs;
+    if (structuralDiagnostics) {
+        for (auto a = rawIdealIDs.begin(); a != rawIdealIDs.end(); ++a) {
+            for (auto b = std::next(a); b != rawIdealIDs.end(); ++b) {
+                if (klattraIsAncestorOf(*a, *b) || klattraIsAncestorOf(*b, *a)) {
+                    ++rawSourceOverlapPairs;
+                }
             }
         }
     }
     std::unordered_set<OverscaledTileID> terrainMeshIDs = currentIdealIDs;
     std::size_t sourceMeshOverlapPairs = 0;
-    for (auto a = terrainMeshIDs.begin(); a != terrainMeshIDs.end(); ++a) {
-        for (auto b = std::next(a); b != terrainMeshIDs.end(); ++b) {
-            if (klattraIsAncestorOf(*a, *b) || klattraIsAncestorOf(*b, *a)) {
-                ++sourceMeshOverlapPairs;
+    if (structuralDiagnostics) {
+        for (auto a = terrainMeshIDs.begin(); a != terrainMeshIDs.end(); ++a) {
+            for (auto b = std::next(a); b != terrainMeshIDs.end(); ++b) {
+                if (klattraIsAncestorOf(*a, *b) || klattraIsAncestorOf(*b, *a)) {
+                    ++sourceMeshOverlapPairs;
+                }
             }
         }
     }
@@ -868,12 +883,17 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
         static const uint32_t drapeTotalCapMoving = klattraEnvTileCount("KLATTRA_DRAPE_TOTAL_CAP_MOVING", 200);
         const uint32_t normalDrapeTotalCap =
             useHighQualityDrape ? drapeTotalCapStable : drapeTotalCapMoving;
-        if (!drapePressureCapActive && klattraDrapePressureTotalCap() > 0 &&
-            cover_hold::processPressureActive()) {
-            drapePressureCapActive = true;
+        const bool inheritedDrapePressure = cover_hold::nextDrapePressureCapState(
+            drapePressureCapActive,
+            klattraDrapePressureTotalCap(),
+            false,
+            cover_hold::processPressureActive());
+        if (!drapePressureCapActive && inheritedDrapePressure &&
+            (stageDiagEnabled() || klattraTraceStderr())) {
             klattraDumpEmit("[KLATTRA DRAPE PRESSURE] active=1 reason=shared-highwater cap=" +
                             std::to_string(klattraDrapePressureTotalCap()));
         }
+        drapePressureCapActive = inheritedDrapePressure;
         const uint32_t drapeTotalCap = static_cast<uint32_t>(
             cover_hold::pressureDrapePopulationBudget(normalDrapeTotalCap,
                                                       klattraDrapePressureTotalCap(),
@@ -1292,7 +1312,9 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
         }
         if (auto sampledElevation = getElevationAtLatLng(state.getLatLng())) {
             elevationOriginMeters = *sampledElevation;
-            klattraTrace("terrain origin elevation=" + std::to_string(*sampledElevation));
+            if (klattraTraceStderr()) {
+                klattraTrace("terrain origin elevation=" + std::to_string(*sampledElevation));
+            }
         }
     }
 
@@ -1680,8 +1702,10 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
     std::array<uint32_t, 26> boundDrapeZooms{};
     static std::chrono::steady_clock::time_point lastTopoFillScan{};
     const auto topoFillNow = std::chrono::steady_clock::now();
-    const bool topoFillScanDue = lastTopoFillScan == std::chrono::steady_clock::time_point{} ||
-                                 topoFillNow - lastTopoFillScan >= std::chrono::milliseconds(250);
+    const bool topoFillScanDue =
+        stageDiagEnabled() &&
+        (lastTopoFillScan == std::chrono::steady_clock::time_point{} ||
+         topoFillNow - lastTopoFillScan >= std::chrono::milliseconds(250));
     for (const auto& [idealID, binding] : nextBindings) {
         if (binding.drapeReady) ++readyBindings;
         if (binding.usedEmptyDEM) ++emptyDemBindings;
@@ -1692,6 +1716,9 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
         }
         if (!binding.drapeReady && !binding.usedDrapeFallback) {
             ++bgOnlyBindings;
+        }
+        if (!structuralDiagnostics) {
+            continue;
         }
 
         TerrainDrapeTargetPtr boundTarget;
@@ -1777,9 +1804,8 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
         }
     }
 
-    // Warning-level, default-on telemetry for local diagnostic build 112.
-    // Emit at most 4 Hz while values change and at 1 Hz while stable, which is
-    // enough to correlate the two user screenshots without flooding syslog.
+    // Explicit stage telemetry. Emit at most 4 Hz while values change and at
+    // 1 Hz while stable when KLATTRA_STAGEDIAG=1.
     if (topoFillScanDue) {
         lastTopoFillScan = topoFillNow;
         const std::string signature =
@@ -1930,10 +1956,12 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
         }
         if (!binding.drapeTexture) {
             ++drawableSkipsNotReady;
-            klattraTrace("terrain drawable-skip ideal=" + klattraTileString(idealID) +
-                         " source=" + klattraTileString(binding.sourceID) +
-                         " emptyDEM=" + std::to_string(binding.usedEmptyDEM) +
-                         " drapeFallback=" + std::to_string(binding.usedDrapeFallback));
+            if (klattraTraceStderr()) {
+                klattraTrace("terrain drawable-skip ideal=" + klattraTileString(idealID) +
+                             " source=" + klattraTileString(binding.sourceID) +
+                             " emptyDEM=" + std::to_string(binding.usedEmptyDEM) +
+                             " drapeFallback=" + std::to_string(binding.usedDrapeFallback));
+            }
             if (traceDrape) {
                 Log::Info(Event::Render,
                           "[KLATTRA DRAPE_TRACE] terrain-drawable-skip frame=" +
@@ -1945,10 +1973,12 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
             continue;
         }
         if (auto drawable = createDrawableForTile(context, shaders, idealID, binding)) {
-            klattraTrace("terrain drawable-add ideal=" + klattraTileString(idealID) +
-                         " source=" + klattraTileString(binding.sourceID) +
-                         " emptyDEM=" + std::to_string(binding.usedEmptyDEM) +
-                         " drapeFallback=" + std::to_string(binding.usedDrapeFallback));
+            if (klattraTraceStderr()) {
+                klattraTrace("terrain drawable-add ideal=" + klattraTileString(idealID) +
+                             " source=" + klattraTileString(binding.sourceID) +
+                             " emptyDEM=" + std::to_string(binding.usedEmptyDEM) +
+                             " drapeFallback=" + std::to_string(binding.usedDrapeFallback));
+            }
             if (traceDrape) {
                 Log::Info(Event::Render,
                           "[KLATTRA DRAPE_TRACE] terrain-drawable-add frame=" +
@@ -2028,45 +2058,49 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
     std::unordered_set<OverscaledTileID> drawableMeshIDs;
     std::size_t terrainLayerDrawableCount = 0;
     std::size_t drawableMeshCount = 0;
-    lg->visitDrawables([&](const gfx::Drawable& drawable) {
-        ++terrainLayerDrawableCount;
-        if (const auto& tileID = drawable.getTileID()) {
-            ++drawableMeshCount;
-            drawableMeshIDs.insert(*tileID);
-        }
-    });
-    const std::size_t drawableMeshDuplicates = drawableMeshCount - drawableMeshIDs.size();
-    const std::size_t drawableMeshNoTile = terrainLayerDrawableCount - drawableMeshCount;
+    std::size_t drawableMeshDuplicates = 0;
+    std::size_t drawableMeshNoTile = 0;
     std::size_t drawableMeshOverlapPairs = 0;
-    for (auto a = drawableMeshIDs.begin(); a != drawableMeshIDs.end(); ++a) {
-        for (auto b = std::next(a); b != drawableMeshIDs.end(); ++b) {
-            if (klattraIsAncestorOf(*a, *b) || klattraIsAncestorOf(*b, *a)) {
-                ++drawableMeshOverlapPairs;
+    std::size_t drawableMeshMissing = 0;
+    std::size_t drawableMeshExtra = 0;
+    if (structuralDiagnostics) {
+        lg->visitDrawables([&](const gfx::Drawable& drawable) {
+            ++terrainLayerDrawableCount;
+            if (const auto& tileID = drawable.getTileID()) {
+                ++drawableMeshCount;
+                drawableMeshIDs.insert(*tileID);
+            }
+        });
+        drawableMeshDuplicates = drawableMeshCount - drawableMeshIDs.size();
+        drawableMeshNoTile = terrainLayerDrawableCount - drawableMeshCount;
+        for (auto a = drawableMeshIDs.begin(); a != drawableMeshIDs.end(); ++a) {
+            for (auto b = std::next(a); b != drawableMeshIDs.end(); ++b) {
+                if (klattraIsAncestorOf(*a, *b) || klattraIsAncestorOf(*b, *a)) {
+                    ++drawableMeshOverlapPairs;
+                }
+            }
+        }
+        for (const auto& tileID : terrainMeshIDs) {
+            if (drawableMeshIDs.find(tileID) == drawableMeshIDs.end()) {
+                ++drawableMeshMissing;
+            }
+        }
+        for (const auto& tileID : drawableMeshIDs) {
+            if (terrainMeshIDs.find(tileID) == terrainMeshIDs.end()) {
+                ++drawableMeshExtra;
             }
         }
     }
-    std::size_t drawableMeshMissing = 0;
-    for (const auto& tileID : terrainMeshIDs) {
-        if (drawableMeshIDs.find(tileID) == drawableMeshIDs.end()) {
-            ++drawableMeshMissing;
-        }
-    }
-    std::size_t drawableMeshExtra = 0;
-    for (const auto& tileID : drawableMeshIDs) {
-        if (terrainMeshIDs.find(tileID) == terrainMeshIDs.end()) {
-            ++drawableMeshExtra;
-        }
-    }
 
-    // Sub-second defects cannot rely on the 1 Hz STAGE sample. Emit the first
-    // bad frame immediately, a 1 Hz heartbeat while it persists, and a recovery
-    // edge. This captures a one-frame black/green flash without FLYDIAG env.
-    const bool badFrame = sourceMeshOverlapPairs > 0 || drawableMeshOverlapPairs > 0 ||
-                          drawableMeshDuplicates > 0 || drawableMeshNoTile > 0 ||
-                          drawableMeshMissing > 0 || drawableMeshExtra > 0 || unboundBindings > 0 ||
-                          boundRasterEmptyBindings > 0 || boundRasterPartialBindings > 0 ||
-                          boundRasterUnknownBindings > 0;
-    {
+    if (stageDiagEnabled()) {
+        // Sub-second defects cannot rely on the 1 Hz STAGE sample. Emit the
+        // first bad frame immediately, a 1 Hz heartbeat while it persists,
+        // and a recovery edge.
+        const bool badFrame = sourceMeshOverlapPairs > 0 || drawableMeshOverlapPairs > 0 ||
+                              drawableMeshDuplicates > 0 || drawableMeshNoTile > 0 ||
+                              drawableMeshMissing > 0 || drawableMeshExtra > 0 || unboundBindings > 0 ||
+                              boundRasterEmptyBindings > 0 || boundRasterPartialBindings > 0 ||
+                              boundRasterUnknownBindings > 0;
         static bool wasBad = false;
         static std::chrono::steady_clock::time_point lastBadEmit{};
         const auto now = std::chrono::steady_clock::now();
@@ -2088,8 +2122,7 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
             klattraDumpEmit("[KLATTRA BADFRAME] recovered");
         }
         wasBad = badFrame;
-    }
-    {
+
         static bool previousAtomicHold = false;
         if (terrainAtomicHold != previousAtomicHold) {
             klattraDumpEmit("[KLATTRA TRANSITION] atomicHold=" + std::to_string(terrainAtomicHold) +
@@ -2101,41 +2134,43 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
     }
 
     currentBindings = std::move(nextBindings);
-    klattraTrace("terrain update-end source=" + impl->sourceID +
-                 " bindings=" + std::to_string(currentBindings.size()) +
-                 " ready=" + std::to_string(readyBindings) +
-                 " emptyDEM=" + std::to_string(emptyDemBindings) +
-                 " drapeFallback=" + std::to_string(fallbackDrapeBindings) +
-                 " bgOnly=" + std::to_string(bgOnlyBindings) +
-                 " bgOnlyZeroGroup=" + std::to_string(bgOnlyZeroGroupBindings) +
-                 " unbound=" + std::to_string(unboundBindings) +
-                 " rawOverlap=" + std::to_string(rawSourceOverlapPairs) +
-                 " leafOverlap=" + std::to_string(sourceMeshOverlapPairs) +
-                 " meshOverlap=" + std::to_string(drawableMeshOverlapPairs) +
-                 " meshDuplicates=" + std::to_string(drawableMeshDuplicates) +
-                 " meshNoTile=" + std::to_string(drawableMeshNoTile) +
-                 " meshMissing=" + std::to_string(drawableMeshMissing) +
-                 " meshExtra=" + std::to_string(drawableMeshExtra) +
-                 " rawIDs=" + std::to_string(rawIdealIDs.size()) +
-                 " maskRoots=" + std::to_string(terrainMaskRoots) +
-                 " maskLeaves=" + std::to_string(terrainMaskLeaves) +
-                 " leafIDs=" + std::to_string(currentIdealIDs.size()) +
-                 " maskDepth=" + std::to_string(terrainMaskMaxDepth) +
-                 " atomicHold=" + std::to_string(terrainAtomicHold) +
-                 " atomicEligible=" + std::to_string(previousCoverDrawableBacked) +
-                 " candidateBindings=" + std::to_string(candidateBindingCount) +
-                 " candidateReady=" + std::to_string(candidateReadyBindings) +
-                 " candidateUnbound=" + std::to_string(candidateUnboundBindings) +
-                 " candidateOwnRasterEmpty=" + std::to_string(candidateOwnRasterEmpty) +
-                 " candidateOwnRasterPartial=" + std::to_string(candidateOwnRasterPartial) +
-                 " boundRasterEmpty=" + std::to_string(boundRasterEmptyBindings) +
-                 " boundRasterPartial=" + std::to_string(boundRasterPartialBindings) +
-                 " boundRasterUnknown=" + std::to_string(boundRasterUnknownBindings) +
-                 " parked=" + std::to_string(retiredDrapeTargetsByTile.size()) +
-                 " demTextures=" + std::to_string(demTexturesByTile.size()) +
-                 " demShared=" + std::to_string(bucketSharedDEMTextures) +
-                 " drapeTargets=" + std::to_string(drapeCache.size()) +
-                 " terrainDrawables=" + std::to_string(lg->getDrawableCount()));
+    if (klattraTraceStderr()) {
+        klattraTrace("terrain update-end source=" + impl->sourceID +
+                     " bindings=" + std::to_string(currentBindings.size()) +
+                     " ready=" + std::to_string(readyBindings) +
+                     " emptyDEM=" + std::to_string(emptyDemBindings) +
+                     " drapeFallback=" + std::to_string(fallbackDrapeBindings) +
+                     " bgOnly=" + std::to_string(bgOnlyBindings) +
+                     " bgOnlyZeroGroup=" + std::to_string(bgOnlyZeroGroupBindings) +
+                     " unbound=" + std::to_string(unboundBindings) +
+                     " rawOverlap=" + std::to_string(rawSourceOverlapPairs) +
+                     " leafOverlap=" + std::to_string(sourceMeshOverlapPairs) +
+                     " meshOverlap=" + std::to_string(drawableMeshOverlapPairs) +
+                     " meshDuplicates=" + std::to_string(drawableMeshDuplicates) +
+                     " meshNoTile=" + std::to_string(drawableMeshNoTile) +
+                     " meshMissing=" + std::to_string(drawableMeshMissing) +
+                     " meshExtra=" + std::to_string(drawableMeshExtra) +
+                     " rawIDs=" + std::to_string(rawIdealIDs.size()) +
+                     " maskRoots=" + std::to_string(terrainMaskRoots) +
+                     " maskLeaves=" + std::to_string(terrainMaskLeaves) +
+                     " leafIDs=" + std::to_string(currentIdealIDs.size()) +
+                     " maskDepth=" + std::to_string(terrainMaskMaxDepth) +
+                     " atomicHold=" + std::to_string(terrainAtomicHold) +
+                     " atomicEligible=" + std::to_string(previousCoverDrawableBacked) +
+                     " candidateBindings=" + std::to_string(candidateBindingCount) +
+                     " candidateReady=" + std::to_string(candidateReadyBindings) +
+                     " candidateUnbound=" + std::to_string(candidateUnboundBindings) +
+                     " candidateOwnRasterEmpty=" + std::to_string(candidateOwnRasterEmpty) +
+                     " candidateOwnRasterPartial=" + std::to_string(candidateOwnRasterPartial) +
+                     " boundRasterEmpty=" + std::to_string(boundRasterEmptyBindings) +
+                     " boundRasterPartial=" + std::to_string(boundRasterPartialBindings) +
+                     " boundRasterUnknown=" + std::to_string(boundRasterUnknownBindings) +
+                     " parked=" + std::to_string(retiredDrapeTargetsByTile.size()) +
+                     " demTextures=" + std::to_string(demTexturesByTile.size()) +
+                     " demShared=" + std::to_string(bucketSharedDEMTextures) +
+                     " drapeTargets=" + std::to_string(drapeCache.size()) +
+                     " terrainDrawables=" + std::to_string(lg->getDrawableCount()));
+    }
     // .46-diag: 1 Hz device-visible summary — the per-class bind counts are
     // the flicker signature (any sustained bgOnly/zeroGroup/unbound during a
     // flight = meshes showing clear/basemap plates instead of imagery).
@@ -2363,7 +2398,7 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
     // pairing with [KLATTRA COVER] (emission/cap) and [KLATTRA DEM]
     // (rendered pyramid): ideals != backed means on-screen holes right now;
     // emptyDEM counts flat placeholder tiles (origin-level slabs after the
-    // 2026-07-04 offset fix). Opt out: KLATTRA_LOG_COVER_SUMMARY=0.
+    // 2026-07-04 offset fix). Opt in: KLATTRA_LOG_COVER_SUMMARY=1.
     // Texture-less skips (a tile's first frames before its target's first
     // bake) resolve only on a rendered frame — keep frames coming.
     if (drawableSkipsNotReady > 0) {
@@ -2402,7 +2437,7 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
     // tile line (inspect its state) or to NO tile (cover/frustum gap), and
     // the header parameters are sufficient to replay the cover math offline.
     // Statics are acceptable here: one active terrain per style in practice,
-    // and this is a diagnostic aid. Opt out: KLATTRA_FRAME_DUMP=0.
+    // and this is a diagnostic aid. Opt in: KLATTRA_FRAME_DUMP=1.
     static const bool frameDumpEnabled = [] {
         const char* v = std::getenv("KLATTRA_FRAME_DUMP");
         return v && !(*v == '0' || *v == 'f' || *v == 'F');
@@ -2926,31 +2961,38 @@ void RenderTerrain::teardown(UniqueChangeRequestVec& changes) {
     demSource = nullptr;
 }
 
-void RenderTerrain::reduceMemoryUse(UniqueChangeRequestVec& changes) {
-    // Memory-pressure response (MLNMapView didReceiveMemoryWarning →
-    // Renderer::reduceMemoryUse → orchestrator): drop everything not strictly
-    // required for the current cover — parked resize predecessors and
-    // out-of-cover ancestor fallbacks. Content re-bakes on demand; a brief
-    // quality dip beats a jetsam kill. drapeRingByTile's keys are exactly the
-    // last update's cover set (pruned to it every frame), which update()
-    // keeps only as a local.
-    if (!drapePressureCapActive && klattraDrapePressureTotalCap() > 0) {
-        drapePressureCapActive = true;
+void RenderTerrain::reduceMemoryUse(UniqueChangeRequestVec& changes, const bool memoryPressure) {
+    // Both ordinary lifecycle cleanup and real memory-pressure warnings drop
+    // parked resize predecessors and out-of-cover ancestor fallbacks. Only
+    // the explicit pressure path may tighten the sticky drape budget:
+    // willResignActive/didEnterBackground also call reduceMemoryUse(), and
+    // activating the cap there would permanently reduce visual continuity
+    // after opening Control Center or backgrounding the app.
+    const bool warnedDrapePressure = cover_hold::nextDrapePressureCapState(
+        drapePressureCapActive,
+        klattraDrapePressureTotalCap(),
+        memoryPressure,
+        false);
+    if (!drapePressureCapActive && warnedDrapePressure &&
+        (stageDiagEnabled() || klattraTraceStderr())) {
         klattraDumpEmit("[KLATTRA DRAPE PRESSURE] active=1 reason=platform-warning cap=" +
                         std::to_string(klattraDrapePressureTotalCap()));
     }
+    drapePressureCapActive = warnedDrapePressure;
     const std::size_t cacheBefore = drapeCache.size();
     const std::size_t retiredBefore = retiredDrapeTargetsByTile.size();
     const std::size_t ringSize = drapeRingByTile.size();
     retiredDrapeTargetsByTile.clear();
     auto evicted = drapeCache.pruneIf(
         [&](const OverscaledTileID& id) { return drapeRingByTile.find(id) == drapeRingByTile.end(); });
-    klattraDumpEmit("[KLATTRA MEMORY_PRUNE] diag=84 cacheBefore=" + std::to_string(cacheBefore) +
-                    " cacheAfter=" + std::to_string(drapeCache.size()) +
-                    " evicted=" + std::to_string(evicted.size()) +
-                    " retiredCleared=" + std::to_string(retiredBefore) +
-                    " ring=" + std::to_string(ringSize) +
-                    " bindings=" + std::to_string(currentBindings.size()));
+    if (stageDiagEnabled() || klattraTraceStderr()) {
+        klattraDumpEmit("[KLATTRA MEMORY_PRUNE] diag=84 cacheBefore=" + std::to_string(cacheBefore) +
+                        " cacheAfter=" + std::to_string(drapeCache.size()) +
+                        " evicted=" + std::to_string(evicted.size()) +
+                        " retiredCleared=" + std::to_string(retiredBefore) +
+                        " ring=" + std::to_string(ringSize) +
+                        " bindings=" + std::to_string(currentBindings.size()));
+    }
     for (auto& [tileID, target] : evicted) {
         (void)tileID;
         changes.emplace_back(std::make_unique<RemoveRenderTargetRequest>(std::move(target)));

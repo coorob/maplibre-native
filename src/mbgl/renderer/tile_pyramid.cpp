@@ -154,15 +154,12 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
         // one-frame needsRendering flap here would explain the vector land
         // pyramids collapsing to fragments with COVERHOLD silent (nothing
         // left to hold) and SRCTILES only seeing the aftermath as a DIP.
-        // RasterDEM defaults on in .68; opt out with KLATTRA_LOG_SRCPURGE=0.
+        // Opt in with KLATTRA_LOG_SRCPURGE=1.
         if (!renderedTiles.empty()) {
-            static const int8_t purgeLogMode = [] {
+            static const bool purgeLog = [] {
                 const char* v = std::getenv("KLATTRA_LOG_SRCPURGE");
-                if (!v) return int8_t{-1};
-                return (*v == '0' || *v == 'f' || *v == 'F') ? int8_t{0} : int8_t{1};
+                return v && *v && !(*v == '0' || *v == 'f' || *v == 'F');
             }();
-            const bool purgeLog = purgeLogMode > 0 ||
-                                  (purgeLogMode < 0 && sourceImpl.type == SourceType::RasterDEM);
             if (purgeLog) {
                 Log::Warning(Event::Render,
                              "[KLATTRA SRCPURGE] source=" + sourceImpl.id +
@@ -441,6 +438,16 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
     KlattraMemorySample highWaterMemory;
     const bool highWaterHalfHoldEnabled = boundedRasterDEMCoverHold && parameters.usedByTerrain &&
                                           rasterDEMHighWaterHalfHoldMB > 0;
+    const bool halfHoldEnabled = rasterDEMPressureHalfHoldEnabled || highWaterHalfHoldEnabled;
+    if (boundedRasterDEMCoverHold && halfHoldEnabled && !rasterDEMPressureHalfHold &&
+        cover_hold::processPressureActive()) {
+        // A recreated DEM source must inherit an earlier platform
+        // warning/high-water trip instead of returning to the full hold until
+        // the threshold happens to trip again. This also bounds flat 2D
+        // hillshade retention after a real warning.
+        cache.clear();
+        rasterDEMPressureHalfHold = true;
+    }
     if (highWaterHalfHoldEnabled) {
         highWaterMemory = klattraMemorySample();
         if (!rasterDEMPressureHalfHold && highWaterMemory.physicalMB >= rasterDEMHighWaterHalfHoldMB) {
@@ -490,9 +497,8 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
             }
         }
     }
-    const bool halfHoldEnabled = rasterDEMPressureHalfHoldEnabled || highWaterHalfHoldEnabled;
-    const bool pressureHalfHold = boundedRasterDEMCoverHold && parameters.usedByTerrain &&
-                                  halfHoldEnabled && rasterDEMPressureHalfHold;
+    const bool pressureHalfHold =
+        boundedRasterDEMCoverHold && halfHoldEnabled && rasterDEMPressureHalfHold;
     const bool boundedNonRasterDEMCoverHold =
         nonRasterDEMPressureCapEnabled && nonRasterDEMPressureCoverHold;
     const bool boundedCoverHold = boundedRasterDEMCoverHold || boundedNonRasterDEMCoverHold;
@@ -633,16 +639,13 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
 
     // KLATTRA diagnostics: cover-hold activity. Logs on change (including the
     // return to 0) plus a 1 Hz heartbeat while holds are active. RasterDEM is
-    // default-on in .68 because held coverage is the black-hole referee;
-    // other sources remain opt-in. KLATTRA_LOG_COVERHOLD=0 disables it.
+    // expensive enough to affect memory diagnostics, so it is opt-in with
+    // KLATTRA_LOG_COVERHOLD=1.
     {
-        static const int8_t coverHoldLogMode = [] {
+        static const bool coverHoldLog = [] {
             const char* v = std::getenv("KLATTRA_LOG_COVERHOLD");
-            if (!v) return int8_t{-1};
-            return (*v == '0' || *v == 'f' || *v == 'F') ? int8_t{0} : int8_t{1};
+            return v && *v && !(*v == '0' || *v == 'f' || *v == 'F');
         }();
-        const bool coverHoldLog = coverHoldLogMode > 0 ||
-                                  (coverHoldLogMode < 0 && type == SourceType::RasterDEM);
         if (coverHoldLog) {
             struct State {
                 std::size_t last = SIZE_MAX;
@@ -789,16 +792,12 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
     // land-open DRAWABLES collapse 6→1→6 across zoom transitions (traska.31
     // device data); this tells whether the TILE SET dips with them (cover/
     // retention side) or holds (drawable-culling side). Logs on any ≥2 dip
-    // plus a 1 Hz heartbeat. RasterDEM defaults on in .68; opt out with
-    // KLATTRA_LOG_SRCTILES=0.
+    // plus a 1 Hz heartbeat. Opt in with KLATTRA_LOG_SRCTILES=1.
     {
-        static const int8_t srcTilesLogMode = [] {
+        static const bool srcTilesLog = [] {
             const char* v = std::getenv("KLATTRA_LOG_SRCTILES");
-            if (!v) return int8_t{-1};
-            return (*v == '0' || *v == 'f' || *v == 'F') ? int8_t{0} : int8_t{1};
+            return v && *v && !(*v == '0' || *v == 'f' || *v == 'F');
         }();
-        const bool srcTilesLog = srcTilesLogMode > 0 ||
-                                 (srcTilesLogMode < 0 && type == SourceType::RasterDEM);
         if (srcTilesLog) {
             struct State {
                 std::size_t last = SIZE_MAX;
@@ -986,7 +985,6 @@ void TilePyramid::reduceMemoryUseForMemoryPressure() {
     }
     if (klattraNonRasterDEMPressureCoverHoldCap() > 0) {
         nonRasterDEMPressureCoverHold = true;
-        cover_hold::activateProcessPressure();
     }
 }
 

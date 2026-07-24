@@ -3,6 +3,7 @@
 #include <mbgl/annotation/annotation_manager.hpp>
 #include <mbgl/layermanager/layer_manager.hpp>
 #include <mbgl/renderer/change_request.hpp>
+#include <mbgl/renderer/cover_hold_budget.hpp>
 #include <mbgl/renderer/renderer_observer.hpp>
 #include <mbgl/renderer/render_source.hpp>
 #include <mbgl/renderer/render_layer.hpp>
@@ -489,7 +490,7 @@ std::unique_ptr<RenderTree> RenderOrchestrator::createRenderTree(
     // affected layer groups — for land-covering layers that is a black
     // flash of the whole viewport.
     {
-        UniqueChangeRequestVec changes;
+        UniqueChangeRequestVec renderabilityChanges;
         for (size_t i = 0; i < updateList.size(); i++) {
             if (orderedLayers[i].get().isLayerRenderable() != updateList[i]) {
                 // KLATTRA diagnostics (2D black-flash hunt): after the hoist,
@@ -525,10 +526,10 @@ std::unique_ptr<RenderTree> RenderOrchestrator::createRenderTree(
                                 flapped.baseImpl->source.c_str());
                     }
                 }
-                orderedLayers[i].get().markLayerRenderable(updateList[i], changes);
+                orderedLayers[i].get().markLayerRenderable(updateList[i], renderabilityChanges);
             }
         }
-        addChanges(changes);
+        addChanges(renderabilityChanges);
     }
 
     // KLATTRA (2D transition flash, the "black" half): the framebuffer clear
@@ -913,6 +914,12 @@ void RenderOrchestrator::reduceMemoryUse(bool memoryPressure) {
     MLN_TRACE_FUNC();
 
     filteredLayersForSource.shrink_to_fit();
+    if (memoryPressure) {
+        // Own the process-wide warning at the orchestrator level so it remains
+        // sticky even when a warning arrives while style sources are being
+        // torn down. Individual pressure policies remain launch-gated.
+        cover_hold::activateProcessPressure();
+    }
     for (const auto& entry : renderSources) {
         if (memoryPressure) {
             entry.second->reduceMemoryUseForMemoryPressure();
@@ -923,7 +930,7 @@ void RenderOrchestrator::reduceMemoryUse(bool memoryPressure) {
     imageManager->reduceMemoryUse();
     if (renderTerrain) {
         UniqueChangeRequestVec changes;
-        renderTerrain->reduceMemoryUse(changes);
+        renderTerrain->reduceMemoryUse(changes, memoryPressure);
         addChanges(changes);
     }
     observer->onInvalidate();

@@ -45,6 +45,14 @@ TEST(CoverHoldBudget, ReducesOnlyTheExtraDrapePopulationAfterPressure) {
     EXPECT_EQ(cover_hold::pressureDrapePopulationBudget(200, 256, true, 112), 200u);
 }
 
+TEST(CoverHoldBudget, ActivatesDrapeCapOnlyForPressureAndKeepsItSticky) {
+    EXPECT_FALSE(cover_hold::nextDrapePressureCapState(false, 128, false, false));
+    EXPECT_TRUE(cover_hold::nextDrapePressureCapState(false, 128, true, false));
+    EXPECT_TRUE(cover_hold::nextDrapePressureCapState(true, 128, false, false));
+    EXPECT_TRUE(cover_hold::nextDrapePressureCapState(false, 128, false, true));
+    EXPECT_FALSE(cover_hold::nextDrapePressureCapState(false, 0, true, true));
+}
+
 TEST(CoverHoldBudget, KeepsTheYoungestCompleteCoverInsteadOfOlderHistory) {
     std::vector<cover_hold::Candidate> candidates;
     for (uint32_t x = 0; x < 4; ++x) {

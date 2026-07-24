@@ -25,13 +25,13 @@ namespace mbgl {
 
 namespace {
 
-// Once-per-second cap/cover summary at Warning level (the store binary's
-// native log filter passes Warning). Only capped covers log — in practice
-// that is the raster-dem terrain source. Opt out: KLATTRA_LOG_COVER_SUMMARY=0.
+// Once-per-second cap/cover summary at Warning level. This walks cover state
+// and formats histograms, so normal rendering keeps it disabled. Opt in with
+// KLATTRA_LOG_COVER_SUMMARY=1.
 bool klattraLogCoverSummary() {
     static const bool enabled = [] {
         const char* v = std::getenv("KLATTRA_LOG_COVER_SUMMARY");
-        return !v || !(*v == '0' || *v == 'f' || *v == 'F');
+        return v && *v && !(*v == '0' || *v == 'f' || *v == 'F');
     }();
     return enabled;
 }

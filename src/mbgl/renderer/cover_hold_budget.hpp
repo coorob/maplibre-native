@@ -56,6 +56,18 @@ constexpr std::size_t pressureDrapePopulationBudget(const std::size_t normalBudg
     return std::max(selectedBudget, visibleTerrainCount);
 }
 
+// Keep the pressure cap sticky for the current terrain instance. A direct
+// platform warning may activate it immediately; a recreated terrain instance
+// inherits the process-wide warning/high-water state on its next update.
+// With no configured cap, the diagnostic remains inert.
+constexpr bool nextDrapePressureCapState(const bool currentlyActive,
+                                         const std::size_t configuredPressureCap,
+                                         const bool explicitMemoryPressure,
+                                         const bool sharedProcessPressure) noexcept {
+    return currentlyActive ||
+           (configuredPressureCap > 0 && (explicitMemoryPressure || sharedProcessPressure));
+}
+
 // Sticky process-wide signal shared by the terrain DEM sampler, the other
 // TilePyramids, and RenderTerrain. The launch-gated consumers decide what to
 // shed; setting this flag alone does not alter production behavior.

@@ -95,11 +95,12 @@ public:
     void teardown(UniqueChangeRequestVec& changes);
 
     /**
-     * @brief Memory-pressure response: release parked resize predecessors and
-     * out-of-cover ancestor fallback targets, emitting the remove requests.
-     * Wired from RenderOrchestrator::reduceMemoryUse (didReceiveMemoryWarning).
+     * @brief Release parked resize predecessors and out-of-cover ancestor
+     * fallback targets, emitting the remove requests. A real platform memory
+     * warning also activates the launch-gated sticky drape pressure cap;
+     * routine lifecycle cleanup must not.
      */
-    void reduceMemoryUse(UniqueChangeRequestVec& changes);
+    void reduceMemoryUse(UniqueChangeRequestVec& changes, bool memoryPressure);
 
     /**
      * @brief Get elevation at a specific tile coordinate
@@ -303,8 +304,8 @@ public:
     // drawable added) → baked with that content → first bound as a visible
     // ideal. The 1 Hz [KLATTRA STAGE] summary decomposes the flyover
     // artifact backlog into WHICH stage the stuck canvases wait in —
-    // source cover, decode/upload, routing, or bake. Default ON in this
-    // diag dist; KLATTRA_STAGEDIAG=0 disables. Render-thread only.
+    // source cover, decode/upload, routing, or bake. Explicitly enable with
+    // KLATTRA_STAGEDIAG=1. Render-thread only.
     static bool stageDiagEnabled();
     // Called from RenderRasterLayer's drape block: a raster render tile
     // overlaps this drape canvas; `paintable` = the raster bucket has a
