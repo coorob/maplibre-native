@@ -314,6 +314,7 @@ void RenderFillExtrusionLayer::update(gfx::ShaderRegistry& shaders,
             if (auto builder = context.createDrawableBuilder(layerPrefix + "color")) {
                 builder->setShader(shader);
                 builder->setIs3D(true);
+                builder->setEnableDepth(!useTileClippingFor3D);
                 builder->setEnableColor(true);
                 builder->setColorMode(gfx::ColorMode::alphaBlended());
                 builder->setRenderPass(drawPass);
@@ -426,6 +427,7 @@ void RenderFillExtrusionLayer::update(gfx::ShaderRegistry& shaders,
             if (auto builder = context.createDrawableBuilder(layerPrefix + "colorInstanced")) {
                 builder->setShader(instancedShader);
                 builder->setIs3D(true);
+                builder->setEnableDepth(!useTileClippingFor3D);
                 builder->setEnableColor(true);
                 builder->setColorMode(gfx::ColorMode::alphaBlended());
                 builder->setRenderPass(drawPass);
