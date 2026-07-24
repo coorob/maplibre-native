@@ -194,7 +194,7 @@ void LayerGroup::render(RenderOrchestrator&, PaintParameters& parameters) {
     if (features3d && stencil3d) {
         stencilMode3d = parameters.stencilModeFor3D();
         if (encoder) {
-            encoder->setStencilReferenceValue(stencilMode3d.ref);
+            renderPass.setStencilReference(stencilMode3d.ref);
         }
     }
 

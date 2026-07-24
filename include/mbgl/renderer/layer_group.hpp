@@ -194,7 +194,11 @@ public:
     std::size_t clearDrawables() override;
 
     void setStencilTiles(RenderTiles);
-    void setTileClippingFor3D(bool value) { tileClippingFor3D = value; }
+    void setTileClippingFor3D(bool value, float surfaceHeight = 0.0f) {
+        tileClippingFor3D = value;
+        tileClippingFor3DSurfaceHeight = surfaceHeight;
+    }
+    void setTileClippingFor3DVerticalOffset(float value) { tileClippingFor3DVerticalOffset = value; }
 
     void updateLayerIndex(int32_t value) override { layerIndex = value; }
 
@@ -205,6 +209,8 @@ protected:
     // A small number of 3D tile layers need the same parent/child clipping
     // semantics as ordinary 2D tile layers while retaining 3D depth testing.
     bool tileClippingFor3D = false;
+    float tileClippingFor3DSurfaceHeight = 0.0f;
+    float tileClippingFor3DVerticalOffset = 0.0f;
 
     struct TileLayerGroupTileKey {
         mbgl::RenderPass renderPass;

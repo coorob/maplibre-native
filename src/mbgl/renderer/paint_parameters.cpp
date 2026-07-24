@@ -143,6 +143,7 @@ bool tileIDsCovered(const RenderTiles& tiles, const TileMaskIDMap& idMap) {
 void PaintParameters::clearStencil() {
     nextStencilID = 1;
     tileClippingMaskIDs.clear();
+    tileClippingMasksUse3DTransform = false;
 
 #if MLN_RENDER_BACKEND_METAL
     auto& mtlContext = static_cast<mtl::Context&>(context);
@@ -170,12 +171,37 @@ void PaintParameters::clearStencil() {
 }
 
 void PaintParameters::renderTileClippingMasks(const RenderTiles& renderTiles) {
+    renderTileClippingMasksImpl(renderTiles, nullptr, 0.0f, tileClippingMasksUse3DTransform);
+    tileClippingMasksUse3DTransform = false;
+}
+
+void PaintParameters::renderTileClippingMasksFor3D(const RenderTiles& renderTiles, float surfaceZ) {
+    renderTileClippingMasksImpl(renderTiles, &transformParams.nearClippedProjMatrix, surfaceZ, true);
+    tileClippingMasksUse3DTransform = true;
+}
+
+void PaintParameters::renderTileClippingMasksImpl(const RenderTiles& renderTiles,
+                                                  const mat4* projectionMatrix,
+                                                  float surfaceZ,
+                                                  bool forceUpdate) {
     // We can avoid updating the mask if it already contains the same set of tiles.
-    if (!renderTiles || !renderPass || tileIDsCovered(renderTiles, tileClippingMaskIDs)) {
+    if (!renderTiles || !renderPass || (!forceUpdate && tileIDsCovered(renderTiles, tileClippingMaskIDs))) {
         return;
     }
 
     tileClippingMaskIDs.clear();
+
+    const auto clippingMatrixForTile = [&](const UnwrappedTileID& tileID) {
+        if (!projectionMatrix) {
+            return matrixForTile(tileID);
+        }
+
+        mat4 matrix;
+        state.matrixFor(matrix, tileID);
+        matrix::multiply(matrix, *projectionMatrix, matrix);
+        matrix::translate(matrix, matrix, 0.0, 0.0, surfaceZ);
+        return matrix;
+    };
 
     // If the stencil value will overflow, clear the target to ensure ensure that none of the new
     // values remain set somewhere in it. Otherwise we can continue to overwrite it incrementally.
@@ -201,7 +227,7 @@ void PaintParameters::renderTileClippingMasks(const RenderTiles& renderTiles) {
             tileUBOs.reserve(count);
         }
 
-        tileUBOs.emplace_back(shaders::ClipUBO{/* .matrix = */ util::cast<float>(matrixForTile(tileID)),
+        tileUBOs.emplace_back(shaders::ClipUBO{/* .matrix = */ util::cast<float>(clippingMatrixForTile(tileID)),
                                                /* .stencil_ref = */ static_cast<uint32_t>(stencilID),
                                                /* .pad1 = */ 0,
                                                /* .pad2 = */ 0,
@@ -237,7 +263,7 @@ void PaintParameters::renderTileClippingMasks(const RenderTiles& renderTiles) {
             tileUBOs.reserve(count);
         }
 
-        tileUBOs.emplace_back(shaders::ClipUBO{.matrix = util::cast<float>(matrixForTile(tileID)),
+        tileUBOs.emplace_back(shaders::ClipUBO{.matrix = util::cast<float>(clippingMatrixForTile(tileID)),
                                                .stencil_ref = static_cast<uint32_t>(stencilID),
                                                .pad1 = 0,
                                                .pad2 = 0,
@@ -275,7 +301,7 @@ void PaintParameters::renderTileClippingMasks(const RenderTiles& renderTiles) {
             tileUBOs.reserve(count);
         }
 
-        tileUBOs.emplace_back(shaders::ClipUBO{matrixForTile(tileID), stencilID});
+        tileUBOs.emplace_back(shaders::ClipUBO{clippingMatrixForTile(tileID), stencilID});
     }
 
     if (!tileUBOs.empty()) {
@@ -329,7 +355,7 @@ void PaintParameters::renderTileClippingMasks(const RenderTiles& renderTiles) {
                       staticData.clippingMaskSegments,
                       ClippingMaskProgram::computeAllUniformValues(
                           ClippingMaskProgram::LayoutUniformValues{
-                              uniforms::matrix::Value(matrixForTile(tileID)),
+                              uniforms::matrix::Value(clippingMatrixForTile(tileID)),
                           },
                           paintAttributeData,
                           properties,
@@ -361,6 +387,7 @@ gfx::StencilMode PaintParameters::stencilModeFor3D() {
     // We're potentially destroying the stencil clipping mask in this pass. That
     // means we'll have to recreate it for the next source if any.
     tileClippingMaskIDs.clear();
+    tileClippingMasksUse3DTransform = false;
 
     const int32_t id = nextStencilID++;
     return gfx::StencilMode{.test = gfx::StencilMode::NotEqual{0b11111111},

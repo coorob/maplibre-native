@@ -80,6 +80,10 @@ void FillExtrusionLayerTweaker::execute(LayerGroupBase& layerGroup, const PaintP
         alignToTerrainOrigin
             ? klattraTerrainVerticalOffset(*parameters.activeTerrain, state)
             : 0.0f;
+    if (layerGroup.getType() == LayerGroupBase::Type::TileLayerGroup) {
+        static_cast<TileLayerGroup&>(layerGroup)
+            .setTileClippingFor3DVerticalOffset(terrainVerticalOffset);
+    }
     if (alignToTerrainOrigin) {
         klattraSeaLevelOriginEmitOnce(terrainVerticalOffset);
     }

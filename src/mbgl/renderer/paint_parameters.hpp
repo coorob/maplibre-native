@@ -104,6 +104,7 @@ public:
     // Stencil handling
 public:
     void renderTileClippingMasks(const RenderTiles&);
+    void renderTileClippingMasksFor3D(const RenderTiles&, float surfaceZ);
 
     /// Clear the stencil buffer, even if there are no tile masks (for 3D)
     void clearStencil();
@@ -119,6 +120,11 @@ public:
     gfx::StencilMode stencilModeFor3D();
 
 private:
+    void renderTileClippingMasksImpl(const RenderTiles&,
+                                     const mat4* projectionMatrix,
+                                     float surfaceZ,
+                                     bool forceUpdate);
+
     template <typename TIter>
     using GetTileIDFunc = const UnwrappedTileID& (*)(const typename TIter::value_type&);
     template <typename TIter>
@@ -126,6 +132,8 @@ private:
 
     // This needs to be an ordered map so that we have the same order as the renderTiles.
     std::map<UnwrappedTileID, int32_t> tileClippingMaskIDs;
+    // A later ordinary tile layer must not reuse masks projected onto a 3D surface.
+    bool tileClippingMasksUse3DTransform = false;
     int32_t nextStencilID = 1;
 
 public:

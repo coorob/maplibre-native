@@ -133,18 +133,24 @@ void RenderFillExtrusionLayer::update(gfx::ShaderRegistry& shaders,
         fillExtrusionPatternGroup = shaders.getShaderGroup("FillExtrusionPatternShader");
     }
 
+    const auto& evaluated = static_cast<const FillExtrusionLayerProperties&>(*evaluatedProperties).evaluated;
     auto* tileLayerGroup = static_cast<TileLayerGroup*>(layerGroup.get());
+#if MLN_RENDER_BACKEND_METAL
     static constexpr const char seaLevelSuffix[] = "__sea-level";
     static constexpr std::size_t seaLevelSuffixLength = sizeof(seaLevelSuffix) - 1;
     const auto& layerID = getID();
-    const bool useTileClippingFor3D =
-        layerID.size() >= seaLevelSuffixLength &&
-        layerID.compare(layerID.size() - seaLevelSuffixLength,
-                        seaLevelSuffixLength,
-                        seaLevelSuffix) == 0;
-    tileLayerGroup->setTileClippingFor3D(useTileClippingFor3D);
-
-    const auto& evaluated = static_cast<const FillExtrusionLayerProperties&>(*evaluatedProperties).evaluated;
+    const auto constantSurfaceHeight = evaluated.get<FillExtrusionHeight>().constant();
+    const bool useTileClippingFor3D = layerID.size() >= seaLevelSuffixLength &&
+                                      layerID.compare(layerID.size() - seaLevelSuffixLength,
+                                                      seaLevelSuffixLength,
+                                                      seaLevelSuffix) == 0 &&
+                                      constantSurfaceHeight.has_value();
+    const float tileClippingSurfaceHeight = constantSurfaceHeight.value_or(0.0f);
+#else
+    constexpr bool useTileClippingFor3D = false;
+    constexpr float tileClippingSurfaceHeight = 0.0f;
+#endif
+    tileLayerGroup->setTileClippingFor3D(useTileClippingFor3D, tileClippingSurfaceHeight);
 
     constexpr auto drawPass = RenderPass::Translucent;
 
