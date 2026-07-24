@@ -134,6 +134,15 @@ void RenderFillExtrusionLayer::update(gfx::ShaderRegistry& shaders,
     }
 
     auto* tileLayerGroup = static_cast<TileLayerGroup*>(layerGroup.get());
+    static constexpr const char seaLevelSuffix[] = "__sea-level";
+    static constexpr std::size_t seaLevelSuffixLength = sizeof(seaLevelSuffix) - 1;
+    const auto& layerID = getID();
+    const bool useTileClippingFor3D =
+        layerID.size() >= seaLevelSuffixLength &&
+        layerID.compare(layerID.size() - seaLevelSuffixLength,
+                        seaLevelSuffixLength,
+                        seaLevelSuffix) == 0;
+    tileLayerGroup->setTileClippingFor3D(useTileClippingFor3D);
 
     const auto& evaluated = static_cast<const FillExtrusionLayerProperties&>(*evaluatedProperties).evaluated;
 
@@ -361,7 +370,7 @@ void RenderFillExtrusionLayer::update(gfx::ShaderRegistry& shaders,
             depthBuilder->setVertexAttributes(vertexAttrs);
         }
 
-        colorBuilder->setEnableStencil(doDepthPass);
+        colorBuilder->setEnableStencil(doDepthPass || useTileClippingFor3D);
         colorBuilder->setRawVertices({}, vertexCount, gfx::AttributeDataType::Short2);
         colorBuilder->setVertexAttributes(std::move(vertexAttrs));
 
@@ -452,7 +461,7 @@ void RenderFillExtrusionLayer::update(gfx::ShaderRegistry& shaders,
             instancedDepthBuilder->setInstanceAttributes(instanceAttrs);
         }
 
-        instancedColorBuilder->setEnableStencil(doDepthPass);
+        instancedColorBuilder->setEnableStencil(doDepthPass || useTileClippingFor3D);
         instancedColorBuilder->setRawVertices({}, instanceVertexCount, gfx::AttributeDataType::Short2);
         instancedColorBuilder->setVertexAttributes(std::move(instanceVertexAttrs));
         instancedColorBuilder->setInstanceAttributes(std::move(instanceAttrs));

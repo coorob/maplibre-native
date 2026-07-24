@@ -67,6 +67,20 @@ void TileLayerGroup::upload(gfx::UploadPass& uploadPass) {
 }
 
 namespace {
+void klattraSea3DTileClippingEmitOnce(std::size_t tileCount) {
+    static const bool trace = [] {
+        const char* v = std::getenv("KLATTRA_LOG_SEA_TILE_CLIP");
+        return v && !(*v == '0' || *v == 'f' || *v == 'F');
+    }();
+    static bool emitted = false;
+    if (trace && !emitted) {
+        emitted = true;
+        Log::Warning(Event::Render,
+                     "[KLATTRA SEA-TILE-CLIP] kind=sea-3d-tile-clipped tiles=" +
+                         std::to_string(tileCount));
+    }
+}
+
 // KLATTRA diagnostics (2D black-flash hunt): log when a layer group that
 // was rendering drawables goes empty or unvisited for a frame — the
 // symptom-level signature of the one-frame black land flash (background +
@@ -256,6 +270,7 @@ void TileLayerGroup::render(RenderOrchestrator&, PaintParameters& parameters) {
             }
         });
     }
+    const bool tileClipped3d = features3d && tileClippingFor3D;
 
 #if !defined(NDEBUG)
     const auto debugGroupRender = parameters.encoder->createDebugGroup(getName() + "-render");
@@ -267,6 +282,7 @@ void TileLayerGroup::render(RenderOrchestrator&, PaintParameters& parameters) {
     // We can keep the depth-based descriptors, but the stencil-based ones can change
     // every time, as a new value is assigned in each call to `stencilModeFor3D`.
     std::optional<MTLDepthStencilStatePtr> stateStencil, stateDepthStencil;
+    std::optional<MTLDepthStencilStatePtr> stateTileClip, stateDepthTileClip;
     std::function<const MTLDepthStencilStatePtr&(bool, bool)> getDepthStencilState;
     if (features3d) {
         // If we're using group-wide states, build only the ones that actually get used
@@ -302,7 +318,14 @@ void TileLayerGroup::render(RenderOrchestrator&, PaintParameters& parameters) {
             }
         };
 
-        if (stencil3d) {
+        if (tileClipped3d) {
+            // The post-terrain sea layer may contain retained parent and child
+            // vector tiles simultaneously. Preserve 3D depth testing, but
+            // restore the ordinary tile masks so detailed children replace
+            // generalized parent coastlines instead of painting their union.
+            parameters.renderTileClippingMasks(stencilTiles);
+            klattraSea3DTileClippingEmitOnce(stencilTiles->size());
+        } else if (stencil3d) {
             stencilMode3d = parameters.stencilModeFor3D();
             encoder->setStencilReferenceValue(stencilMode3d.ref);
         }
@@ -315,7 +338,8 @@ void TileLayerGroup::render(RenderOrchestrator&, PaintParameters& parameters) {
     const bool tilePaintWatched = klattraTilePaintEnabled() &&
                                   (getName().find("topoColorRelief") != std::string::npos ||
                                    getName().find("land") != std::string::npos ||
-                                   getName().find("Land") != std::string::npos);
+                                   getName().find("Land") != std::string::npos ||
+                                   tileClipped3d);
     std::vector<OverscaledTileID> paintedIDs;
     visitDrawables([&](gfx::Drawable& drawable) {
         if (!drawable.getEnabled()) {
@@ -344,8 +368,23 @@ void TileLayerGroup::render(RenderOrchestrator&, PaintParameters& parameters) {
         // stencil mode for features with stencil enabled or disable stenciling.
         // 2D drawables will set their own stencil mode within `draw`.
         if (features3d) {
-            const auto& state = getDepthStencilState(drawable.getEnableDepth(), drawable.getEnableStencil());
-            renderPass.setDepthStencilState(state);
+            if (tileClipped3d && drawable.getEnableStencil() && drawable.getTileID()) {
+                const auto stencilMode =
+                    parameters.stencilModeForClipping(drawable.getTileID()->toUnwrapped());
+                auto& state = drawable.getEnableDepth() ? stateDepthTileClip : stateTileClip;
+                if (!state) {
+                    const auto depthMode = drawable.getEnableDepth()
+                                               ? parameters.depthModeFor3D()
+                                               : gfx::DepthMode::disabled();
+                    state = context.makeDepthStencilState(depthMode, stencilMode, renderable);
+                }
+                renderPass.setDepthStencilState(*state);
+                encoder->setStencilReferenceValue(stencilMode.ref);
+            } else {
+                const auto& state =
+                    getDepthStencilState(drawable.getEnableDepth(), drawable.getEnableStencil());
+                renderPass.setDepthStencilState(state);
+            }
         }
 
         drawable.draw(parameters);

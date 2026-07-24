@@ -194,6 +194,7 @@ public:
     std::size_t clearDrawables() override;
 
     void setStencilTiles(RenderTiles);
+    void setTileClippingFor3D(bool value) { tileClippingFor3D = value; }
 
     void updateLayerIndex(int32_t value) override { layerIndex = value; }
 
@@ -201,6 +202,9 @@ protected:
     // When stencil clipping is enabled for the layer, this is the set
     // of tile IDs that need to be rendered to the stencil buffer.
     RenderTiles stencilTiles;
+    // A small number of 3D tile layers need the same parent/child clipping
+    // semantics as ordinary 2D tile layers while retaining 3D depth testing.
+    bool tileClippingFor3D = false;
 
     struct TileLayerGroupTileKey {
         mbgl::RenderPass renderPass;
