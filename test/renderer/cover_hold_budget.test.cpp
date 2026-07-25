@@ -17,6 +17,29 @@ std::set<UnwrappedTileID> ids(const std::vector<cover_hold::Candidate>& candidat
 
 } // namespace
 
+TEST(CoverHoldBudget, ParsesBooleanDefaultsAndExplicitRollback) {
+    EXPECT_TRUE(cover_hold::booleanOverride(nullptr, true));
+    EXPECT_FALSE(cover_hold::booleanOverride(nullptr, false));
+    EXPECT_FALSE(cover_hold::booleanOverride("0", true));
+    EXPECT_TRUE(cover_hold::booleanOverride("1", false));
+    EXPECT_FALSE(cover_hold::booleanOverride("false", true));
+    EXPECT_TRUE(cover_hold::booleanOverride("true", false));
+    EXPECT_TRUE(cover_hold::booleanOverride("invalid", true));
+    EXPECT_FALSE(cover_hold::booleanOverride("invalid", false));
+}
+
+TEST(CoverHoldBudget, ParsesCountDefaultsOverridesAndExplicitRollback) {
+    EXPECT_EQ(cover_hold::countOverride(nullptr, 16, 4096), 16u);
+    EXPECT_EQ(cover_hold::countOverride("", 128, 512), 128u);
+    EXPECT_EQ(cover_hold::countOverride("0", 1300, 4096), 0u);
+    EXPECT_EQ(cover_hold::countOverride("16", 0, 4096), 16u);
+    EXPECT_EQ(cover_hold::countOverride("128", 0, 512), 128u);
+    EXPECT_EQ(cover_hold::countOverride("1300", 0, 4096), 1300u);
+    EXPECT_EQ(cover_hold::countOverride("invalid", 128, 512), 128u);
+    EXPECT_EQ(cover_hold::countOverride("513", 128, 512), 128u);
+    EXPECT_EQ(cover_hold::countOverride("16tiles", 0, 4096), 0u);
+}
+
 TEST(CoverHoldBudget, MirrorsTheActiveRasterDEMCoverCap) {
     EXPECT_EQ(cover_hold::rasterDEMCoverHoldBudget(112), 112u);
     EXPECT_EQ(cover_hold::rasterDEMCoverHoldBudget(384), 384u);

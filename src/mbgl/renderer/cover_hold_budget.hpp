@@ -4,15 +4,40 @@
 
 #include <algorithm>
 #include <atomic>
+#include <charconv>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <map>
 #include <optional>
 #include <set>
+#include <string_view>
 #include <vector>
 
 namespace mbgl::cover_hold {
+
+// Parse launch overrides separately from getenv so the compiled defaults and
+// their explicit rollback values can be covered by focused unit tests.
+inline bool booleanOverride(const char* value, const bool fallback) noexcept {
+    if (!value || !*value) return fallback;
+
+    const std::string_view parsed{value};
+    if (parsed == "1" || parsed == "true" || parsed == "TRUE" || parsed == "t" || parsed == "T") return true;
+    if (parsed == "0" || parsed == "false" || parsed == "FALSE" || parsed == "f" || parsed == "F") return false;
+    return fallback;
+}
+
+inline std::size_t countOverride(const char* value, const std::size_t fallback, const std::size_t maximum) noexcept {
+    if (!value || !*value) return fallback;
+
+    const std::string_view text{value};
+    std::size_t parsed = 0;
+    const auto result = std::from_chars(text.data(), text.data() + text.size(), parsed);
+    if (result.ec != std::errc{} || result.ptr != text.data() + text.size() || parsed > maximum) {
+        return fallback;
+    }
+    return parsed;
+}
 
 // Production RasterDEM covers are capped before they reach TilePyramid (112
 // tiles on compact viewports and up to 384 on tablets). Retaining at most one
@@ -25,7 +50,7 @@ constexpr std::size_t rasterDEMCoverHoldBudget(const std::size_t activeCoverCap)
     return activeCoverCap > 0 ? activeCoverCap : rasterDEMFallbackBudget;
 }
 
-// DIAG: once iOS reports memory pressure, keep half of the normal custom
+// Once iOS reports memory pressure, keep half of the normal custom
 // RasterDEM continuity allowance. The active/renderable cover and ordinary
 // fade holds are outside this budget. Rounding up preserves a useful fallback
 // even for controlled tiny-cover tests.
@@ -36,17 +61,17 @@ constexpr std::size_t rasterDEMPressureCoverHoldBudget(const std::size_t normalB
 // Under explicit memory pressure, bound the custom continuity hold for other
 // tiled sources without making any coverage claim about sparse vector data.
 // Keep at least one current-cover-sized fallback; active/renderable tiles and
-// ordinary fade holds are retained independently of this budget. A zero
-// configured cap keeps the diagnostic disabled.
+// ordinary fade holds are retained independently of this budget. A zero launch
+// override disables this production safety policy for controlled rollback.
 constexpr std::size_t nonRasterDEMPressureCoverHoldBudget(const std::size_t configuredCap,
                                                           const std::size_t activeIdealCount) noexcept {
     return configuredCap == 0 ? 0 : std::max(configuredCap, activeIdealCount);
 }
 
-// DIAG: the drape population already protects visible terrain meshes
-// separately. Under pressure, reduce only the total target allowance that
-// normally also includes overscan and parent-fallback canvases. A disabled or
-// larger pressure cap leaves the established moving/stable budget untouched.
+// The drape population already protects visible terrain meshes separately.
+// Under pressure, reduce only the total target allowance that normally also
+// includes overscan and parent-fallback canvases. A disabled or larger pressure
+// cap leaves the established moving/stable budget untouched.
 constexpr std::size_t pressureDrapePopulationBudget(const std::size_t normalBudget,
                                                     const std::size_t configuredPressureCap,
                                                     const bool pressureActive,
@@ -59,7 +84,7 @@ constexpr std::size_t pressureDrapePopulationBudget(const std::size_t normalBudg
 // Keep the pressure cap sticky for the current terrain instance. A direct
 // platform warning may activate it immediately; a recreated terrain instance
 // inherits the process-wide warning/high-water state on its next update.
-// With no configured cap, the diagnostic remains inert.
+// With a zero rollback override, the pressure cap remains inert.
 constexpr bool nextDrapePressureCapState(const bool currentlyActive,
                                          const std::size_t configuredPressureCap,
                                          const bool explicitMemoryPressure,
@@ -69,8 +94,8 @@ constexpr bool nextDrapePressureCapState(const bool currentlyActive,
 }
 
 // Sticky process-wide signal shared by the terrain DEM sampler, the other
-// TilePyramids, and RenderTerrain. The launch-gated consumers decide what to
-// shed; setting this flag alone does not alter production behavior.
+// TilePyramids, and RenderTerrain. Consumers decide what to shed; setting this
+// flag alone does not alter behavior when their rollback caps are zero.
 inline std::atomic_bool& processPressureState() noexcept {
     static std::atomic_bool active{false};
     return active;

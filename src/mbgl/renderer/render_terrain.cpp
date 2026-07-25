@@ -319,7 +319,8 @@ uint32_t klattraEnvTileCount(const char* name, uint32_t fallback) {
 }
 
 uint32_t klattraDrapePressureTotalCap() {
-    static const uint32_t cap = klattraEnvTileCount("KLATTRA_DRAPE_PRESSURE_TOTAL_CAP", 0);
+    static const uint32_t cap = static_cast<uint32_t>(
+        cover_hold::countOverride(std::getenv("KLATTRA_DRAPE_PRESSURE_TOTAL_CAP"), 128, 512));
     return cap;
 }
 
@@ -333,18 +334,15 @@ uint32_t klattraEnvFrameCount(const char* name, uint32_t fallback) {
 }
 
 bool klattraPacked565DrapeEnabled() {
-    // .69 device A/B: settled .68 imagery is clean in the RGBA8 near ring
-    // and exact style-background green survives only in the packed-565
-    // mid/far rings. The simulator cannot exercise B5G6R5Unorm (it maps the
-    // format to RGBA8), so make RGBA8 the device default for one isolated
-    // flight. Keep an explicit opt-in for memory comparisons and retain the
-    // old disable switch as an overriding kill switch.
+    // The simulator cannot exercise B5G6R5Unorm (it maps the format to RGBA8),
+    // but the packed mid/far targets were visually and memory accepted on
+    // physical devices in build 134. Keep the old disable switch as an
+    // overriding rollback and continue to honor ENABLE=0 for controlled A/Bs.
     static const bool enabled = [] {
         if (std::getenv("KLATTRA_DISABLE_DRAPE_565") != nullptr) {
             return false;
         }
-        const char* value = std::getenv("KLATTRA_ENABLE_DRAPE_565");
-        return value && !(*value == '0' || *value == 'f' || *value == 'F');
+        return cover_hold::booleanOverride(std::getenv("KLATTRA_ENABLE_DRAPE_565"), true);
     }();
     return enabled;
 }

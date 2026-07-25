@@ -26,6 +26,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <limits>
 #include <unordered_map>
 #include <algorithm>
 
@@ -95,14 +96,14 @@ std::atomic_bool& klattraCoverHoldHighWaterTripped() {
 }
 
 std::size_t klattraNonRasterDEMPressureCoverHoldCap() {
-    static const std::size_t cap = [] {
-        const char* v = std::getenv("KLATTRA_NON_DEM_PRESSURE_HOLD_CAP");
-        if (!v || !*v) return std::size_t{0};
-        char* end = nullptr;
-        const unsigned long parsed = std::strtoul(v, &end, 10);
-        return end != v && parsed > 0 && parsed <= 4096 ? static_cast<std::size_t>(parsed) : std::size_t{0};
-    }();
+    static const std::size_t cap = cover_hold::countOverride(
+        std::getenv("KLATTRA_NON_DEM_PRESSURE_HOLD_CAP"), 16, 4096);
     return cap;
+}
+
+bool klattraRasterDEMPressureHalfHoldEnabled() {
+    static const bool enabled = cover_hold::booleanOverride(std::getenv("KLATTRA_RASTER_DEM_PRESSURE_HALF_HOLD"), true);
+    return enabled;
 }
 } // namespace
 
@@ -393,34 +394,26 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
         const long parsed = v ? std::strtol(v, nullptr, 10) : 0;
         return static_cast<uint32_t>((parsed > 0 && parsed < 100000) ? parsed : 90);
     }();
-    // DIAG: RasterDEM parents contain complete elevation data, unlike sparse
+    // RasterDEM parents contain complete elevation data, unlike sparse
     // vector parents. Allow a newly renderable exact ideal parent to retire
-    // retained children from the previous zoom generation. Keep this launch
-    // gated until physical-device movement confirms continuity.
-    static const bool rasterDEMRetireLoadedAncestors = [] {
-        const char* v = std::getenv("KLATTRA_RASTER_DEM_RETIRE_LOADED_ANCESTORS");
-        return v && *v && !(*v == '0' || *v == 'f' || *v == 'F');
-    }();
-    // DIAG: do not reduce normal continuity quality pre-emptively. After the
+    // retained children from the previous zoom generation. The accepted build
+    // 134 value is now the compiled default; set the override to 0 to roll back.
+    static const bool rasterDEMRetireLoadedAncestors = cover_hold::booleanOverride(
+        std::getenv("KLATTRA_RASTER_DEM_RETIRE_LOADED_ANCESTORS"), true);
+    // Do not reduce normal continuity quality pre-emptively. After the
     // platform reports an actual memory warning, halve only the custom
     // RasterDEM fallback allowance for active terrain. The current active cover,
     // holdForFade tiles, and RenderTerrain's atomic complete-cover swap are
-    // independent of this budget.
-    static const bool rasterDEMPressureHalfHoldEnabled = [] {
-        const char* v = std::getenv("KLATTRA_RASTER_DEM_PRESSURE_HALF_HOLD");
-        return v && *v && !(*v == '0' || *v == 'f' || *v == 'F');
-    }();
-    // DIAG: iOS 18.1.1 on the physical iPhone 13 can jump directly from a
+    // independent of this budget. Set the override to 0 to roll back.
+    // iOS 18.1.1 on the physical iPhone 13 can jump directly from a
     // healthy process footprint to the fatal per-process jetsam limit without
-    // delivering UIApplicationDidReceiveMemoryWarning. When explicitly set,
-    // use the same sticky half-hold safety policy before that final surge.
-    static const int64_t rasterDEMHighWaterHalfHoldMB = [] {
-        const char* v = std::getenv("KLATTRA_RASTER_DEM_HIGHWATER_HALF_HOLD_MB");
-        if (!v || !*v) return int64_t{0};
-        char* end = nullptr;
-        const long parsed = std::strtol(v, &end, 10);
-        return end != v && parsed > 0 ? static_cast<int64_t>(parsed) : int64_t{0};
-    }();
+    // delivering UIApplicationDidReceiveMemoryWarning. Use the accepted
+    // 1300 MiB sticky half-hold threshold before that final surge. Set the
+    // override to 0 to disable the high-water trigger for rollback.
+    static const int64_t rasterDEMHighWaterHalfHoldMB = static_cast<int64_t>(
+        cover_hold::countOverride(std::getenv("KLATTRA_RASTER_DEM_HIGHWATER_HALF_HOLD_MB"),
+                                  1300,
+                                  static_cast<std::size_t>(std::numeric_limits<int64_t>::max())));
 
     // GeoJSON sources are local and immediately renderable. Extending their
     // previous cover provides no loading bridge, while terrain-draped line
@@ -438,7 +431,7 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
     KlattraMemorySample highWaterMemory;
     const bool highWaterHalfHoldEnabled = boundedRasterDEMCoverHold && parameters.usedByTerrain &&
                                           rasterDEMHighWaterHalfHoldMB > 0;
-    const bool halfHoldEnabled = rasterDEMPressureHalfHoldEnabled || highWaterHalfHoldEnabled;
+    const bool halfHoldEnabled = klattraRasterDEMPressureHalfHoldEnabled() || highWaterHalfHoldEnabled;
     if (boundedRasterDEMCoverHold && halfHoldEnabled && !rasterDEMPressureHalfHold &&
         cover_hold::processPressureActive()) {
         // A recreated DEM source must inherit an earlier platform
@@ -582,7 +575,7 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
         // polygons below ~z10) — it covers the area geometrically while
         // painting nothing, which IS the flash (traska.36 device data:
         // z7-z9 parents inside every dip set, holds credited them, land
-        // fills still painted 1-3 tile fragments). RasterDEM's launch-gated,
+        // fills still painted 1-3 tile fragments). RasterDEM's production
         // exact-ideal-parent exception is handled above. A previously rendered
         // tile is replaced only once all four child quadrants are rendered;
         // everything else rides the age cap (~250 ms, masked behind newer
@@ -976,11 +969,7 @@ void TilePyramid::reduceMemoryUse() {
 void TilePyramid::reduceMemoryUseForMemoryPressure() {
     reduceMemoryUse();
     ++memoryPressureEvents;
-    static const bool rasterDEMPressureHalfHoldEnabled = [] {
-        const char* v = std::getenv("KLATTRA_RASTER_DEM_PRESSURE_HALF_HOLD");
-        return v && *v && !(*v == '0' || *v == 'f' || *v == 'F');
-    }();
-    if (rasterDEMPressureHalfHoldEnabled) {
+    if (klattraRasterDEMPressureHalfHoldEnabled()) {
         rasterDEMPressureHalfHold = true;
     }
     if (klattraNonRasterDEMPressureCoverHoldCap() > 0) {
