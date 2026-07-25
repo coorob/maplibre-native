@@ -462,7 +462,7 @@ private:
 
     // Number of consecutive update frames where the terrain cover set has
     // stayed unchanged while the camera is not actively moving. Used to
-    // defer expensive 2048px drape targets until the view has settled.
+    // defer full-size near-ring drape targets until the view has settled.
     std::unordered_set<OverscaledTileID> previousIdealIDs;
     uint32_t stableDrapeCoverFrames = 0;
 
@@ -548,14 +548,15 @@ private:
 
     // Maximum stable-view pixel size of each close-zoom drape target. Moving
     // cameras allocate smaller close targets first and upgrade to this after
-    // the cover settles, so fast pans/zooms do not block on multiple 2048²
+    // the cover settles, so fast pans/zooms do not block on multiple large
     // offscreen renders. 512 (= DEM tile dimension) made texture-vs-elevation
     // sampling line up 1:1 in the vertex shader, but looked visibly blurry on
-    // flat surfaces (glaciers, lake ice) at close zoom. 2048² restores crisp
-    // polygon edges, label antialiasing, and shadow detail once stationary.
+    // flat surfaces (glaciers, lake ice) at close zoom. A physical iPhone A/B
+    // found 1536² retained crisp polygon edges, label antialiasing, and shadow
+    // detail while reducing each of the 12 RGBA8 near targets from 16 to 9 MiB.
     // Lower zooms allocate smaller targets in RenderTerrain::update because
     // terrain cover padding can make many z8/z10 drape targets visible at once.
-    static constexpr int32_t DRAPE_TARGET_SIZE = 2048;
+    static constexpr int32_t DRAPE_TARGET_SIZE = 1536;
 
     // Mesh resolution (cells per side). A 128×128 grid keeps the terrain
     // surface dense enough for drone-distance relief while avoiding the
