@@ -37,6 +37,7 @@
 #include <mbgl/util/range.hpp>
 #include <mbgl/util/tileset.hpp>
 #include <mbgl/util/timer.hpp>
+#include <mbgl/util/tile_cover.hpp>
 
 #include <mbgl/annotation/annotation_manager.hpp>
 #include <mbgl/annotation/annotation_source.hpp>
@@ -101,6 +102,63 @@ public:
 
     void end() { loop.stop(); }
 };
+
+TEST(Source, RasterCoverPolicyAppliesOnlyToTerrainDrapedSources) {
+    SourceTest test;
+    test.transform.resize({390, 844});
+    test.transform.jumpTo(
+        CameraOptions().withCenter(LatLng{59.3293, 18.0686}).withZoom(10.0).withBearing(0.0).withPitch(0.0));
+    test.transformState = test.transform.getState();
+
+    const Tileset tileset{{"tiles"}, {0, 15}};
+    constexpr uint16_t rasterTileSize = 256;
+
+    auto flatInput = test.tileParameters();
+    flatInput.usedByTerrain = false;
+    const auto flat = terrainAwareRasterTileParameters(flatInput, tileset, rasterTileSize);
+
+    auto terrainInput = test.tileParameters();
+    terrainInput.usedByTerrain = true;
+    const auto terrain = terrainAwareRasterTileParameters(terrainInput, tileset, rasterTileSize);
+
+    EXPECT_EQ(flat.tileLodMinRadius, 3.0);
+    EXPECT_EQ(flat.tileLodPitchThreshold, (60.0 / 180.0) * std::numbers::pi);
+    EXPECT_EQ(flat.tileLodMinZoom, 0u);
+    EXPECT_EQ(flat.tileCoverMinElevationMeters, 0.0);
+    EXPECT_EQ(flat.tileCoverMaxElevationMeters, 0.0);
+    EXPECT_EQ(flat.tileCoverMaxTiles, 0u);
+
+    EXPECT_EQ(terrain.tileLodMinRadius, 2.0);
+    EXPECT_EQ(terrain.tileLodPitchThreshold, (40.0 / 180.0) * std::numbers::pi);
+    EXPECT_GT(terrain.tileLodMinZoom, 0u);
+    EXPECT_EQ(terrain.tileCoverMinElevationMeters, -6000.0);
+    EXPECT_EQ(terrain.tileCoverMaxElevationMeters, 8000.0);
+    EXPECT_GT(terrain.tileCoverMaxTiles, 0u);
+
+    const auto coverFor = [&](const TileParameters& parameters) {
+        const util::TileCoverParameters coverParameters{
+            .transformState = parameters.transformState,
+            .tileLodMinRadius = parameters.tileLodMinRadius,
+            .tileLodScale = parameters.tileLodScale,
+            .tileLodPitchThreshold = parameters.tileLodPitchThreshold,
+            .tileLodMode = parameters.tileLodMode,
+            .tileLodMinZoom = parameters.tileLodMinZoom,
+            .tileCoverMinElevationMeters = parameters.tileCoverMinElevationMeters,
+            .tileCoverMaxElevationMeters = parameters.tileCoverMaxElevationMeters,
+            .tileCoverMaxTiles = parameters.tileCoverMaxTiles,
+        };
+        const int32_t idealZoom = util::coveringZoomLevel(
+            parameters.transformState.getZoom(), SourceType::Raster, rasterTileSize);
+        return util::tileCover(
+            coverParameters, static_cast<uint8_t>(idealZoom), tileset.zoomRange, static_cast<uint8_t>(idealZoom));
+    };
+
+    const auto flatCover = coverFor(flat);
+    const auto terrainCover = coverFor(terrain);
+    EXPECT_LE(flatCover.size(), 12u);
+    EXPECT_GE(terrainCover.size(), 81u);
+    EXPECT_GT(terrainCover.size(), flatCover.size() * 8u);
+}
 
 TEST(Source, LoadingFail) {
     SourceTest test;

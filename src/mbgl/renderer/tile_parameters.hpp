@@ -2,6 +2,7 @@
 
 #include <mbgl/map/mode.hpp>
 #include <mbgl/actor/scheduler.hpp>
+#include <mbgl/style/types.hpp>
 
 #include <memory>
 #include <numbers>
@@ -10,6 +11,26 @@
 #include <mapbox/std/weak.hpp>
 
 namespace mbgl {
+
+namespace tile_policy {
+
+// Recomputed for every source update. The active DEM always feeds terrain;
+// Raster sources do so only while a visible layer is being rendered into an
+// active terrain drape.
+constexpr bool usedByTerrain(const style::SourceType sourceType,
+                             const bool terrainEnabled,
+                             const bool isActiveTerrainSource,
+                             const bool needsRendering) noexcept {
+    return terrainEnabled && (isActiveTerrainSource || (sourceType == style::SourceType::Raster && needsRendering));
+}
+
+// The enlarged Raster cache exists solely as a terrain-drape gap-fill
+// reservoir. Flat raster sources use the ordinary cache budget.
+constexpr std::size_t rasterCacheScale(const bool usedByTerrain, const std::size_t terrainScale) noexcept {
+    return usedByTerrain ? terrainScale : 1;
+}
+
+} // namespace tile_policy
 
 class TransformState;
 class FileSource;
@@ -52,9 +73,9 @@ public:
     // Optional cap on visible source tiles. 0 preserves the full cover.
     std::size_t tileCoverMaxTiles = 0;
     // Set per source by RenderOrchestrator when this source is the active
-    // terrain DEM. A RasterDEM source can also be used only by flat visual
-    // layers (hillshade/color-relief); those layers must not inherit the
-    // terrain mesh's elevation-expanded cover.
+    // terrain DEM or a rendered Raster source routed into the terrain drape.
+    // Raster and RasterDEM sources can also be used by flat visual layers;
+    // those layers must not inherit terrain-only cover and cache policy.
     bool usedByTerrain = false;
     gfx::DynamicTextureAtlasPtr dynamicTextureAtlas;
     bool isUpdateSynchronous = false;

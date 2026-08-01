@@ -5,6 +5,8 @@
 
 namespace mbgl {
 
+TileParameters terrainAwareRasterTileParameters(const TileParameters&, const Tileset&, uint16_t tileSize);
+
 class RenderRasterSource final : public RenderTileSetSource {
 public:
     explicit RenderRasterSource(Immutable<style::TileSource::Impl>, const TaggedScheduler&);

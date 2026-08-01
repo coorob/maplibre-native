@@ -1,4 +1,5 @@
 #include <mbgl/renderer/cover_hold_budget.hpp>
+#include <mbgl/renderer/tile_parameters.hpp>
 #include <mbgl/test/util.hpp>
 
 #include <map>
@@ -58,6 +59,53 @@ TEST(CoverHoldBudget, KeepsOneCoverWhenBoundingNonRasterDEMFallbacksUnderPressur
     EXPECT_EQ(cover_hold::nonRasterDEMPressureCoverHoldBudget(16, 16), 16u);
     EXPECT_EQ(cover_hold::nonRasterDEMPressureCoverHoldBudget(16, 24), 24u);
     EXPECT_EQ(cover_hold::nonRasterDEMPressureCoverHoldBudget(0, 24), 0u);
+}
+
+TEST(TileParameters, TerrainOwnershipIsRecomputedForEverySourceAndFrame) {
+    bool sourceUsedByTerrain = true;
+    const auto assign = [&](const style::SourceType type,
+                            const bool terrainEnabled,
+                            const bool isActiveTerrainSource,
+                            const bool needsRendering) {
+        sourceUsedByTerrain = tile_policy::usedByTerrain(type, terrainEnabled, isActiveTerrainSource, needsRendering);
+    };
+
+    // Flat Raster source: a previous source/frame value must not leak in.
+    assign(style::SourceType::Raster, false, false, true);
+    EXPECT_FALSE(sourceUsedByTerrain);
+
+    // Flat color-relief/hillshade RasterDEM is visual-only.
+    assign(style::SourceType::RasterDEM, false, false, true);
+    EXPECT_FALSE(sourceUsedByTerrain);
+
+    // Active terrain DEM is required even without a visible style layer.
+    assign(style::SourceType::RasterDEM, true, true, false);
+    EXPECT_TRUE(sourceUsedByTerrain);
+
+    // A second visible RasterDEM remains visual-only while another DEM owns terrain.
+    assign(style::SourceType::RasterDEM, true, false, true);
+    EXPECT_FALSE(sourceUsedByTerrain);
+
+    // The next hidden Raster source must reset the DEM's true value.
+    assign(style::SourceType::Raster, true, false, false);
+    EXPECT_FALSE(sourceUsedByTerrain);
+
+    // A rendered Raster source is routed into the active terrain drape.
+    assign(style::SourceType::Raster, true, false, true);
+    EXPECT_TRUE(sourceUsedByTerrain);
+
+    // Unrelated rendered source types do not inherit terrain ownership.
+    assign(style::SourceType::Vector, true, false, true);
+    EXPECT_FALSE(sourceUsedByTerrain);
+
+    // Returning from 3D to 2D must reset the same Raster source again.
+    assign(style::SourceType::Raster, false, false, true);
+    EXPECT_FALSE(sourceUsedByTerrain);
+}
+
+TEST(TileParameters, RasterCacheExpansionIsTerrainDrapeOnly) {
+    EXPECT_EQ(tile_policy::rasterCacheScale(false, 4), 1u);
+    EXPECT_EQ(tile_policy::rasterCacheScale(true, 4), 4u);
 }
 
 TEST(CoverHoldBudget, ReducesOnlyTheExtraDrapePopulationAfterPressure) {

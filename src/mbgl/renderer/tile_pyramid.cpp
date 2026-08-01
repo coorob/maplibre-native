@@ -723,10 +723,12 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
             std::max(static_cast<double>(parameters.transformState.getSize().width) / tileSize, 1.0) *
             std::max(static_cast<double>(parameters.transformState.getSize().height) / tileSize, 1.0) *
             (parameters.transformState.getMaxZoom() - parameters.transformState.getMinZoom() + 1) * 0.5);
-        // .66: see klattraRasterCacheScale above — the drape gap-fill's
-        // candidate reservoir must outlive the flight corridor.
+        // .66: see klattraRasterCacheScale above — the terrain drape
+        // gap-fill's candidate reservoir must outlive the flight corridor.
+        // Flat raster layers never use that reservoir and retain the ordinary
+        // cache budget.
         if (type == SourceType::Raster) {
-            conservativeCacheSize *= klattraRasterCacheScale();
+            conservativeCacheSize *= tile_policy::rasterCacheScale(parameters.usedByTerrain, klattraRasterCacheScale());
         }
         cache.setSize(conservativeCacheSize);
     } else {

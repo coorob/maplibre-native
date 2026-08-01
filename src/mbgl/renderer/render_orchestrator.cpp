@@ -458,17 +458,18 @@ std::unique_ptr<RenderTree> RenderOrchestrator::createRenderTree(
                 updateList[index] = true;
             }
         }
-        // Mark the active DEM source as needed for terrain rendering and pass
-        // that ownership into the source update. RasterDEM is also valid as a
-        // flat hillshade/color-relief source, which must not use the terrain
-        // mesh's elevation-expanded cover.
-        const bool sourceIsTerrainDEM = renderTerrain && renderTerrain->isEnabled() &&
-                                        sourceImpl->id == renderTerrain->getSourceID();
+        // Pass terrain ownership into each source update. The active DEM needs
+        // terrain coverage even without a style layer, while a rendered Raster
+        // source is routed into the terrain drape by RenderRasterLayer. Flat
+        // Raster and RasterDEM sources must retain their ordinary 2D cover.
+        const bool terrainEnabled = renderTerrain && renderTerrain->isEnabled();
+        const bool sourceIsTerrainDEM = terrainEnabled && sourceImpl->id == renderTerrain->getSourceID();
         if (sourceIsTerrainDEM) {
             sourceNeedsRendering = true;
         }
 
-        tileParameters.usedByTerrain = sourceIsTerrainDEM;
+        tileParameters.usedByTerrain = tile_policy::usedByTerrain(
+            sourceImpl->type, terrainEnabled, sourceIsTerrainDEM, sourceNeedsRendering);
         tileParameters.isUpdateSynchronous = sourceImpl->isUpdateSynchronous();
         source->update(sourceImpl, filteredLayersForSource, sourceNeedsRendering, sourceNeedsRelayout, tileParameters);
         filteredLayersForSource.clear();

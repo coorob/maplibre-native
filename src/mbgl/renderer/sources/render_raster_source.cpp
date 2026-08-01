@@ -31,14 +31,67 @@ const std::optional<Tileset>& RenderRasterSource::getTileset() const {
     return impl().tileset;
 }
 
+TileParameters terrainAwareRasterTileParameters(const TileParameters& parameters,
+                                                const Tileset& tileset,
+                                                const uint16_t tileSize) {
+    TileParameters rasterParameters = parameters;
+    if (!parameters.usedByTerrain) {
+        return rasterParameters;
+    }
+
+    const char* v = std::getenv("KLATTRA_TERRAIN_LOD_PITCH_DEG");
+    double deg = 40.0;
+    if (v && *v) {
+        char* end = nullptr;
+        const double parsed = std::strtod(v, &end);
+        if (end != v) deg = std::clamp(parsed, 20.0, 60.0);
+    }
+    rasterParameters.tileLodPitchThreshold = deg * M_PI / 180.0;
+
+    rasterParameters.tileLodMinRadius = 2.0;
+    rasterParameters.tileLodScale = 1.0;
+    rasterParameters.tileCoverMinElevationMeters = -6000.0;
+    rasterParameters.tileCoverMaxElevationMeters = 8000.0;
+
+    // Match the DEM cover exactly: any mesh emitted beyond the imagery
+    // budget would expose the style background through that terrain.
+    rasterParameters.tileCoverMaxTiles = klattraTerrainRenderTileCap(parameters.transformState.getSize());
+
+    const double rasterZoom = util::clamp<double>(parameters.transformState.getZoom() + parameters.tileLodZoomShift,
+                                                  parameters.transformState.getMinZoom(),
+                                                  parameters.transformState.getMaxZoom());
+    const int32_t idealZoom = util::coveringZoomLevel(rasterZoom, SourceType::Raster, tileSize);
+    const int32_t coverZoom = std::clamp<int32_t>(
+        idealZoom, static_cast<int32_t>(tileset.zoomRange.min), static_cast<int32_t>(tileset.zoomRange.max));
+    // .65: floor at coverZoom-3, one step below the DEM's -2. The -2
+    // mirror was blind to the sources' asymmetry: this source's coverZoom
+    // is deeper than the DEM's (256px tiles and maxzoom 15 vs 512px and
+    // maxzoom 12), so at flyover the raster floor sat at z11 while the
+    // DEM/mesh cover flooring at z10 reached 2-4x farther on the same
+    // ranked tile budget. Bound far meshes (z8 canvases in the phone-63
+    // census) rendered relief in style-background green with the raster
+    // pyramid holding nothing to route or gap-fill from. Floor z10 at
+    // flyover matches the DEM's geographic reach per tile, so the imagery
+    // cover blankets everything the mesh cover emits — same tile cap,
+    // coarser far rows, no extra memory.
+    rasterParameters.tileLodMinZoom = static_cast<uint8_t>(std::max<int32_t>(tileset.zoomRange.min, coverZoom - 3));
+
+    return rasterParameters;
+}
+
 void RenderRasterSource::updateInternal(const Tileset& tileset,
                                         const std::vector<Immutable<LayerProperties>>& layers,
                                         const bool needsRendering,
                                         const bool needsRelayout,
                                         const TileParameters& parameters) {
-    // Mirror the DEM source's variable-zoom cover tuning (see the long
-    // rationale blocks in render_raster_dem_source.cpp) so pitched views
-    // serve the far field with a few coarse parent tiles. The 40° pitch
+    // When this source is routed into terrain, mirror the DEM source's
+    // variable-zoom cover tuning (see the long rationale blocks in
+    // render_raster_dem_source.cpp) so pitched views serve the far field with
+    // a few coarse parent tiles. Flat raster layers render on the z=0 plane
+    // and must keep the ordinary cover; applying the terrain elevation halo
+    // there inflated a phone's 2D raster cover to roughly 90-112 tiles.
+    //
+    // The 40° pitch
     // gate alone (6.27.0-traska.18) was NOT enough: with the stock
     // tileLodMinRadius=3/tileLodScale=1 the cover never actually emits
     // any lower-zoom far-field tiles — the exact lesson the DEM source
@@ -62,50 +115,7 @@ void RenderRasterSource::updateInternal(const Tileset& tileset,
     // full-frustum ideal-zoom firehose or nothing — a tile-count and
     // disk-write win on top of the drape fix. Same env knobs as the DEM
     // source (KLATTRA_TERRAIN_LOD_PITCH_DEG, KLATTRA_TERRAIN_MAX_RENDER_TILES).
-    TileParameters rasterParameters = parameters;
-    {
-        const char* v = std::getenv("KLATTRA_TERRAIN_LOD_PITCH_DEG");
-        double deg = 40.0;
-        if (v && *v) {
-            char* end = nullptr;
-            const double parsed = std::strtod(v, &end);
-            if (end != v) deg = std::clamp(parsed, 20.0, 60.0);
-        }
-        rasterParameters.tileLodPitchThreshold = deg * M_PI / 180.0;
-
-        rasterParameters.tileLodMinRadius = 2.0;
-        rasterParameters.tileLodScale = 1.0;
-        rasterParameters.tileCoverMinElevationMeters = -6000.0;
-        rasterParameters.tileCoverMaxElevationMeters = 8000.0;
-
-        // Match the DEM cover exactly: any mesh emitted beyond the imagery
-        // budget would expose the style background through that terrain.
-        rasterParameters.tileCoverMaxTiles =
-            klattraTerrainRenderTileCap(parameters.transformState.getSize());
-
-        const double rasterZoom = util::clamp<double>(parameters.transformState.getZoom() + parameters.tileLodZoomShift,
-                                                      parameters.transformState.getMinZoom(),
-                                                      parameters.transformState.getMaxZoom());
-        const int32_t idealZoom = util::coveringZoomLevel(rasterZoom, SourceType::Raster, impl().getTileSize());
-        const int32_t coverZoom = std::clamp<int32_t>(idealZoom,
-                                                      static_cast<int32_t>(tileset.zoomRange.min),
-                                                      static_cast<int32_t>(tileset.zoomRange.max));
-        // .65: floor at coverZoom-3, one step below the DEM's -2. The -2
-        // mirror was blind to the sources' asymmetry: this source's
-        // coverZoom is deeper than the DEM's (256px tiles and maxzoom 15
-        // vs 512px and maxzoom 12), so at flyover the raster floor sat at
-        // z11 while the DEM/mesh cover flooring at z10 reached 2-4x
-        // farther on the same ranked tile budget. Bound far meshes (z8
-        // canvases in the phone-63 census) rendered relief in
-        // style-background green with the raster pyramid holding NOTHING
-        // to route or gap-fill from (standing dry z8/136/70 + z8/138/71 =
-        // "green covering the terrain"). Floor z10 at flyover matches the
-        // DEM's geographic reach per tile, so the imagery cover blankets
-        // everything the mesh cover emits — same tile cap, coarser far
-        // rows, no extra memory.
-        rasterParameters.tileLodMinZoom = static_cast<uint8_t>(
-            std::max<int32_t>(tileset.zoomRange.min, coverZoom - 3));
-    }
+    const TileParameters rasterParameters = terrainAwareRasterTileParameters(parameters, tileset, impl().getTileSize());
     tilePyramid.update(layers,
                        needsRendering,
                        needsRelayout,
