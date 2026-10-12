@@ -174,6 +174,28 @@ inline bool hasRenderableIdealAncestor(const UnwrappedTileID& previous,
     return false;
 }
 
+// 2D relief variant: the ideal ancestor must also have been rendered in the
+// previous update. A hillshade/colour-relief tile paints from a prepare
+// texture baked a frame after the tile first renders; retiring the children
+// on the parent's first renderable update would show the not-yet-baked parent
+// for a frame. Waiting one update lets the bake land under the held children.
+template <typename RenderedTiles>
+inline bool hasSettledIdealAncestor(const UnwrappedTileID& previous,
+                                    const std::set<UnwrappedTileID>& currentIdealTiles,
+                                    const RenderedTiles& renderedTiles,
+                                    const std::set<UnwrappedTileID>& lastRenderedTiles) {
+    for (uint8_t ancestorZ = previous.canonical.z; ancestorZ > 0;) {
+        --ancestorZ;
+        const UnwrappedTileID ancestor{previous.wrap, previous.canonical.scaledTo(ancestorZ)};
+        if (currentIdealTiles.find(ancestor) != currentIdealTiles.end() &&
+            renderedTiles.find(ancestor) != renderedTiles.end() &&
+            lastRenderedTiles.find(ancestor) != lastRenderedTiles.end()) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // Keep current and immediately preceding ideal-cover IDs. The map is only an
 // overlap index; evicting older entries does not touch active, fallback, or
 // fading tiles directly.

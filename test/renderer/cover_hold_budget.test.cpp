@@ -144,6 +144,28 @@ TEST(CoverHoldBudget, RetiresPreviousChildOnlyForRenderableCurrentIdealAncestor)
         previous, std::set<UnwrappedTileID>{child}, std::set<UnwrappedTileID>{child}));
 }
 
+TEST(CoverHoldBudget, RetiresPreviousChildFor2DReliefOnlyOnceTheAncestorRenderedLastUpdate) {
+    const UnwrappedTileID previous{16, 34058, 22302};
+    const UnwrappedTileID ancestor{13, 4257, 2787};
+    const UnwrappedTileID otherAncestor{14, 8514, 5575};
+    const std::set<UnwrappedTileID> ideal{ancestor};
+    const std::set<UnwrappedTileID> rendered{ancestor};
+
+    // Zoom-out: the z13 ideal parent became renderable this update — hold the
+    // z16 child one more update so the parent's relief bake lands first.
+    EXPECT_FALSE(cover_hold::hasSettledIdealAncestor(previous, ideal, rendered, std::set<UnwrappedTileID>{}));
+    // Next update the parent was already rendered: retire the child.
+    EXPECT_TRUE(cover_hold::hasSettledIdealAncestor(previous, ideal, rendered, std::set<UnwrappedTileID>{ancestor}));
+    // A different tile rendered last update does not count.
+    EXPECT_FALSE(
+        cover_hold::hasSettledIdealAncestor(previous, ideal, rendered, std::set<UnwrappedTileID>{otherAncestor}));
+    // Rendered last update but not renderable now (or not ideal): keep holding.
+    EXPECT_FALSE(cover_hold::hasSettledIdealAncestor(
+        previous, ideal, std::set<UnwrappedTileID>{}, std::set<UnwrappedTileID>{ancestor}));
+    EXPECT_FALSE(cover_hold::hasSettledIdealAncestor(
+        previous, std::set<UnwrappedTileID>{}, rendered, std::set<UnwrappedTileID>{ancestor}));
+}
+
 TEST(CoverHoldBudget, BoundsRecentIdealHistoryAndKeepsNewestIDsDeterministically) {
     std::map<UnwrappedTileID, uint32_t> recent{{UnwrappedTileID{5, 0, 0}, 96},
                                                {UnwrappedTileID{5, 1, 0}, 99},

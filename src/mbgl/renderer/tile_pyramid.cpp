@@ -320,6 +320,14 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
     };
 
     auto previouslyRenderedTiles = std::move(renderedTiles);
+    // renderTileFn erases still-rendering tiles from previouslyRenderedTiles,
+    // so keep the full previous render set for 2D relief ancestor retirement.
+    std::set<UnwrappedTileID> lastRenderedTiles;
+    if (type == SourceType::RasterDEM && !parameters.usedByTerrain) {
+        for (const auto& rendered : previouslyRenderedTiles) {
+            lastRenderedTiles.insert(rendered.first);
+        }
+    }
 
     auto renderTileFn = [&](const UnwrappedTileID& tileID, Tile& tile) {
         addRenderTile(tileID, tile);
@@ -400,6 +408,16 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
     // 134 value is now the compiled default; set the override to 0 to roll back.
     static const bool rasterDEMRetireLoadedAncestors = cover_hold::booleanOverride(
         std::getenv("KLATTRA_RASTER_DEM_RETIRE_LOADED_ANCESTORS"), true);
+    // The same holds for 2D relief (hillshade/colour-relief) DEM sources. Without
+    // it a zoom-out kept the previous deeper tiles forever: nothing retires them
+    // (no deeper children render, they never leave the recent ideal union, and an
+    // idle map never reaches the age cap), and updateTileMasks lets them paint
+    // over the parent — square, darker relief patches wherever the map had been
+    // zoomed in. Invisible while every relief archive stopped at z12; German
+    // relief reaches z16. Requires the parent rendered last update too
+    // (hasSettledIdealAncestor). Set the override to 0 to roll back.
+    static const bool rasterDEMRetireLoadedAncestors2D = cover_hold::booleanOverride(
+        std::getenv("KLATTRA_RASTER_DEM_RETIRE_LOADED_ANCESTORS_2D"), true);
     // Do not reduce normal continuity quality pre-emptively. After the
     // platform reports an actual memory warning, halve only the custom
     // RasterDEM fallback allowance for active terrain. The current active cover,
@@ -507,8 +525,10 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
     const std::size_t recentIdealCap = boundedCoverHold ? cover_hold::recentIdealBudget(coverHoldBudget) : 0;
     const bool retireLoadedRasterDEMAncestors =
         boundedRasterDEMCoverHold && parameters.usedByTerrain && rasterDEMRetireLoadedAncestors;
+    const bool retireSettledReliefAncestors =
+        boundedRasterDEMCoverHold && !parameters.usedByTerrain && rasterDEMRetireLoadedAncestors2D;
     std::set<UnwrappedTileID> currentIdealTiles;
-    if (retireLoadedRasterDEMAncestors) {
+    if (retireLoadedRasterDEMAncestors || retireSettledReliefAncestors) {
         for (const auto& idealTile : idealTiles) {
             currentIdealTiles.insert(idealTile.toUnwrapped());
         }
@@ -566,6 +586,12 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
         const UnwrappedTileID& previousID = previouslyRenderedTile.first;
         if (retireLoadedRasterDEMAncestors &&
             cover_hold::hasRenderableIdealAncestor(previousID, currentIdealTiles, renderedTiles)) {
+            ++coverRetiredCovered;
+            ++coverRetiredAncestor;
+            continue;
+        }
+        if (retireSettledReliefAncestors &&
+            cover_hold::hasSettledIdealAncestor(previousID, currentIdealTiles, renderedTiles, lastRenderedTiles)) {
             ++coverRetiredCovered;
             ++coverRetiredAncestor;
             continue;
@@ -663,7 +689,7 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
                         std::to_string(fadeHeld) + " recentIdeal=" + std::to_string(recentIdealTiles.size()) +
                         " recentExpired=" + std::to_string(recentIdealExpired) + " recentEvicted=" +
                         std::to_string(recentIdealEvicted) + " retired=" + std::to_string(coverRetiredCovered) +
-                        " ancestorMode=" + std::to_string(retireLoadedRasterDEMAncestors ? 1 : 0) +
+                        " ancestorMode=" + std::to_string(retireLoadedRasterDEMAncestors ? 1 : (retireSettledReliefAncestors ? 2 : 0)) +
                         " ancestorRetired=" + std::to_string(coverRetiredAncestor) +
                         " pressureMode=" + std::to_string(pressureHalfHold ? 1 : 0) +
                         " nonDEMPressureMode=" + std::to_string(boundedNonRasterDEMCoverHold ? 1 : 0) +
@@ -698,7 +724,7 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
                             recentIdealExpired,
                             recentIdealEvicted,
                             coverRetiredCovered,
-                            retireLoadedRasterDEMAncestors ? 1 : 0,
+                            retireLoadedRasterDEMAncestors ? 1 : (retireSettledReliefAncestors ? 2 : 0),
                             coverRetiredAncestor,
                             pressureHalfHold ? 1 : 0,
                             boundedNonRasterDEMCoverHold ? 1 : 0,
