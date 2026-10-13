@@ -36,6 +36,7 @@
 #include <mbgl/shaders/segment.hpp>
 #include <mbgl/util/constants.hpp>
 #include <mbgl/util/projection.hpp>
+#include <mbgl/util/tile_cover.hpp>
 #include <mbgl/util/logging.hpp>
 #include <mbgl/util/image.hpp>
 #include <mbgl/util/mat4.hpp>
@@ -814,7 +815,59 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
     const double drapeCenterLatRad = cameraCenter.latitude() * M_PI / 180.0;
     const double centerY = 0.5 - std::log(std::tan(M_PI / 4.0 + drapeCenterLatRad / 2.0)) / (2.0 * M_PI);
 
+    std::size_t finlandSurfaceSplits = 0;
+    std::size_t finlandSplitBudget = 0;
+    topo_vector::FinnishSurfaceDetail finlandSurfaceDetail;
     std::unordered_set<OverscaledTileID> exactDrapeIDs;
+#if defined(__ANDROID__) && MLN_RENDER_BACKEND_OPENGL
+    bool hasRenderedFinnishBase = false;
+    bool hasRenderedOfficialTopo = false;
+    for (const auto& item : renderTree.getLayerRenderItemMap()) {
+        if (!item.source) continue;
+        const auto sourceTiles = item.source->getRenderTiles();
+        if (!sourceTiles || sourceTiles->empty()) continue;
+        const auto& sourceID = item.source->baseImpl->id;
+        hasRenderedFinnishBase = hasRenderedFinnishBase || sourceID == "finland-openmaptiles";
+        hasRenderedOfficialTopo = hasRenderedOfficialTopo || topo_vector::isOfficialSourceID(sourceID);
+    }
+    const auto cameraDetailZoom = static_cast<uint8_t>(std::clamp(
+        util::coveringZoomLevel(state.getZoom(), style::SourceType::Vector, util::tileSize_I), 0, 25));
+    static const uint32_t closeNearTextureSize = static_cast<uint32_t>(
+        klattraEnvTargetSize("KLATTRA_DRAPE_TARGET_SIZE_NEAR", klattraDefaultDrapeNearSize));
+    if (topo_vector::useFinnishCloseSurface(true,
+                                          hasRenderedFinnishBase,
+                                          hasRenderedOfficialTopo,
+                                          useSharedTopoDrapeCohort,
+                                          cameraDetailZoom,
+                                          demSource->getMaxZoom(),
+                                          closeNearTextureSize,
+                                          util::tileSize_I)) {
+        // Keep every ordinary visible camera footprint when selecting colour
+        // detail. Truncating this selector to the eight near texture slots can
+        // omit foreground tiles and also allow their donor groups to coarsen.
+        // The elevation-expanded DEM cover still owns geometry, and the same
+        // bounded split budget exchanges near children with safe far quartets.
+        util::TileCoverParameters detailParameters{state};
+        detailParameters.tileLodMinZoom = cameraDetailZoom;
+        detailParameters.tileCoverMaxTiles = 0;
+        const auto detailTiles = util::tileCover(detailParameters,
+                                                 cameraDetailZoom,
+                                                 Range<uint8_t>{cameraDetailZoom, cameraDetailZoom});
+        finlandSplitBudget = topo_vector::finnishCloseSurfaceSplitBudget;
+        auto refined = topo_vector::refineFinnishSurfaceCover(currentIdealIDs,
+                                                               detailTiles,
+                                                               demSource->getMaxZoom(),
+                                                               finlandSplitBudget,
+                                                               centerX,
+                                                               centerY);
+        finlandSurfaceSplits = refined.splitCount;
+        if (stageDiagEnabled()) {
+            finlandSurfaceDetail = topo_vector::inspectFinnishSurfaceDetail(refined.meshLeaves, detailTiles);
+        }
+        currentIdealIDs = std::move(refined.meshLeaves);
+        exactDrapeIDs = std::move(refined.drapeLeaves);
+    }
+#endif
     if (useSharedTopoDrapeCohort) {
         static const uint32_t topoDetailTargets =
             klattraEnvTileCount("KLATTRA_TOPO_DETAIL_TARGETS", 32);
@@ -825,7 +878,7 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
                                                                                 centerX,
                                                                                 centerY);
         exactDrapeIDs.insert(cohort.begin(), cohort.end());
-    } else {
+    } else if (exactDrapeIDs.empty()) {
         exactDrapeIDs = currentIdealIDs;
     }
 
@@ -1737,6 +1790,8 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
     std::size_t unboundPublishedOther = 0;
     std::array<std::size_t, 4> unboundTargetSizes{}; // near / mid / far / other
     std::string unboundDiagnosticSample;
+    std::size_t finlandPlannedAncestorBindings = 0;
+    std::size_t finlandRetiredCleanupRequests = 0;
     for (const auto& idealOS : terrainMeshIDs) {
         std::optional<OverscaledTileID> resolvedSourceID;
         std::shared_ptr<gfx::Texture2D> resolvedTexture;
@@ -1779,6 +1834,37 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
 
         TerrainDrapeTargetPtr drape = drapeCache.get(idealOS);
         OverscaledTileID resolvedDrapeID = idealOS;
+        if (finlandSurfaceSplits > 0) {
+            const auto plannedID = topo_vector::plannedDrapeForSurfaceMesh(idealOS, exactDrapeIDs);
+            const bool hasPlannedAncestor = plannedID && plannedID->canonical.z < idealOS.canonical.z;
+            const auto plannedTarget = hasPlannedAncestor ? drapeCache.get(*plannedID) : nullptr;
+            const auto retiredOwn = retiredDrapeTargetsByTile.find(idealOS);
+            const bool retiredOwnPublished = retiredOwn != retiredDrapeTargetsByTile.end() &&
+                                             targetOwnsPublishedTexture(retiredOwn->second);
+            const auto selection = topo_vector::selectPlannedDrapeAncestor(
+                hasPlannedAncestor,
+                klattraDrapeTargetReadyForTile(plannedTarget, idealOS),
+                retiredOwnPublished);
+            if (selection.usePlannedAncestor) {
+                // A planned far parent supersedes even a READY retired own
+                // child. Keep the existing continuity fallback until this
+                // parent is publishable, then switch texture and UV together.
+                drape = plannedTarget;
+                resolvedDrapeID = *plannedID;
+                binding.usedDrapeFallback = true;
+                auto [drapeTL, drapeScale] = klattraSubrectForChildInAncestor(idealOS, resolvedDrapeID);
+                binding.drapeTL = drapeTL;
+                binding.drapeScale = drapeScale;
+                ++finlandPlannedAncestorBindings;
+                if (selection.needsRetiredCleanupUpdate) {
+                    // Retired cleanup precedes atomic publication. One update
+                    // after the successful handoff releases its old texture;
+                    // an atomic hold keeps continuity and this request alive.
+                    drapeWorkPending = true;
+                    ++finlandRetiredCleanupRequests;
+                }
+            }
+        }
         if (!klattraDrapeTargetReadyForTile(drape, idealOS)) {
             auto retired = retiredDrapeTargetsByTile.find(idealOS);
             if (retired != retiredDrapeTargetsByTile.end() &&
@@ -2504,7 +2590,37 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
         terrain_perf::count(terrain_perf::Counter::MeshRevision);
         elevationRevision = nextTerrainElevationRevision();
     }
+#if defined(__ANDROID__) && MLN_RENDER_BACKEND_OPENGL
+    // Only the Finnish policy creates meshes beyond the real DEM maximum.
+    // Include the outgoing virtual cover when this update returns to base.
+    const bool finnishSurfaceTransition = finlandSurfaceSplits > 0 ||
+        std::any_of(currentBindings.begin(), currentBindings.end(), [&](const auto& entry) {
+            return entry.first.canonical.z > demSource->getMaxZoom();
+        });
+#endif
     currentBindings = std::move(nextBindings);
+#if defined(__ANDROID__) && MLN_RENDER_BACKEND_OPENGL
+    if ((hasRenderedFinnishBase || finnishSurfaceTransition) && !retiredDrapeTargetsByTile.empty()) {
+        std::unordered_set<const gfx::Texture2D*> nextPublishedTextures;
+        std::unordered_set<const gfx::Texture2D*> retiredTextures;
+        for (const auto& [meshID, binding] : currentBindings) {
+            (void)meshID;
+            if (binding.drapeTexture) nextPublishedTextures.insert(binding.drapeTexture.get());
+        }
+        for (const auto& [tileID, retired] : retiredDrapeTargetsByTile) {
+            (void)tileID;
+            if (retired && retired->getTexture()) retiredTextures.insert(retired->getTexture().get());
+        }
+        if (topo_vector::needsFinnishSurfaceCleanup(hasRenderedFinnishBase,
+                                                   finnishSurfaceTransition,
+                                                   publishedDrapeTextures,
+                                                   nextPublishedTextures,
+                                                   retiredTextures)) {
+            drapeWorkPending = true;
+            ++finlandRetiredCleanupRequests;
+        }
+    }
+#endif
     if (klattraTraceStderr()) {
         klattraTrace(
             "terrain update-end source=" + impl->sourceID + " bindings=" + std::to_string(currentBindings.size()) +
@@ -2615,8 +2731,43 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
             }
         }
         static std::chrono::steady_clock::time_point lastStageEmit{};
-        if (nowTp - lastStageEmit >= std::chrono::seconds(1)) {
+        bool emitFinalRetiredState = false;
+#if defined(__ANDROID__) && MLN_RENDER_BACKEND_OPENGL
+        const topo_vector::SurfaceDiagnosticState diagnosticState{
+            .bindings = currentBindings.size(),
+            .ready = readyBindings,
+            .candidateBindings = candidateBindingCount,
+            .candidateReady = candidateReadyBindings,
+            .unbound = unboundBindings,
+            .candidateUnbound = candidateUnboundBindings,
+            .emptyDEM = emptyDemBindings,
+            .candidateEmptyDEM = candidateEmptyDEMBindings,
+            .meshMissing = drawableMeshMissing,
+            .meshExtra = drawableMeshExtra,
+            .meshDuplicates = drawableMeshDuplicates,
+            .meshOverlap = drawableMeshOverlapPairs,
+            .retiredTargets = retiredDrapeTargetsByTile.size(),
+            .cleanupRequests = finlandRetiredCleanupRequests,
+            .atomicHold = terrainAtomicHold,
+            .atomicDrop = terrainAtomicDrop,
+            .pending = drapeWorkPending,
+        };
+        const bool surfaceQuiescent = topo_vector::isSurfaceDiagnosticQuiescent(diagnosticState);
+        emitFinalRetiredState = topo_vector::shouldEmitFinalRetiredSurfaceState(
+            stageLastEmittedRetiredTargets,
+            stageLastEmittedFinlandCleanup,
+            diagnosticState.retiredTargets,
+            diagnosticState.cleanupRequests,
+            stageLastEmittedSurfaceQuiescent,
+            surfaceQuiescent);
+#endif
+        if (emitFinalRetiredState || nowTp - lastStageEmit >= std::chrono::seconds(1)) {
             lastStageEmit = nowTp;
+#if defined(__ANDROID__) && MLN_RENDER_BACKEND_OPENGL
+            stageLastEmittedRetiredTargets = retiredDrapeTargetsByTile.size();
+            stageLastEmittedFinlandCleanup = finlandRetiredCleanupRequests;
+            stageLastEmittedSurfaceQuiescent = surfaceQuiescent;
+#endif
             uint32_t waitCover = 0, waitTex = 0, availUnrouted = 0, routedUnbaked = 0, contentReady = 0;
             uint32_t bound0 = 0, bound1 = 0, bound2 = 0, bound3 = 0;
             for (const auto& [stageID, stage] : drapeStageByTile) {
@@ -2702,6 +2853,18 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
                 " meshMissing=" + std::to_string(drawableMeshMissing) +
                 " meshExtra=" + std::to_string(drawableMeshExtra) + " rawIDs=" + std::to_string(rawIdealIDs.size()) +
                 " maskRoots=" + std::to_string(terrainMaskRoots) + " maskLeaves=" + std::to_string(terrainMaskLeaves) +
+                " finlandSplits=" + std::to_string(finlandSurfaceSplits) +
+                " finlandSplitBudget=" + std::to_string(finlandSplitBudget) +
+                " finlandDetailRequested=" + std::to_string(finlandSurfaceDetail.requestedFootprints) +
+                " finlandDetailCovered=" + std::to_string(finlandSurfaceDetail.coveredFootprints) +
+                " finlandDetailResolved=" + std::to_string(finlandSurfaceDetail.resolvedFootprints) +
+                " finlandDetailMinZ=" + std::to_string(finlandSurfaceDetail.minimumLeafZoom) +
+                " finlandDetailMaxZ=" + std::to_string(finlandSurfaceDetail.maximumLeafZoom) +
+                " finlandDetailRemainingSplits=" + std::to_string(finlandSurfaceDetail.remainingSplits) +
+                " finlandExactDrapes=" + std::to_string(exactDrapeIDs.size()) +
+                " finlandPlannedAncestors=" + std::to_string(finlandPlannedAncestorBindings) +
+                " finlandRetiredCleanup=" + std::to_string(finlandRetiredCleanupRequests) +
+                " retiredDrapeTargets=" + std::to_string(retiredDrapeTargetsByTile.size()) +
                 " leafIDs=" + std::to_string(currentIdealIDs.size()) + " maskDepth=" +
                 std::to_string(terrainMaskMaxDepth) + " atomicHold=" + std::to_string(terrainAtomicHold) +
                 " atomicDrop=" + std::to_string(terrainAtomicDrop) +

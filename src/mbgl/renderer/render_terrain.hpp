@@ -590,6 +590,13 @@ private:
     // failed tile retries next frame (the cache no longer stores nulls);
     // this counts the events so green plates can be attributed.
     mutable uint64_t stageAllocFailEvents = 0;
+#if defined(__ANDROID__) && MLN_RENDER_BACKEND_OPENGL
+    // Last emitted ownership state is per terrain instance. An idle renderer
+    // may finish cleanup before the ordinary one-second STAGE cadence.
+    std::size_t stageLastEmittedRetiredTargets = 0;
+    std::size_t stageLastEmittedFinlandCleanup = 0;
+    bool stageLastEmittedSurfaceQuiescent = false;
+#endif
 
     // Maximum stable-view pixel size of each close-zoom drape target. Moving
     // cameras allocate smaller close targets first and upgrade to this after

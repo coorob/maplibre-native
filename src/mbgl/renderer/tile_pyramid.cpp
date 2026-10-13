@@ -382,8 +382,19 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
         // those ids unchanged while still protecting against accidental finer
         // leaves. The generic elevation-expanded cover must not consume the
         // budget first.
-        idealTiles = topo_vector::cohortForTerrainLeaves(*parameters.terrainCoverTileIDs,
-                                                        *parameters.terrainCoverCohortZoom);
+#if defined(__ANDROID__) && MLN_RENDER_BACKEND_OPENGL
+        if (sourceImpl.id == "finland-openmaptiles") {
+            // Finnish virtual colour surfaces retain camera layout zoom above
+            // the real MVT maximum, once per canonical source tile. Official
+            // Topo's independent z10/cohort policy remains unchanged.
+            idealTiles = topo_vector::sourceCoverForTerrainSurfaceLeaves(*parameters.terrainCoverTileIDs,
+                                                                          *parameters.terrainCoverCohortZoom);
+        } else
+#endif
+        {
+            idealTiles = topo_vector::cohortForTerrainLeaves(*parameters.terrainCoverTileIDs,
+                                                            *parameters.terrainCoverCohortZoom);
+        }
         if (tileRange) {
             idealTiles.erase(std::remove_if(idealTiles.begin(),
                                             idealTiles.end(),

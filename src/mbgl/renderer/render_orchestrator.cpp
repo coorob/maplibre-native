@@ -20,6 +20,7 @@
 #include <mbgl/renderer/transition_parameters.hpp>
 #include <mbgl/renderer/property_evaluation_parameters.hpp>
 #include <mbgl/renderer/tile_parameters.hpp>
+#include <mbgl/renderer/topo_vector_cohort.hpp>
 #include <mbgl/renderer/render_tile.hpp>
 #include <mbgl/renderer/style_diff.hpp>
 #include <mbgl/renderer/query.hpp>
@@ -475,9 +476,16 @@ std::unique_ptr<RenderTree> RenderOrchestrator::createRenderTree(
         // cover unless it is the active terrain source.
         const bool sourceIsTerrainDEM = renderTerrain && renderTerrain->isEnabled() &&
                                         sourceImpl->id == renderTerrain->getSourceID();
+#if defined(__ANDROID__) && MLN_RENDER_BACKEND_OPENGL
+        constexpr bool androidOpenGL = true;
+#else
+        constexpr bool androidOpenGL = false;
+#endif
+        // A publication-authoritative vector base must request the elevated
+        // terrain footprint too; a flat source cover can leave valid far
+        // targets with no source requirement and therefore no drawable mesh.
         const bool sourceIsTerrainTopoVector = renderTerrain && renderTerrain->isEnabled() && sourceNeedsRendering &&
-                                               (sourceImpl->id == "topo" ||
-                                                sourceImpl->id == "norway-topo-vector");
+                                               topo_vector::isAuthoritativeFillSourceID(sourceImpl->id, androidOpenGL);
         if (sourceIsTerrainDEM) {
             sourceNeedsRendering = true;
         }

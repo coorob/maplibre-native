@@ -86,11 +86,13 @@ void RenderVectorSource::updateInternal(const Tileset& tileset,
         // they legitimately omit the contours, streams, and detailed fills
         // that make Topo readable. The cover helper clamps this floor to the
         // current ideal zoom for cameras below z10.
-        constexpr uint8_t detailedTopoMinZoom = 10;
-        const uint8_t terrainTopoFloor = std::clamp<uint8_t>(
-            detailedTopoMinZoom, tileset.zoomRange.min, tileset.zoomRange.max);
-        vectorParameters.tileLodMinZoom = terrainTopoFloor;
-        vectorParameters.tileFallbackMinZoom = terrainTopoFloor;
+        if (topo_vector::isOfficialSourceID(baseImpl->id)) {
+            constexpr uint8_t detailedTopoMinZoom = 10;
+            const uint8_t terrainTopoFloor = std::clamp<uint8_t>(
+                detailedTopoMinZoom, tileset.zoomRange.min, tileset.zoomRange.max);
+            vectorParameters.tileLodMinZoom = terrainTopoFloor;
+            vectorParameters.tileFallbackMinZoom = terrainTopoFloor;
+        }
 #if MLN_RENDER_BACKEND_OPENGL
         // An official vector tile can paint every finer drape target inside
         // it. Make the previous terrain-leaf union authoritative instead of
@@ -105,6 +107,17 @@ void RenderVectorSource::updateInternal(const Tileset& tileset,
                 topo_vector::drapeZoomPolicy().detailZoom, tileset.zoomRange.min, tileset.zoomRange.max);
             vectorParameters.boundCoverHoldToIdealCohort = true;
         }
+#if defined(__ANDROID__)
+        else if (topo_vector::isAuthoritativeFillSourceID(baseImpl->id, true)) {
+            // Finland's complete base has useful overview tiles down to z0.
+            // Request each natural drape target at its own zoom (clamped only
+            // by the source maximum), without the Swedish/Norwegian z10 floor
+            // or shared-canvas policy. Making this exact source cover primary
+            // prevents a full generic cover from consuming the gap-fill budget.
+            vectorParameters.terrainCoverCohortZoom = tileset.zoomRange.max;
+            vectorParameters.boundCoverHoldToIdealCohort = true;
+        }
+#endif
 #endif
     }
 

@@ -11,6 +11,7 @@
 #include <mbgl/renderer/render_source.hpp>
 #include <mbgl/renderer/render_tile.hpp>
 #include <mbgl/renderer/tile_render_data.hpp>
+#include <mbgl/renderer/topo_vector_cohort.hpp>
 #include <mbgl/style/expression/image.hpp>
 #include <mbgl/style/layers/fill_layer_impl.hpp>
 #include <mbgl/tile/geometry_tile.hpp>
@@ -158,8 +159,13 @@ void RenderFillLayer::update(gfx::ShaderRegistry& shaders,
                              const std::shared_ptr<UpdateParameters>&,
                              const RenderTree&,
                              UniqueChangeRequestVec& changes) {
+#if defined(__ANDROID__) && MLN_RENDER_BACKEND_OPENGL
+    constexpr bool androidOpenGL = true;
+#else
+    constexpr bool androidOpenGL = false;
+#endif
     const bool authoritativeTopoFill = activeTerrain && hasRenderPass(RenderPass::Opaque) &&
-                                       (baseImpl->source == "topo" || baseImpl->source == "norway-topo-vector");
+                                       topo_vector::isAuthoritativeFillSourceID(baseImpl->source, androidOpenGL);
     const std::string drapeCoverageKey = baseImpl->source + "/" + getID();
     bool authoritativeTopoUpdateFailed = false;
     if (authoritativeTopoFill) {

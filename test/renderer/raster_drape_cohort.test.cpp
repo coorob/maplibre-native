@@ -85,6 +85,16 @@ TEST(RasterDrapeCohort, OnlyTheCompleteSatelliteBaseControlsRasterReadiness) {
     EXPECT_TRUE(raster_drape::isAuthoritativeTerrainRaster("satellite-terrain-layer", "satellite-terrain-raster"));
     EXPECT_FALSE(raster_drape::isAuthoritativeTerrainRaster("satellite-orto-layer", "satellite-orto-raster"));
     EXPECT_FALSE(raster_drape::isAuthoritativeTerrainRaster("satellite-orto-layer", "satellite-terrain-raster"));
+    EXPECT_FALSE(raster_drape::isAuthoritativeTerrainRaster("satellite-orto-detail-layer",
+                                                          "satellite-orto-detail-raster"));
+    EXPECT_FALSE(raster_drape::isAuthoritativeTerrainRaster("satellite-finland-orto-layer",
+                                                          "satellite-finland-orto-raster"));
+    EXPECT_FALSE(raster_drape::isAuthoritativeTerrainRaster("satellite-finland-orto-detail-layer",
+                                                          "satellite-finland-orto-detail-raster"));
+    EXPECT_FALSE(raster_drape::isAuthoritativeTerrainRaster("satellite-terrain-layer",
+                                                          "satellite-finland-orto-raster"));
+    EXPECT_FALSE(raster_drape::isAuthoritativeTerrainRaster("satellite-finland-orto-layer",
+                                                          "satellite-terrain-raster"));
 }
 
 TEST(RasterDrapeCohort, RequiresAnAuthoritativeSourceBeforePublishing) {
