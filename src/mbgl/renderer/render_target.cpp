@@ -3,6 +3,7 @@
 #include <mbgl/gfx/context.hpp>
 #include <mbgl/gfx/offscreen_texture.hpp>
 #include <mbgl/gfx/render_pass.hpp>
+#include <mbgl/gfx/vertex_attribute.hpp>
 #include <mbgl/renderer/layer_group.hpp>
 #include <mbgl/renderer/layer_tweaker.hpp>
 #include <mbgl/renderer/paint_parameters.hpp>
@@ -10,9 +11,11 @@
 #include <mbgl/renderer/render_tree.hpp>
 #include <mbgl/util/image.hpp>
 #include <mbgl/util/io.hpp>
+#include <mbgl/util/monotonic_timer.hpp>
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -20,6 +23,7 @@
 #include <chrono>
 #include <iomanip>
 #include <limits>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <vector>
@@ -484,6 +488,26 @@ void RenderTarget::noteDrapeSourceCoverage(const uint64_t generation,
 }
 
 namespace {
+bool klattraDrapeBakeSkipEnabled() {
+    static const bool enabled = std::getenv("KLATTRA_DISABLE_DRAPE_BAKE_SKIP") == nullptr;
+    return enabled;
+}
+
+// Unchanged-canvas frames between forced re-bakes. Bounds staleness from any
+// input the fingerprint cannot see (in-place texture edits such as a pattern
+// atlas update).
+uint32_t klattraDrapeForcedRebakeFrames() {
+    static const uint32_t frames = [] {
+        const char* v = std::getenv("KLATTRA_DRAPE_FORCED_REBAKE_FRAMES");
+        return v && *v ? static_cast<uint32_t>(std::max(0, std::atoi(v))) : 120u;
+    }();
+    return frames;
+}
+
+void klattraMix(uint64_t& seed, const uint64_t value) noexcept {
+    seed ^= value + 0x9E3779B97F4A7C15ULL + (seed << 6) + (seed >> 2);
+}
+
 bool drapeAttemptBlockedUntilExternalUpdate(const RenderTarget::DrapeRenderDiagnostic& diagnostic,
                                             const uint64_t pendingGeneration) noexcept {
     if (diagnostic.generation != pendingGeneration) {
@@ -503,6 +527,60 @@ bool drapeAttemptBlockedUntilExternalUpdate(const RenderTarget::DrapeRenderDiagn
     return false;
 }
 } // namespace
+
+uint64_t RenderTarget::drapeContentFingerprint(const Color& canvasClearColor, const double cameraZoom) const {
+    uint64_t seed = 0;
+    const auto& texture = offscreenTexture->getTexture();
+    klattraMix(seed, reinterpret_cast<uintptr_t>(texture.get()));
+    klattraMix(seed, (uint64_t{texture->getSize().width} << 32) | texture->getSize().height);
+    for (const float channel : {canvasClearColor.r, canvasClearColor.g, canvasClearColor.b, canvasClearColor.a}) {
+        klattraMix(seed, static_cast<uint64_t>(std::lround(channel * 65535.0f)));
+    }
+    // Draped line widths follow the camera zoom; 1/8 zoom steps keep widths
+    // current without re-baking every frame of a pinch.
+    klattraMix(seed, static_cast<uint64_t>(std::llround(cameraZoom * 8.0)));
+    for (const auto& [layerIndex, layerGroup] : layerGroupsByLayerIndex) {
+        if (!layerGroup) continue;
+        klattraMix(seed, static_cast<uint64_t>(static_cast<uint32_t>(layerIndex)));
+        klattraMix(seed, reinterpret_cast<uintptr_t>(layerGroup.get()));
+        klattraMix(seed, layerGroup->getEnabled() ? 1u : 2u);
+        for (const auto& weakTweaker : layerGroup->getLayerTweakers()) {
+            if (const auto tweaker = weakTweaker.lock()) {
+                klattraMix(seed, reinterpret_cast<uintptr_t>(tweaker->getEvaluatedPropertiesIdentity()));
+            }
+        }
+        // Order-independent over the group's drawables.
+        uint64_t sum = 0, product = 1;
+        std::size_t count = 0;
+        visitLayerGroupDrawables(*layerGroup, [&](gfx::Drawable& drawable) {
+            uint64_t item = static_cast<uint64_t>(drawable.getID().id());
+            klattraMix(item, drawable.getEnabled() ? 1u : 2u);
+            klattraMix(item, reinterpret_cast<uintptr_t>(drawable.getTexture(0).get()));
+            klattraMix(item, reinterpret_cast<uintptr_t>(drawable.getTexture(1).get()));
+            sum += item;
+            product *= item | 1u;
+            ++count;
+        });
+        klattraMix(seed, sum);
+        klattraMix(seed, product);
+        klattraMix(seed, count);
+    }
+    return seed;
+}
+
+bool RenderTarget::drapeVerticesModifiedSince(const std::chrono::duration<double> time) const {
+    bool modified = false;
+    for (const auto& [layerIndex, layerGroup] : layerGroupsByLayerIndex) {
+        (void)layerIndex;
+        if (!layerGroup || modified) continue;
+        visitLayerGroupDrawables(*layerGroup, [&](gfx::Drawable& drawable) {
+            if (!modified && drawable.getVertexAttributes() && drawable.getVertexAttributes()->isModifiedAfter(time)) {
+                modified = true;
+            }
+        });
+    }
+    return modified;
+}
 
 bool RenderTarget::needsDrapeRenderAttempt(const uint64_t minimumCompletedRenders) const noexcept {
     return raster_drape::unbakedTargetNeedsAutomaticFrame(
@@ -715,6 +793,28 @@ void RenderTarget::render(RenderOrchestrator& orchestrator, const RenderTree& re
         drapeClearColor = Color{1.0f, 1.0f, 0.0f, 1.0f};
     }
 
+    // Re-bake a published drape canvas only when its inputs changed. Baking
+    // all ~100 terrain canvases every frame queued ~0.6 s of GPU work per
+    // interactive frame on the Android emulator, and a tap's synchronous
+    // feature query waited behind it into an ANR. The fingerprint covers the
+    // attachment, clear colour, camera zoom, layer groups, tweaker
+    // properties and drawables; vertex edits are checked by time.
+    std::optional<uint64_t> drapeFingerprint;
+    const auto bakeStartTime = util::MonotonicTimer::now();
+    if (pendingDrapeGeneration && klattraDrapeBakeSkipEnabled()) {
+        drapeFingerprint = drapeContentFingerprint(drapeClearColor, parameters.state.getZoom());
+        if (completedRenderCount > 0 && *drapeFingerprint == lastDrapeBakeFingerprint &&
+            skippedDrapeBakes < klattraDrapeForcedRebakeFrames() && !drapeVerticesModifiedSince(lastDrapeBakeTime)) {
+            ++skippedDrapeBakes;
+            lastDrapeRenderDiagnostic.reason = DrapeRenderDiagnosticReason::Published;
+            publishedDrapeGeneration = pendingDrapeGeneration;
+            publishedRequiresRasterDrape = requiresRasterDrape;
+            publishedHasRasterFloor = pendingDrapeTileID &&
+                                      hasRasterFloorForTile(*pendingDrapeTileID, requiredRasterDrapeLayerIndex);
+            return;
+        }
+    }
+
     // .46-diag: the first bakes are where flicker windows live — log the
     // ACTUAL clear colour + group population for every target's first few
     // bakes. A paper-beige clear during a satellite flight is the stale
@@ -793,6 +893,11 @@ void RenderTarget::render(RenderOrchestrator& orchestrator, const RenderTree& re
     parameters.encoder->present(*offscreenTexture);
     const bool firstDrapePublication = pendingDrapeGeneration > 0 && completedRenderCount == 0;
     completedRenderCount++;
+    if (drapeFingerprint) {
+        lastDrapeBakeFingerprint = *drapeFingerprint;
+        lastDrapeBakeTime = bakeStartTime;
+        skippedDrapeBakes = 0;
+    }
     lastDrapeRenderDiagnostic.reason = DrapeRenderDiagnosticReason::Published;
     if (pendingDrapeGeneration) {
         publishedDrapeGeneration = pendingDrapeGeneration;

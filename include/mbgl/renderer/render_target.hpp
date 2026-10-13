@@ -7,6 +7,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <chrono>
 #include <map>
 #include <memory>
 #include <optional>
@@ -199,6 +200,9 @@ public:
     Color getClearColor() const { return clearColor; }
 
 protected:
+    uint64_t drapeContentFingerprint(const Color& canvasClearColor, double cameraZoom) const;
+    bool drapeVerticesModifiedSince(std::chrono::duration<double> time) const;
+
     gfx::Context& context;
     std::unique_ptr<gfx::OffscreenTexture> offscreenTexture;
     using LayerGroupMap = std::map<int32_t, LayerGroupBasePtr>;
@@ -214,6 +218,10 @@ protected:
     bool publishedHasRasterFloor = false;
     uint64_t pendingDrapeGeneration = 0;
     bool drapeAuthorityExpected = false;
+    // Drape bakes are skipped while the canvas inputs are unchanged.
+    uint64_t lastDrapeBakeFingerprint = 0;
+    std::chrono::duration<double> lastDrapeBakeTime{0};
+    uint32_t skippedDrapeBakes = 0;
     uint64_t publishedDrapeGeneration = 0;
     bool firstDrapePublicationNeedsConsumerFrame = false;
     std::optional<OverscaledTileID> pendingDrapeTileID;

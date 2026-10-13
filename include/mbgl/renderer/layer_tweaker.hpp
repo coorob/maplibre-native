@@ -47,6 +47,9 @@ public:
 
     void updateProperties(Immutable<style::LayerProperties>);
 
+    /// Changes whenever the evaluated properties this tweaker applies change.
+    const style::LayerProperties* getEvaluatedPropertiesIdentity() const noexcept { return evaluatedProperties.get(); }
+
     /// Calculate matrices for this tile.
     /// @param nearClipped If true, the near plane is moved further to enhance depth buffer precision.
     /// @param inViewportPixelUnits If false, the translation is scaled based on the current zoom.

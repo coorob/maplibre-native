@@ -99,6 +99,7 @@ public:
     /// Attach a tweaker to be run on this layer group for each frame.
     /// Tweaker lifetime is controlled by the render layer and drawables, the layer group retains a weak reference.
     void addLayerTweaker(const LayerTweakerPtr& tweaker) { layerTweakers.emplace_back(tweaker); }
+    const std::vector<LayerTweakerWeakPtr>& getLayerTweakers() const noexcept { return layerTweakers; }
 
     void runTweakers(const RenderTree&, PaintParameters&);
 
