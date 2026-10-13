@@ -44,6 +44,10 @@ public:
 
     void setVertexAttrId(const size_t id);
 
+    // KLATTRA diagnostics: vertex and segment counts (4/1 = full tile quad, more = masked).
+    std::size_t diagVertexCount() const;
+    std::size_t diagSegmentCount() const;
+
     void upload(gfx::UploadPass&);
 
     void updateVertexAttributes(gfx::VertexAttributeArrayPtr,

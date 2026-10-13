@@ -141,6 +141,14 @@ struct IndexBufferGL : public gfx::IndexBufferBase {
     std::unique_ptr<mbgl::gfx::IndexBuffer> buffer;
 };
 
+std::size_t DrawableGL::diagVertexCount() const {
+    return impl->vertexCount;
+}
+
+std::size_t DrawableGL::diagSegmentCount() const {
+    return impl->segments.size();
+}
+
 void DrawableGL::upload(gfx::UploadPass& uploadPass) {
     if (isCustom) {
         return;

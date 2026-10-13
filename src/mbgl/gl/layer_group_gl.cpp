@@ -10,6 +10,9 @@
 #include <mbgl/shaders/gl/shader_program_gl.hpp>
 #include <mbgl/util/convert.hpp>
 #include <mbgl/util/instrumentation.hpp>
+#include <mbgl/util/logging.hpp>
+
+#include <unordered_map>
 
 namespace mbgl {
 namespace gl {
@@ -46,6 +49,35 @@ void TileLayerGroupGL::upload(gfx::UploadPass& uploadPass) {
         drawableGL.upload(uploadPass);
     });
 }
+
+namespace {
+// KLATTRA GLRELIEF (diagnostic build): which relief tiles each relief layer group
+// actually paints, with vertex counts (4 = full quad, more = masked). Logged when a
+// group's painted set changes. Overlap = drawn pairs where one tile contains another.
+void klattraGlRelief(const void* group, const std::string& name, int pass,
+                     const std::vector<std::pair<OverscaledTileID, std::size_t>>& drawn) {
+    if (name.find("Relief") == std::string::npos && name.find("illshade") == std::string::npos) return;
+    std::string sig;
+    std::size_t overlaps = 0;
+    for (std::size_t i = 0; i < drawn.size(); ++i) {
+        const auto& a = drawn[i].first.canonical;
+        sig += std::to_string(a.z) + ":" + std::to_string(a.x) + "," + std::to_string(a.y) + "/v" +
+               std::to_string(drawn[i].second) + " ";
+        for (std::size_t j = 0; j < drawn.size(); ++j) {
+            const auto& b = drawn[j].first.canonical;
+            if (i != j && a.z < b.z && b.isChildOf(a)) ++overlaps;
+        }
+    }
+    static std::unordered_map<const void*, std::string> last;
+    auto& prev = last[group];
+    if (prev == sig) return;
+    prev = sig;
+    Log::Warning(Event::Render,
+                 "[KLATTRA GLRELIEF] grp=" + std::to_string(reinterpret_cast<uintptr_t>(group)) + " name=" + name +
+                     " pass=" + std::to_string(pass) + " n=" + std::to_string(drawn.size()) +
+                     " overlaps=" + std::to_string(overlaps) + " tiles=" + sig);
+}
+} // namespace
 
 void TileLayerGroupGL::render(RenderOrchestrator&, PaintParameters& parameters) {
     if (!enabled) {
@@ -99,10 +131,14 @@ void TileLayerGroupGL::render(RenderOrchestrator&, PaintParameters& parameters) 
     const auto debugGroupRender = parameters.encoder->createDebugGroup(label_render.c_str());
 #endif
 
+    std::vector<std::pair<OverscaledTileID, std::size_t>> klattraDrawn;
     bool bindUBOs = false;
     visitDrawables([&](gfx::Drawable& drawable) {
         if (!drawable.getEnabled() || !drawable.hasRenderPass(parameters.pass)) {
             return;
+        }
+        if (const auto& tileID = drawable.getTileID()) {
+            klattraDrawn.emplace_back(*tileID, static_cast<gl::DrawableGL&>(drawable).diagVertexCount());
         }
 
 #if !defined(NDEBUG)
@@ -137,6 +173,7 @@ void TileLayerGroupGL::render(RenderOrchestrator&, PaintParameters& parameters) 
     if (bindUBOs) {
         uniformBuffers.unbind();
     }
+    klattraGlRelief(this, getName(), static_cast<int>(parameters.pass), klattraDrawn);
 }
 
 LayerGroupGL::LayerGroupGL(int32_t layerIndex_, std::size_t initialCapacity, std::string name_)

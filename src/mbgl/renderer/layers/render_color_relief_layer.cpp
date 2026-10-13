@@ -1,4 +1,6 @@
 #include <mbgl/renderer/layers/render_color_relief_layer.hpp>
+
+#include <unordered_map>
 #include <mbgl/renderer/layers/color_relief_layer_tweaker.hpp>
 #include <mbgl/renderer/buckets/hillshade_bucket.hpp>
 #include <mbgl/renderer/render_tile.hpp>
@@ -57,7 +59,9 @@ RenderColorReliefLayer::RenderColorReliefLayer(Immutable<ColorReliefLayer::Impl>
     Log::Warning(Event::Render, "[KLATTRA RELIEFLIFE] ctor id=" + baseImpl->id);
 }
 
-RenderColorReliefLayer::~RenderColorReliefLayer() = default;
+RenderColorReliefLayer::~RenderColorReliefLayer() {
+    Log::Warning(Event::Render, "[KLATTRA RELIEFLIFE] dtor id=" + baseImpl->id);
+}
 
 void RenderColorReliefLayer::transition(const TransitionParameters& parameters) {
     unevaluated = impl_cast(baseImpl).paint.transitioned(parameters, std::move(unevaluated));
@@ -279,6 +283,38 @@ void RenderColorReliefLayer::update(gfx::ShaderRegistry& shaders,
         return;
     }
 
+    // KLATTRA RELIEFMASK (diagnostic build): each relief tile's mask as the layer
+    // builds its drawables ("full" = whole tile). Logged when the set changes.
+    {
+        std::string sig;
+        for (const RenderTile& tile : *renderTiles) {
+            const auto& id = tile.getOverscaledTileID().canonical;
+            sig += std::to_string(id.z) + ":" + std::to_string(id.x) + "," + std::to_string(id.y);
+            auto* b = tile.getBucket(*baseImpl);
+            if (!b || !b->hasData()) {
+                sig += "[nodata] ";
+                continue;
+            }
+            const auto& mask = static_cast<HillshadeBucket&>(*b).mask;
+            if (mask == TileMask{{0, 0, 0}}) {
+                sig += "[full] ";
+            } else {
+                sig += "[";
+                for (const auto& m : mask) {
+                    sig += std::to_string(m.z) + "/" + std::to_string(m.x) + "/" + std::to_string(m.y) + ";";
+                }
+                sig += "] ";
+            }
+        }
+        static std::unordered_map<const void*, std::string> lastMaskSig;
+        auto& prevSig = lastMaskSig[this];
+        if (prevSig != sig) {
+            prevSig = sig;
+            Log::Warning(Event::Render, "[KLATTRA RELIEFMASK] id=" + getID() + " n=" +
+                                            std::to_string(renderTiles->size()) + " tiles=" + sig);
+        }
+    }
+
     std::unique_ptr<gfx::DrawableBuilder> builder;
 
     for (const RenderTile& tile : *renderTiles) {
@@ -297,6 +333,18 @@ void RenderColorReliefLayer::update(gfx::ShaderRegistry& shaders,
             removeTile(renderPass, tileID);
         }
         setRenderTileBucketID(tileID, bucket.getID());
+
+        // A tile every child covers gets an empty mask: HillshadeBucket::setMask then
+        // leaves one empty segment and no vertices, which means "draw nothing". The
+        // vertex check below took that for "no mask" and drew the full-tile quad, so a
+        // fully covered parent (cover-hold keeps them after a camera flight, and an idle
+        // map never ages them out) tinted its whole area again over its children: a
+        // darker, blurrier block ending at the parent's tile edge (Traska Android QA
+        // 2026-10-13, 6:33,22 over 7:66-67,44-45, seam at 11.25 E).
+        if (bucket.mask.empty()) {
+            removeTile(renderPass, tileID);
+            continue;
+        }
 
         // Set up tile drawable
         std::shared_ptr<ColorReliefVertexVector> vertices;
