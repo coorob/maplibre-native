@@ -24,6 +24,7 @@
 
 #ifdef MLN_RENDER_BACKEND_OPENGL
 #include <mbgl/shaders/gl/legacy/clipping_mask_program.hpp>
+#include <mbgl/shaders/gl/terrain.hpp>
 #endif
 
 using namespace mbgl;
@@ -210,6 +211,13 @@ TEST(ShaderRegistry, NamedReplace) {
 }
 
 #ifdef MLN_RENDER_BACKEND_OPENGL
+TEST(ShaderRegistry, TerrainGLSLAvoidsReservedSampleIdentifier) {
+    const std::string_view fragment =
+        shaders::ShaderSource<shaders::BuiltIn::TerrainShader, gfx::Backend::Type::OpenGL>::fragment;
+    EXPECT_EQ(fragment.find("terrainReliefSampleOrCenter(float sample"), std::string_view::npos);
+    EXPECT_NE(fragment.find("terrainReliefSampleOrCenter(float elevationSample"), std::string_view::npos);
+}
+
 // Test replacing an actual program instance with a similar instance
 TEST(ShaderRegistry, DISABLED_GLSLReplacement_NoOp) {
     MapInstance::ShaderAndStyleObserver observer;

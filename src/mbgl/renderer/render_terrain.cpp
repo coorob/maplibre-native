@@ -36,7 +36,9 @@
 #include <mbgl/util/image.hpp>
 #include <mbgl/util/mat4.hpp>
 
+#if defined(__APPLE__)
 #include <mach/mach.h>
+#endif
 
 #include <algorithm>
 #include <array>
@@ -132,11 +134,13 @@ bool klattraFlyDiagBudget() {
 // .53 stage-diag: jetsam watches phys_footprint, so report that (fallback
 // to resident size). Render-thread only, called at 1 Hz.
 double klattraPhysFootprintMB() {
+#if defined(__APPLE__)
     task_vm_info_data_t info;
     mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
     if (task_info(mach_task_self(), TASK_VM_INFO, reinterpret_cast<task_info_t>(&info), &count) == KERN_SUCCESS) {
         return static_cast<double>(info.phys_footprint) / (1024.0 * 1024.0);
     }
+#endif
     return -1.0;
 }
 
@@ -472,7 +476,7 @@ RenderTerrain::RenderTerrain(Immutable<style::Terrain::Impl> impl_)
 
 RenderTerrain::~RenderTerrain() = default;
 
-void RenderTerrain::update(const UpdateParameters& parameters) {
+void RenderTerrain::update(const UpdateParameters& /*parameters*/) {
     // Find the DEM source if we haven't already
     if (!demSource && !impl->sourceID.empty()) {
         // In a full implementation, we would look up the source from parameters.sources

@@ -50,6 +50,8 @@ size_t Texture2DDesc::channelStorageSize() const {
             return 2;
         case gfx::TextureChannelDataType::UnsignedByte:
             return 1;
+        case gfx::TextureChannelDataType::UnsignedShort565:
+            return 2;
         default:
             assert(!"Unknown texture channel data type");
             return 0;
@@ -57,6 +59,9 @@ size_t Texture2DDesc::channelStorageSize() const {
 }
 
 size_t Texture2DDesc::getStorageSize() const {
+    if (channelType == gfx::TextureChannelDataType::UnsignedShort565) {
+        return size.width * size.height * 2;
+    }
     return size.width * size.height * channelCount() * channelStorageSize();
 }
 
@@ -145,13 +150,16 @@ TextureID Texture2DPool::allocateGLMemory(const Texture2DDesc& desc) {
     // Bind to TU 0 and upload
     context->activeTextureUnit = 0;
     context->texture[0] = id;
+    const auto uploadFormat = desc.channelType == gfx::TextureChannelDataType::UnsignedShort565
+                                  ? GL_RGB
+                                  : Enum<gfx::TexturePixelType>::to(desc.pixelFormat);
     MBGL_CHECK_ERROR(glTexImage2D(GL_TEXTURE_2D,
                                   0,
                                   Enum<gfx::TexturePixelType>::sizedFor(desc.pixelFormat, desc.channelType),
                                   desc.size.width,
                                   desc.size.height,
                                   0,
-                                  Enum<gfx::TexturePixelType>::to(desc.pixelFormat),
+                                  uploadFormat,
                                   Enum<gfx::TextureChannelDataType>::to(desc.channelType),
                                   nullptr));
     if (glGetError()) {

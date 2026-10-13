@@ -116,7 +116,7 @@ enum class TextureChannelDataType : uint8_t {
     Float,            ///< 32 bit float
     UnsignedShort565, ///< 16 bit packed RGB (5-6-5, no alpha) — Klättra
                       ///< terrain drape mid/far tiers; renderable+filterable
-                      ///< on Apple-family GPUs, maps to RGBA8 on simulator
+                      ///< as B5G6R5Unorm on Metal and RGB565 on OpenGL ES
 };
 
 /// Texture mip map type
