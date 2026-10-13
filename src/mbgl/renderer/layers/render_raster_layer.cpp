@@ -27,6 +27,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <iterator>
+#include <unordered_map>
 #include <unordered_set>
 
 namespace mbgl {
@@ -97,6 +98,17 @@ constexpr bool klattraDrapeUsesLocalVertexBuffers() {
 bool klattraDrapeGapfillEnabled() {
     static const bool enabled = std::getenv("KLATTRA_DISABLE_DRAPE_GAPFILL") == nullptr;
     return enabled;
+}
+
+// Deepest zoom, relative to a drape target, that a non-authoritative raster
+// mosaic routes. Three levels lets the near z12 DEM targets take the z15
+// aerial tiles loaded around a close camera.
+uint8_t klattraDrapeMosaicMaxDetailDepth() {
+    static const uint8_t depth = [] {
+        const char* v = std::getenv("KLATTRA_DRAPE_MOSAIC_DEPTH");
+        return static_cast<uint8_t>(v && *v ? std::clamp(std::atoi(v), 0, 4) : 3);
+    }();
+    return depth;
 }
 
 bool klattraDrapeHasRasterFloor(TileLayerGroup& group, const OverscaledTileID& drapeID) {
@@ -711,6 +723,12 @@ void RenderRasterLayer::update(gfx::ShaderRegistry& shaders,
                 candidateIDs.push_back(tileID);
             });
             std::vector<OverscaledTileID> publicationReadyTargetIDs;
+            std::unordered_map<OverscaledTileID, RasterBucket*> bucketByID;
+            bucketByID.reserve(candidates.size());
+            for (const auto& [candidateID, bucket] : candidates) {
+                bucketByID.emplace(candidateID, bucket);
+            }
+            const uint8_t mosaicMaxDetailDepth = klattraDrapeMosaicMaxDetailDepth();
 
             const auto bucketForID = [&](const OverscaledTileID& tileID) -> RasterBucket* {
                 for (const auto& [candidateID, bucket] : candidates) {
@@ -785,6 +803,65 @@ void RenderRasterLayer::update(gfx::ShaderRegistry& shaders,
                     });
                     return found && allCurrent;
                 };
+
+                if (!authoritativeTerrainRaster) {
+                    // Only the authoritative terrain raster runs the floor +
+                    // quartet transaction below. Every other raster layer
+                    // (the native aerial blend, country overviews) routes a
+                    // mosaic: requiring an ancestor-or-equal floor left every
+                    // z12 target near the camera dry (the blend loads z13-15
+                    // there), so terrain never published and Android 3D fell
+                    // back to the flat map (traska.100).
+                    const auto mosaic = raster_drape::selectMosaic(drapeID, candidateIDs, mosaicMaxDetailDepth);
+                    std::unordered_set<OverscaledTileID> wanted(mosaic.details.begin(), mosaic.details.end());
+                    if (mosaic.floor) wanted.insert(*mosaic.floor);
+                    std::unordered_map<OverscaledTileID, const gfx::Texture2D*> routed;
+                    if (drapeGroup) {
+                        visitLayerGroupDrawables(*drapeGroup, [&](gfx::Drawable& drawable) {
+                            if (const auto& tileID = drawable.getTileID()) {
+                                routed[*tileID] = drawable.getTexture(idRasterImage0Texture).get();
+                            }
+                        });
+                        stats.drawablesRemoved += drapeGroup->removeDrawablesIf([&](gfx::Drawable& drawable) {
+                            const auto& tileID = drawable.getTileID();
+                            if (!tileID || wanted.contains(*tileID)) return false;
+                            return raster_drape::mosaicSupersedes(mosaic, drapeID, *tileID);
+                        });
+                    }
+                    bool anyRouted = false;
+                    const auto route = [&](const OverscaledTileID& tileID) {
+                        const auto bucket = bucketByID.find(tileID);
+                        if (bucket == bucketByID.end()) return;
+                        const auto existing = routed.find(tileID);
+                        if (existing != routed.end() && bucket->second->texture2d &&
+                            raster_drape::textureIdentityMatches(bucket->second->texture2d.get(), existing->second)) {
+                            return;
+                        }
+                        auto staged = stageDrawables(tileID, *bucket->second);
+                        if (staged.empty() || !ensureGroup()) return;
+                        stats.drawablesRemoved += drapeGroup->removeDrawables(renderPass, tileID).size();
+                        for (auto& drawable : staged) {
+                            drapeGroup->addDrawable(renderPass, tileID, std::move(drawable));
+                            ++stats.drawablesAdded;
+                            ++probeGapFilledNow;
+                            ++probeAdded;
+                        }
+                        activeTerrain->diagNoteRasterRouted(drapeID, tileID.canonical.z);
+                        anyRouted = true;
+                    };
+                    if (mosaic.floor) {
+                        route(*mosaic.floor);
+                    } else {
+                        ++probeFloorNeededNow;
+                    }
+                    for (const auto& detail : mosaic.details) {
+                        route(detail);
+                    }
+                    if (wasEmpty && !anyRouted) {
+                        ++probeGapDryNow;
+                    }
+                    return;
+                }
 
                 bool hasFloor = drapeGroup && klattraDrapeHasRasterFloor(*drapeGroup, drapeID);
                 bool hasCurrentFloor = false;

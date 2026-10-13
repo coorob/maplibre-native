@@ -447,8 +447,11 @@ size_t RenderTarget::numContentLayerGroups() const noexcept {
     return count;
 }
 
-void RenderTarget::beginDrapeSurfaceFrame(const uint64_t generation, const OverscaledTileID& tileID) {
+void RenderTarget::beginDrapeSurfaceFrame(const uint64_t generation,
+                                          const OverscaledTileID& tileID,
+                                          const bool authorityExpected) {
     pendingDrapeGeneration = generation;
+    drapeAuthorityExpected = authorityExpected;
     pendingDrapeTileID = tileID;
     pendingDrapeSourceCoverage.clear();
     pendingDrapeSourceAcknowledgements.clear();
@@ -652,7 +655,13 @@ void RenderTarget::render(RenderOrchestrator& orchestrator, const RenderTree& re
     if (pendingDrapeGeneration) {
         const bool hasAuthoritativeRequirement = raster_drape::hasAuthoritativePublicationRequirement(
             requiresRasterDrape, pendingDrapeSourceCoverage.size());
-        bool coherent = hasAuthoritativeRequirement;
+        // Only Swedish/Norwegian official Topo, Finnish OpenMapTiles and the
+        // Esri terrain raster declare requirements that can prove coherence.
+        // A style with none of them (Germany and its neighbours, the native
+        // aerial blend) could never publish, which left Android terrain flat
+        // (traska.100). Those generations publish immediately, as before
+        // generations existed: a clear reads as ground, a hold as a hole.
+        bool coherent = hasAuthoritativeRequirement || !drapeAuthorityExpected;
         for (const auto& [sourceID, complete] : pendingDrapeSourceCoverage) {
             (void)sourceID;
             coherent = coherent && complete;

@@ -144,6 +144,57 @@ inline Cohort selectCohort(const OverscaledTileID& target, const std::vector<Ove
     return result;
 }
 
+// Raster layers other than the authoritative terrain raster (for example the
+// native aerial blend and its country overviews) have no publication
+// transaction. Their usable tiles are usually 1-3 zooms finer than a z12 DEM
+// target near the camera, so a cohort that demands an ancestor-or-equal floor
+// is dry there. A mosaic routes the deepest ancestor-or-equal floor (when one
+// is loaded) plus every loaded tile inside the target up to maxDetailDepth
+// zooms finer; painter's order by zoom lets sharper tiles cover coarser ones.
+// One tile per canonical ID: overscaled copies add only overdraw.
+struct Mosaic {
+    std::optional<OverscaledTileID> floor;
+    std::vector<OverscaledTileID> details;
+};
+
+inline Mosaic selectMosaic(const OverscaledTileID& target,
+                           const std::vector<OverscaledTileID>& usableTileIDs,
+                           const uint8_t maxDetailDepth) {
+    Mosaic result;
+    std::set<CanonicalTileID> seenDetails;
+    for (const auto& tileID : usableTileIDs) {
+        if (tileCoversTarget(tileID, target)) {
+            if (!result.floor || tileID.canonical.z > result.floor->canonical.z) {
+                result.floor = tileID;
+            }
+        } else if (tileIsStrictChildOf(tileID, target) &&
+                   tileID.canonical.z - target.canonical.z <= maxDetailDepth &&
+                   seenDetails.insert(tileID.canonical).second) {
+            result.details.push_back(tileID);
+        }
+    }
+    return result;
+}
+
+inline bool coversTargetAtAnyResolution(const OverscaledTileID& target, const std::vector<OverscaledTileID>& tileIDs);
+
+// A routed tile that has left the loaded set stays in the canvas until the
+// mosaic paints its whole area again: a replaced floor by the new floor, a
+// detail by a routed detail at the same or coarser zoom, or by a complete set
+// of finer details. Dropping it earlier bakes a blurrier floor (or the canvas
+// clear) into that area until the replacement loads.
+inline bool mosaicSupersedes(const Mosaic& mosaic, const OverscaledTileID& target, const OverscaledTileID& stale) {
+    if (tileCoversTarget(stale, target)) {
+        return mosaic.floor.has_value();
+    }
+    std::vector<OverscaledTileID> finer;
+    for (const auto& detail : mosaic.details) {
+        if (tileCoversTarget(detail, stale)) return true;
+        if (detail.canonical.z > stale.canonical.z) finer.push_back(detail);
+    }
+    return coversTargetAtAnyResolution(stale, finer);
+}
+
 inline bool coversTargetAtAnyResolution(const OverscaledTileID& target, const std::vector<OverscaledTileID>& tileIDs) {
     std::set<CanonicalTileID> covered;
     for (const auto& tileID : tileIDs) {

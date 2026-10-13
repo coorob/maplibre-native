@@ -164,3 +164,67 @@ TEST(RasterDrapeCohort, RequiresARealImageOrRetainedTextureSource) {
     EXPECT_FALSE(raster_drape::bucketHasTextureSource(empty));
     EXPECT_TRUE(raster_drape::bucketHasTextureSource(image));
 }
+
+TEST(RasterDrapeCohort, MosaicRoutesFloorAndFinerTilesWithoutRequiringAFloor) {
+    const auto target = tile(12, 2176, 1432);
+    const auto child = OverscaledTileID(13, 0, target.canonical.children()[1]);
+    const auto grandchild = OverscaledTileID(15, 0, CanonicalTileID(15, 2176 * 8 + 3, 1432 * 8 + 5));
+    const auto tooDeep = OverscaledTileID(16, 0, CanonicalTileID(16, 2176 * 16 + 3, 1432 * 16 + 5));
+    const auto outside = tile(13, 4354, 2864);
+    const auto otherWrap = OverscaledTileID(13, 1, target.canonical.children()[0]);
+
+    // The aerial blend near a close camera: only tiles finer than the target.
+    auto mosaic = raster_drape::selectMosaic(target, {child, grandchild, tooDeep, outside, otherWrap}, 3);
+    EXPECT_FALSE(mosaic.floor);
+    ASSERT_EQ(mosaic.details.size(), 2u);
+    EXPECT_EQ(mosaic.details[0], child);
+    EXPECT_EQ(mosaic.details[1], grandchild);
+
+    // The deepest ancestor-or-equal tile is the floor.
+    mosaic = raster_drape::selectMosaic(target, {tile(10, 544, 358), target, child}, 3);
+    ASSERT_TRUE(mosaic.floor);
+    EXPECT_EQ(*mosaic.floor, target);
+    EXPECT_EQ(mosaic.details.size(), 1u);
+}
+
+TEST(RasterDrapeCohort, MosaicRoutesOneTilePerCanonicalID) {
+    const auto target = tile(12, 2176, 1432);
+    const auto canonical = target.canonical.children()[2];
+    const auto overscaled = OverscaledTileID(15, 0, canonical);
+    const auto exact = OverscaledTileID(13, 0, canonical);
+    const auto mosaic = raster_drape::selectMosaic(target, {overscaled, exact}, 3);
+    ASSERT_EQ(mosaic.details.size(), 1u);
+    EXPECT_EQ(mosaic.details[0].canonical, canonical);
+}
+
+TEST(RasterDrapeCohort, MosaicKeepsStaleTilesUntilTheirAreaIsRepainted) {
+    const auto target = tile(12, 2176, 1432);
+    const auto children = target.canonical.children();
+    const auto staleChild = OverscaledTileID(13, 0, children[0]);
+    const auto oldFloor = tile(11, 1088, 716);
+
+    // Nothing routed repaints the stale child or the old floor.
+    raster_drape::Mosaic empty;
+    EXPECT_FALSE(raster_drape::mosaicSupersedes(empty, target, staleChild));
+    EXPECT_FALSE(raster_drape::mosaicSupersedes(empty, target, oldFloor));
+
+    // A new floor replaces an old floor, but cannot replace detail: dropping
+    // the sharper child would blur its area until finer tiles reload.
+    raster_drape::Mosaic withFloor;
+    withFloor.floor = target;
+    EXPECT_TRUE(raster_drape::mosaicSupersedes(withFloor, target, oldFloor));
+    EXPECT_FALSE(raster_drape::mosaicSupersedes(withFloor, target, staleChild));
+
+    // Three of four grandchildren leave a hole; all four repaint the child.
+    raster_drape::Mosaic finer;
+    const auto grandchildren = children[0].children();
+    for (std::size_t i = 0; i < 3; ++i) finer.details.emplace_back(14, 0, grandchildren[i]);
+    EXPECT_FALSE(raster_drape::mosaicSupersedes(finer, target, staleChild));
+    finer.details.emplace_back(14, 0, grandchildren[3]);
+    EXPECT_TRUE(raster_drape::mosaicSupersedes(finer, target, staleChild));
+
+    // A routed tile at the same or coarser zoom containing it does too.
+    raster_drape::Mosaic same;
+    same.details.push_back(staleChild);
+    EXPECT_TRUE(raster_drape::mosaicSupersedes(same, target, staleChild));
+}

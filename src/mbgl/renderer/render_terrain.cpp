@@ -1,5 +1,6 @@
 #include <mbgl/renderer/terrain_perf_diagnostic.hpp>
 #include <mbgl/renderer/render_terrain.hpp>
+#include <mbgl/style/layer_impl.hpp>
 #include <mbgl/algorithm/update_tile_masks.hpp>
 #include <mbgl/renderer/cover_hold_budget.hpp>
 #include <mbgl/renderer/update_parameters.hpp>
@@ -316,6 +317,29 @@ bool klattraUseSharedTopoDrapeCohort(const RenderTree& renderTree) {
     (void)renderTree;
     return false;
 #endif
+}
+
+// The publication hold needs an authoritative writer that can prove a drape
+// canvas complete: an official or Finnish Topo fill layer, or the Esri
+// terrain raster. Styles without one (Germany and its neighbours, the native
+// aerial blend) publish every drape generation immediately. Read from the
+// full style rather than the render tree: official Topo fills start at z10,
+// and a zoomed-out camera must keep the hold rather than bake background.
+bool klattraStyleHasDrapeAuthority(const UpdateParameters& parameters) {
+#if defined(__ANDROID__) && MLN_RENDER_BACKEND_OPENGL
+    constexpr bool androidOpenGL = true;
+#else
+    constexpr bool androidOpenGL = false;
+#endif
+    for (const auto& layer : *parameters.layers) {
+        if (layer->visibility == style::VisibilityType::None) continue;
+        if (raster_drape::isAuthoritativeTerrainRaster(layer->id, layer->source)) return true;
+        if (std::strcmp(layer->getTypeInfo()->type, "fill") == 0 &&
+            topo_vector::isAuthoritativeFillSourceID(layer->source, androidOpenGL)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 // Terrain cannot draw the full geometry for every entry in the source's raw
@@ -657,7 +681,7 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
                            gfx::ShaderRegistry& shaders,
                            gfx::Context& context,
                            const TransformState& state,
-                           const std::shared_ptr<UpdateParameters>& /*updateParameters*/,
+                           const std::shared_ptr<UpdateParameters>& updateParameters,
                            const RenderTree& renderTree,
                            UniqueChangeRequestVec& changes) {
     // Re-resolve the DEM source every update. The orchestrator owns the
@@ -1515,8 +1539,9 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
     // prove source coverage; an incomplete generation will leave the prior
     // texture pixels untouched instead of clearing them to a partial map.
     ++drapeSurfaceFrame;
+    const bool styleHasDrapeAuthority = updateParameters && klattraStyleHasDrapeAuthority(*updateParameters);
     drapeCache.visitAll([&](const OverscaledTileID& tileID, const TerrainDrapeTargetPtr& target) {
-        if (target) target->beginDrapeSurfaceFrame(drapeSurfaceFrame, tileID);
+        if (target) target->beginDrapeSurfaceFrame(drapeSurfaceFrame, tileID, styleHasDrapeAuthority);
     });
 
     // Drape render targets are separate offscreen targets, so normal

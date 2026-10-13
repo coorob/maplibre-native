@@ -140,7 +140,9 @@ public:
     /// replaces the texture after every reported authoritative source has a
     /// complete tile cover. Until then the previously published pixels remain
     /// untouched.
-    void beginDrapeSurfaceFrame(uint64_t generation, const OverscaledTileID& tileID);
+    /// @param authorityExpected The style has an authoritative drape writer;
+    /// without one a generation publishes immediately.
+    void beginDrapeSurfaceFrame(uint64_t generation, const OverscaledTileID& tileID, bool authorityExpected);
     void declareDrapeSourceRequirement(uint64_t generation, const std::string& sourceKey);
     void noteDrapeSourceCoverage(uint64_t generation, const std::string& sourceID, bool complete);
     bool hasPublishedDrapeSurface() const noexcept { return publishedDrapeGeneration > 0; }
@@ -211,6 +213,7 @@ protected:
     bool publishedRequiresRasterDrape = false;
     bool publishedHasRasterFloor = false;
     uint64_t pendingDrapeGeneration = 0;
+    bool drapeAuthorityExpected = false;
     uint64_t publishedDrapeGeneration = 0;
     bool firstDrapePublicationNeedsConsumerFrame = false;
     std::optional<OverscaledTileID> pendingDrapeTileID;
