@@ -106,8 +106,9 @@ void DrawableGL::draw(PaintParameters& parameters) const {
     // force disable depth test for debugging
     // context.setDepthMode({gfx::DepthFunctionType::Always, gfx::DepthMaskType::ReadOnly, {0,1}});
 
-    // For 3D mode, stenciling is handled by the layer group
-    if (!is3D) {
+    // Layer groups handle stencil-enabled 3D drawables. Other drawables
+    // must set their own mode to avoid inheriting a previous clipping mask.
+    if (!is3D || !getEnableStencil()) {
         context.setStencilMode(makeStencilMode(parameters));
     }
 
