@@ -761,6 +761,18 @@ void RenderHillshadeLayer::update(gfx::ShaderRegistry& shaders,
             continue;
         }
 
+        // A tile every child covers gets an empty mask: HillshadeBucket::setMask then
+        // leaves one empty segment and no vertices, which means "draw nothing". The
+        // vertex check below took that for "no mask" and drew the full-tile quad, so a
+        // fully covered parent (cover-hold keeps them after a camera flight, and an idle
+        // map never ages them out) shaded its whole area again over its children: a
+        // darker, blurrier block ending at the parent's tile edge (Traska Android QA
+        // 2026-10-13, 6:33,22 over 7:66-67,44-45, seam at 11.25 E).
+        if (bucket.mask.empty()) {
+            removeTile(renderPass, tileID);
+            continue;
+        }
+
         const auto updateExisting = [&](gfx::Drawable& drawable) {
             // Only current drawables are updated, ones produced for
             // a previous style retain the attribute values for that style.
