@@ -1,5 +1,7 @@
 #include "map_renderer.hpp"
 
+#include <cstdlib>
+
 #include <mbgl/gfx/backend_scope.hpp>
 #include <mbgl/renderer/renderer.hpp>
 #include <mbgl/util/instrumentation.hpp>
@@ -293,7 +295,9 @@ void MapRenderer::onSurfaceCreated(JNIEnv& env, const jni::Object<AndroidSurface
 #if MLN_RENDER_BACKEND_OPENGL
     // If we're running the emulator with the OpenGL backend, we're going to crash eventually,
     // unless we enable this mitigation.
-    if (inEmulator()) {
+    // KLATTRA_DISABLE_GOLDFISH_MITIGATION=1 (diagnostics only) measures the
+    // emulator without the per-frame drawable rebuild real devices never run.
+    if (inEmulator() && !std::getenv("KLATTRA_DISABLE_GOLDFISH_MITIGATION")) {
         renderer->enableAndroidEmulatorGoldfishMitigation(true);
     }
 #endif

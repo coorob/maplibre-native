@@ -136,7 +136,7 @@ inline void report() noexcept {
             line += std::to_string(data.counts[i]);
             line += ';';
         }
-        Log::Info(Event::General, line);
+        Log::Warning(Event::General, line);
     } catch (...) {
         // A diagnostic allocation/log failure must not interrupt rendering.
     }
