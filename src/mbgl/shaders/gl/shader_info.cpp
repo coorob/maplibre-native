@@ -471,6 +471,7 @@ const std::vector<UniformBlockInfo> SymbolIconShaderInfo::uniformBlocks = {
     UniformBlockInfo{"SymbolDrawableUBO", idSymbolDrawableUBO},
     UniformBlockInfo{"SymbolTilePropsUBO", idSymbolTilePropsUBO},
     UniformBlockInfo{"SymbolEvaluatedPropsUBO", idSymbolEvaluatedPropsUBO},
+    UniformBlockInfo{"SymbolTerrainOcclusionUBO", idSymbolTerrainOcclusionUBO},
 };
 const std::vector<AttributeInfo> SymbolIconShaderInfo::attributes = {
     AttributeInfo{"a_pos_offset", idSymbolPosOffsetVertexAttribute},
@@ -478,10 +479,12 @@ const std::vector<AttributeInfo> SymbolIconShaderInfo::attributes = {
     AttributeInfo{"a_pixeloffset", idSymbolPixelOffsetVertexAttribute},
     AttributeInfo{"a_projected_pos", idSymbolProjectedPosVertexAttribute},
     AttributeInfo{"a_fade_opacity", idSymbolFadeOpacityVertexAttribute},
+    AttributeInfo{"a_terrain_elevation", idSymbolTerrainElevationVertexAttribute},
     AttributeInfo{"a_opacity", idSymbolOpacityVertexAttribute},
 };
 const std::vector<TextureInfo> SymbolIconShaderInfo::textures = {
     TextureInfo{"u_texture", idSymbolImageTexture},
+    TextureInfo{"u_terrain_depth", idSymbolTerrainDepthTexture},
 };
 
 // Symbol SDF
@@ -492,6 +495,7 @@ const std::vector<UniformBlockInfo> SymbolSDFShaderInfo::uniformBlocks = {
     UniformBlockInfo{"SymbolDrawableUBO", idSymbolDrawableUBO},
     UniformBlockInfo{"SymbolTilePropsUBO", idSymbolTilePropsUBO},
     UniformBlockInfo{"SymbolEvaluatedPropsUBO", idSymbolEvaluatedPropsUBO},
+    UniformBlockInfo{"SymbolTerrainOcclusionUBO", idSymbolTerrainOcclusionUBO},
 };
 const std::vector<AttributeInfo> SymbolSDFShaderInfo::attributes = {
     AttributeInfo{"a_pos_offset", idSymbolPosOffsetVertexAttribute},
@@ -499,6 +503,7 @@ const std::vector<AttributeInfo> SymbolSDFShaderInfo::attributes = {
     AttributeInfo{"a_pixeloffset", idSymbolPixelOffsetVertexAttribute},
     AttributeInfo{"a_projected_pos", idSymbolProjectedPosVertexAttribute},
     AttributeInfo{"a_fade_opacity", idSymbolFadeOpacityVertexAttribute},
+    AttributeInfo{"a_terrain_elevation", idSymbolTerrainElevationVertexAttribute},
     AttributeInfo{"a_fill_color", idSymbolColorVertexAttribute},
     AttributeInfo{"a_halo_color", idSymbolHaloColorVertexAttribute},
     AttributeInfo{"a_opacity", idSymbolOpacityVertexAttribute},
@@ -507,6 +512,7 @@ const std::vector<AttributeInfo> SymbolSDFShaderInfo::attributes = {
 };
 const std::vector<TextureInfo> SymbolSDFShaderInfo::textures = {
     TextureInfo{"u_texture", idSymbolImageTexture},
+    TextureInfo{"u_terrain_depth", idSymbolTerrainDepthTexture},
 };
 
 // Terrain
@@ -533,12 +539,14 @@ const std::vector<UniformBlockInfo> SymbolTextAndIconShaderInfo::uniformBlocks =
     UniformBlockInfo{"SymbolDrawableUBO", idSymbolDrawableUBO},
     UniformBlockInfo{"SymbolTilePropsUBO", idSymbolTilePropsUBO},
     UniformBlockInfo{"SymbolEvaluatedPropsUBO", idSymbolEvaluatedPropsUBO},
+    UniformBlockInfo{"SymbolTerrainOcclusionUBO", idSymbolTerrainOcclusionUBO},
 };
 const std::vector<AttributeInfo> SymbolTextAndIconShaderInfo::attributes = {
     AttributeInfo{"a_pos_offset", idSymbolPosOffsetVertexAttribute},
     AttributeInfo{"a_data", idSymbolDataVertexAttribute},
     AttributeInfo{"a_projected_pos", idSymbolProjectedPosVertexAttribute},
     AttributeInfo{"a_fade_opacity", idSymbolFadeOpacityVertexAttribute},
+    AttributeInfo{"a_terrain_elevation", idSymbolTerrainElevationVertexAttribute},
     AttributeInfo{"a_fill_color", idSymbolColorVertexAttribute},
     AttributeInfo{"a_halo_color", idSymbolHaloColorVertexAttribute},
     AttributeInfo{"a_opacity", idSymbolOpacityVertexAttribute},
@@ -548,6 +556,7 @@ const std::vector<AttributeInfo> SymbolTextAndIconShaderInfo::attributes = {
 const std::vector<TextureInfo> SymbolTextAndIconShaderInfo::textures = {
     TextureInfo{"u_texture", idSymbolImageTexture},
     TextureInfo{"u_texture_icon", idSymbolImageIconTexture},
+    TextureInfo{"u_terrain_depth", idSymbolTerrainDepthTexture},
 };
 
 } // namespace shaders

@@ -298,6 +298,18 @@ void updateTileAttributes(const SymbolBucket::Buffer& buffer,
                                sizeof(Vertex),
                                gfx::AttributeDataType::Float3);
     }
+#if MLN_RENDER_BACKEND_OPENGL
+    if (const auto& attr = attribs.set(idSymbolTerrainElevationVertexAttribute)) {
+        if (buffer.sharedTerrainVertices) {
+            using Vertex = gfx::Vertex<SymbolTerrainAttributes>;
+            attr->setSharedRawData(buffer.sharedTerrainVertices, offsetof(Vertex, a1), 0,
+                                   sizeof(Vertex), gfx::AttributeDataType::Float);
+        } else {
+            attr->resetSharedRawData();
+            attr->set(0, 0.0f);
+        }
+    }
+#endif
     if (const auto& attr = attribs.set(idSymbolFadeOpacityVertexAttribute)) {
         using Vertex = gfx::Vertex<SymbolOpacityAttributes>;
         attr->setSharedRawData(buffer.sharedOpacityVertices,
@@ -626,6 +638,9 @@ void RenderSymbolLayer::update(gfx::ShaderRegistry& shaders,
             propertiesAsUniforms.first.clear();
             propertiesAsUniforms.second.clear();
 
+            // Bucket identity was checked above and the style tweaker still
+            // matches. Release the previous RenderTiles cohort on reuse.
+            drawable.setRenderTile(renderTilesOwner, &tile);
             updateTileDrawable(drawable, bucket, bucketPaintProperties, evaluated);
             return true;
         };

@@ -134,6 +134,7 @@ list(APPEND INCLUDE_FILES
         ${PROJECT_SOURCE_DIR}/include/mbgl/gl/drawable_gl_builder.hpp
         ${PROJECT_SOURCE_DIR}/include/mbgl/gl/dynamic_texture.hpp
         ${PROJECT_SOURCE_DIR}/include/mbgl/gl/layer_group_gl.hpp
+        ${PROJECT_SOURCE_DIR}/include/mbgl/gl/terrain_symbol_depth.hpp
         ${PROJECT_SOURCE_DIR}/include/mbgl/gl/texture2d.hpp
         ${PROJECT_SOURCE_DIR}/include/mbgl/gl/uniform_buffer_gl.hpp
         ${PROJECT_SOURCE_DIR}/include/mbgl/gl/vertex_attribute_gl.hpp
@@ -147,6 +148,7 @@ list(APPEND SRC_FILES
         ${PROJECT_SOURCE_DIR}/src/mbgl/gl/drawable_gl_impl.hpp
         ${PROJECT_SOURCE_DIR}/src/mbgl/gl/dynamic_texture.cpp
         ${PROJECT_SOURCE_DIR}/src/mbgl/gl/layer_group_gl.cpp
+        ${PROJECT_SOURCE_DIR}/src/mbgl/gl/terrain_symbol_depth.cpp
         ${PROJECT_SOURCE_DIR}/src/mbgl/gl/texture2d.cpp
         ${PROJECT_SOURCE_DIR}/src/mbgl/gl/uniform_buffer_gl.cpp
         ${PROJECT_SOURCE_DIR}/src/mbgl/gl/vertex_attribute_gl.cpp

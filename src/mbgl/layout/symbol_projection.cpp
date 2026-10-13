@@ -494,7 +494,8 @@ void reprojectLineLabels(gfx::VertexVector<gfx::Vertex<SymbolDynamicLayoutAttrib
                          bool keepUpright,
                          const RenderTile& tile,
                          const SymbolSizeBinder& sizeBinder,
-                         const TransformState& state) {
+                         const TransformState& state,
+                         const SymbolElevationFunction& elevation) {
     const ZoomEvaluatedSize partiallyEvaluatedSize = sizeBinder.evaluateForZoom(static_cast<float>(state.getZoom()));
 
     const std::array<double, 2> clippingBuffer = {
@@ -502,9 +503,8 @@ void reprojectLineLabels(gfx::VertexVector<gfx::Vertex<SymbolDynamicLayoutAttrib
 
     const float pixelsToTileUnits = tile.id.pixelsToTileUnits(1.0f, static_cast<float>(state.getZoom()));
 
-    const mat4 labelPlaneMatrix = getLabelPlaneMatrix(posMatrix, pitchWithMap, rotateWithMap, state, pixelsToTileUnits);
-
-    const mat4 glCoordMatrix = getGlCoordMatrix(posMatrix, pitchWithMap, rotateWithMap, state, pixelsToTileUnits);
+    const mat4 defaultLabelPlaneMatrix = getLabelPlaneMatrix(posMatrix, pitchWithMap, rotateWithMap, state, pixelsToTileUnits);
+    const mat4 defaultGlCoordMatrix = getGlCoordMatrix(posMatrix, pitchWithMap, rotateWithMap, state, pixelsToTileUnits);
 
     dynamicVertexArray.clear();
 
@@ -523,8 +523,16 @@ void reprojectLineLabels(gfx::VertexVector<gfx::Vertex<SymbolDynamicLayoutAttrib
         // immediately after its horizontal counterpart
         useVertical = false;
 
+        const mat4 symbolMatrix = elevation ? terrainSymbolMatrix(posMatrix, elevation(placedSymbol.anchorPoint))
+                                            : posMatrix;
+        const mat4 labelPlaneMatrix = elevation
+            ? getLabelPlaneMatrix(symbolMatrix, pitchWithMap, rotateWithMap, state, pixelsToTileUnits)
+            : defaultLabelPlaneMatrix;
+        const mat4 glCoordMatrix = elevation
+            ? getGlCoordMatrix(symbolMatrix, pitchWithMap, rotateWithMap, state, pixelsToTileUnits)
+            : defaultGlCoordMatrix;
         vec4 anchorPos = {{placedSymbol.anchorPoint.x, placedSymbol.anchorPoint.y, 0, 1}};
-        matrix::transformMat4(anchorPos, anchorPos, posMatrix);
+        matrix::transformMat4(anchorPos, anchorPos, symbolMatrix);
 
         // Don't bother calculating the correct point for invisible labels.
         if (!isVisible(anchorPos, clippingBuffer)) {
@@ -544,7 +552,7 @@ void reprojectLineLabels(gfx::VertexVector<gfx::Vertex<SymbolDynamicLayoutAttrib
                                                               pitchScaledFontSize,
                                                               false /*unflipped*/,
                                                               keepUpright,
-                                                              posMatrix,
+                                                              symbolMatrix,
                                                               labelPlaneMatrix,
                                                               glCoordMatrix,
                                                               dynamicVertexArray,
@@ -559,7 +567,7 @@ void reprojectLineLabels(gfx::VertexVector<gfx::Vertex<SymbolDynamicLayoutAttrib
                                   pitchScaledFontSize,
                                   true /*flipped*/,
                                   keepUpright,
-                                  posMatrix,
+                                  symbolMatrix,
                                   labelPlaneMatrix,
                                   glCoordMatrix,
                                   dynamicVertexArray,

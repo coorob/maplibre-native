@@ -52,7 +52,14 @@ bool klattraLogDrapeStale() {
 }
 
 bool klattraDisableHillshadeDrape() {
+#if MLN_RENDER_BACKEND_OPENGL
+    // The final terrain pass already applies relief shading. Baking the
+    // hillshade layer into the Android/OpenGL drape shades Topo a second time.
+    // Keep an opt-in escape hatch while this backend-specific fix is verified.
+    static const bool disabled = std::getenv("KLATTRA_ENABLE_HILLSHADE_DRAPE") == nullptr;
+#else
     static const bool disabled = std::getenv("KLATTRA_DISABLE_HILLSHADE_DRAPE") != nullptr;
+#endif
     return disabled;
 }
 
@@ -330,6 +337,7 @@ void RenderHillshadeLayer::update(gfx::ShaderRegistry& shaders,
                     std::size_t removedNoOverlap = 0;
                     const auto removed = drapeGroup->removeDrawablesIf(
                         [&](gfx::Drawable& drawable) {
+                            if (klattraDisableHillshadeDrape()) return true;
                             const auto& dID = drawable.getTileID();
                             if (!dID) return false;
                             if (!hasRenderTile(*dID)) {
@@ -437,7 +445,7 @@ void RenderHillshadeLayer::update(gfx::ShaderRegistry& shaders,
     // would require a disjoint stencil cover to preserve the one-writer-per-
     // pixel invariant.
     std::unordered_map<OverscaledTileID, OverscaledTileID> selectedHillshadeTiles;
-    if (activeTerrain && klattraSingleHillshadeDrapeWriter()) {
+    if (activeTerrain && !klattraDisableHillshadeDrape() && klattraSingleHillshadeDrapeWriter()) {
         activeTerrain->visitDrapeTargets(
             [&](const OverscaledTileID& drapeID, TerrainDrapeTargetPtr& drapeTarget) {
                 if (!drapeTarget) return;
@@ -472,6 +480,32 @@ void RenderHillshadeLayer::update(gfx::ShaderRegistry& shaders,
         }
 
         auto& bucket = static_cast<HillshadeBucket&>(*bucket_);
+
+#if defined(__ANDROID__) && MLN_RENDER_BACKEND_OPENGL
+        if (activeTerrain && klattraDisableHillshadeDrape() && activeTerrain->hasElevationCoverage(tileID)) {
+            // Neither pass consumes prepared hillshade here: terrain supplies
+            // its own relief shading and suppresses flat hillshade. Coverage
+            // may have arrived after preparation, so retire existing output
+            // as well as avoiding new allocation. Keep the shared raw DEM for
+            // terrain displacement and CPU elevation queries.
+            removeTile(renderPass, tileID);
+            carriedBakeTextures.erase(tileID);
+            if (bucket.renderTarget) {
+                const auto target = bucket.renderTarget;
+                activatedRenderTargets.erase(
+                    std::remove_if(activatedRenderTargets.begin(), activatedRenderTargets.end(),
+                                   [&](const RenderTargetPtr& activated) {
+                                       if (activated != target) return false;
+                                       activateRenderTarget(activated, false, changes);
+                                       return true;
+                                   }),
+                    activatedRenderTargets.end());
+                bucket.renderTarget.reset();
+            }
+            bucket.renderTargetPrepared = false;
+            continue;
+        }
+#endif
 
         const auto prevBucketID = getRenderTileBucketID(tileID);
         if (prevBucketID != util::SimpleIdentity::Empty && prevBucketID != bucket.getID()) {

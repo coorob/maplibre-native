@@ -29,9 +29,19 @@ struct alignas(16) SymbolDrawableUBO {
     /* 248 */ float opacity_t;
     /* 252 */ float halo_width_t;
     /* 256 */ float halo_blur_t;
-    /* 260 */
+    /* 260 */ /*bool*/ int terrain;
 };
 static_assert(sizeof(SymbolDrawableUBO) == 17 * 16);
+
+// Updated at draw time, after the current frame's terrain depth is captured.
+// Keep this separate from consolidated drawable UBOs prepared before terrain.
+struct alignas(16) SymbolTerrainOcclusionUBO {
+    /*  0 */ /*bool*/ int enabled = 0;
+    /*  4 */ float depthEpsilon = 0.0f;
+    /*  8 */ float pad1 = 0.0f;
+    /* 12 */ float pad2 = 0.0f;
+};
+static_assert(sizeof(SymbolTerrainOcclusionUBO) == 16);
 
 struct alignas(16) SymbolTilePropsUBO {
     /*  0 */ /*bool*/ int is_text;

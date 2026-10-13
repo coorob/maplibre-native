@@ -58,7 +58,8 @@ public:
     UniqueProgram createProgram(ShaderID vertexShader, ShaderID fragmentShader, const char* location0AttribName);
     void verifyProgramLinkage(ProgramID);
     void linkProgram(ProgramID);
-    UniqueTexture createUniqueTexture(const Size& size, gfx::TexturePixelType format, gfx::TextureChannelDataType type);
+    UniqueTexture createUniqueTexture(const Size& size, gfx::TexturePixelType format, gfx::TextureChannelDataType type,
+                                      DepthTextureFormat depthFormat = DepthTextureFormat::None);
 
     Framebuffer createFramebuffer(const gfx::Renderbuffer<gfx::RenderbufferPixelType::RGBA>&,
                                   const gfx::Renderbuffer<gfx::RenderbufferPixelType::DepthStencil>&);
@@ -225,6 +226,7 @@ public:
     VertexArray createVertexArray();
 
 private:
+    friend class TerrainSymbolDepthSnapshot;
     friend detail::ProgramDeleter;
     friend detail::ShaderDeleter;
     friend detail::BufferDeleter;

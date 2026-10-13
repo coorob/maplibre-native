@@ -1,4 +1,9 @@
+#include <mbgl/renderer/terrain_perf_diagnostic.hpp>
 #include <mbgl/renderer/renderer_impl.hpp>
+#if defined(__ANDROID__) && MLN_RENDER_BACKEND_OPENGL
+#include <mbgl/gl/context.hpp>
+#include <mbgl/gl/terrain_symbol_depth.hpp>
+#endif
 
 #include <mbgl/geometry/line_atlas.hpp>
 #include <mbgl/gfx/backend_scope.hpp>
@@ -57,6 +62,43 @@ RendererObserver& nullObserver() {
     static RendererObserver observer;
     return observer;
 }
+
+#if defined(__ANDROID__)
+void klattraLogGPUMemory(const gfx::RenderingStats& stats,
+                        const bool terrainPresent,
+                        const bool terrainEnabled,
+                        const uint64_t frame) {
+    static const bool enabled = [] {
+        const char* value = std::getenv("KLATTRA_STAGEDIAG");
+        return value && value[0] == '1' && value[1] == '\0';
+    }();
+    if (!enabled) return;
+
+    // Sample only completed CPU frame submissions, at most once per second
+    // on this renderer thread. These SDK allocation counters are not PSS or
+    // complete driver/GPU accounting, and buffer categories may overlap.
+    static thread_local double lastSampleSeconds = -1.0;
+    const double nowSeconds = util::MonotonicTimer::now().count();
+    if (lastSampleSeconds >= 0.0 && nowSeconds - lastSampleSeconds < 1.0) return;
+    lastSampleSeconds = nowSeconds;
+
+    Log::Warning(Event::Render,
+                 "[KLATTRA GPU_MEMORY] frame=" + util::toString(frame) +
+                     " terrain=" + util::toString(terrainPresent ? 1 : 0) +
+                     " terrainEnabled=" + util::toString(terrainEnabled ? 1 : 0) +
+                     " textureBytes=" + util::toString(stats.memTextures) +
+                     " bufferBytes=" + util::toString(stats.memBuffers) +
+                     " vertexBytes=" + util::toString(stats.memVertexBuffers) +
+                     " indexBytes=" + util::toString(stats.memIndexBuffers) +
+                     " uniformBytes=" + util::toString(stats.memUniformBuffers) +
+                     " textures=" + util::toString(stats.numActiveTextures) +
+                     " framebuffers=" + util::toString(stats.numFrameBuffers) +
+                     " buffers=" + util::toString(stats.numBuffers) +
+                     " vertexBuffers=" + util::toString(stats.numVertexBuffers) +
+                     " indexBuffers=" + util::toString(stats.numIndexBuffers) +
+                     " uniformBuffers=" + util::toString(stats.numUniformBuffers));
+}
+#endif
 
 bool klattraDisablePrebakeGate() {
     static const bool disabled = std::getenv("KLATTRA_DISABLE_PREBAKE_GATE") != nullptr;
@@ -142,6 +184,7 @@ void Renderer::Impl::setObserver(RendererObserver* observer_) {
 }
 
 void Renderer::Impl::render(const RenderTree& renderTree, const std::shared_ptr<UpdateParameters>& updateParameters) {
+    [[maybe_unused]] terrain_perf::FrameScope terrainPerfFrame;
     MLN_TRACE_FUNC();
     auto& context = backend.getContext();
     context.setObserver(this);
@@ -234,8 +277,11 @@ void Renderer::Impl::render(const RenderTree& renderTree, const std::shared_ptr<
 #endif // MLN_RENDER_BACKEND_METAL
 
     // Blocks execution until the renderable is available.
-    backend.getDefaultRenderable().wait();
-    context.beginFrame();
+    {
+        terrain_perf::Scope terrainPerf(terrain_perf::Phase::BeginFrame);
+        backend.getDefaultRenderable().wait();
+        context.beginFrame();
+    }
 
     if (!staticData) {
         staticData = std::make_unique<RenderStaticData>(std::make_unique<gfx::ShaderRegistry>());
@@ -308,6 +354,7 @@ void Renderer::Impl::render(const RenderTree& renderTree, const std::shared_ptr<
     // - UPLOAD PASS -------------------------------------------------------------------------------
     // Uploads all required buffers and images before we do any actual rendering.
     {
+        terrain_perf::Scope terrainPerf(terrain_perf::Phase::InitialUpload);
         const auto uploadPass = parameters.encoder->createUploadPass("upload",
                                                                      parameters.backend.getDefaultRenderable());
 #if !defined(NDEBUG)
@@ -337,6 +384,7 @@ void Renderer::Impl::render(const RenderTree& renderTree, const std::shared_ptr<
 
     // Upload layer groups
     {
+        terrain_perf::Scope terrainPerf(terrain_perf::Phase::LayerUpload);
         const auto uploadPass = parameters.encoder->createUploadPass("layerGroup-upload",
                                                                      parameters.backend.getDefaultRenderable());
 #if !defined(NDEBUG)
@@ -537,6 +585,7 @@ void Renderer::Impl::render(const RenderTree& renderTree, const std::shared_ptr<
         }
     };
 
+    [[maybe_unused]] bool terrainDrawn = false;
     const auto drawableTerrainPass = [&] {
         auto* terrain = orchestrator.getRenderTerrain();
         if (!terrain || !terrain->isEnabled() || !terrain->getLayerGroup()) {
@@ -562,6 +611,7 @@ void Renderer::Impl::render(const RenderTree& renderTree, const std::shared_ptr<
         parameters.depthRangeSize = 1.0f;
         parameters.currentLayer = 0;
         terrain->getLayerGroup()->render(orchestrator, parameters);
+        terrainDrawn = true;
     };
 
     const auto drawablePostTerrain3DPass = [&] {
@@ -637,26 +687,63 @@ void Renderer::Impl::render(const RenderTree& renderTree, const std::shared_ptr<
     }
 
     if (parameters.staticData.has3D && !holdMapContent) {
+        terrain_perf::Scope terrainPerf(terrain_perf::Phase::Draw3D);
         common3DPass();
         drawable3DPass();
     }
-    drawableTargetsPass();
+    {
+        terrain_perf::Scope terrainPerf(terrain_perf::Phase::OffscreenDraw);
+        drawableTargetsPass();
+    }
     // Submit the batched offscreen (drape) bakes before encoding the main
     // pass: one commit for all targets, ordered ahead of the main pass by
     // queue commit order (the main pass buffer is committed at present).
-    context.flushOffscreenRenderWork();
+    {
+        terrain_perf::Scope terrainPerf(terrain_perf::Phase::OffscreenFlush);
+        context.flushOffscreenRenderWork();
+    }
     commonClearPass();
     context.bindGlobalUniformBuffers(*parameters.renderPass);
+    if (parameters.activeTerrain) terrain_perf::count(terrain_perf::Counter::TerrainFrames);
     if (!holdMapContent) {
-        drawableOpaquePass();
-        drawableTranslucentPass();
-        drawableTerrainPass();
-        drawablePostTerrain3DPass();
+        {
+            terrain_perf::Scope terrainPerf(terrain_perf::Phase::Draw2D);
+            drawableOpaquePass();
+            drawableTranslucentPass();
+        }
+        {
+            terrain_perf::Scope terrainPerf(terrain_perf::Phase::TerrainDraw);
+            drawableTerrainPass();
+        }
+#if defined(__ANDROID__) && MLN_RENDER_BACKEND_OPENGL
+        if (terrainDrawn) {
+            if (!terrainSymbolDepthSnapshot) {
+                terrainSymbolDepthSnapshot = std::make_unique<gl::TerrainSymbolDepthSnapshot>(
+                    static_cast<gl::Context&>(context));
+            }
+            auto depth = terrainSymbolDepthSnapshot->capture(parameters.backend.getDefaultRenderable().getSize());
+            parameters.terrainSymbolDepthTexture = std::move(depth.texture);
+            parameters.terrainSymbolDepthEpsilon = depth.depthEpsilon;
+        }
+#endif
+        {
+            terrain_perf::Scope terrainPerf(terrain_perf::Phase::Post3D);
+            drawablePostTerrain3DPass();
+        }
         drawableDebugOverlays();
     }
+#if defined(__ANDROID__) && MLN_RENDER_BACKEND_OPENGL
+    if (!parameters.activeTerrain) {
+        terrain_perf::Scope terrainPerf(terrain_perf::Phase::PostRender);
+        terrainSymbolDepthSnapshot.reset();
+    }
+#endif
 
     // Give the layers a chance to do cleanup
-    orchestrator.visitLayerGroups([&](LayerGroupBase& layerGroup) { layerGroup.postRender(orchestrator, parameters); });
+    {
+        terrain_perf::Scope terrainPerf(terrain_perf::Phase::PostRender);
+        orchestrator.visitLayerGroups([&](LayerGroupBase& layerGroup) { layerGroup.postRender(orchestrator, parameters); });
+    }
     context.unbindGlobalUniformBuffers(*parameters.renderPass);
 
     // Ends the RenderPass
@@ -664,11 +751,17 @@ void Renderer::Impl::render(const RenderTree& renderTree, const std::shared_ptr<
 
     const auto startRendering = util::MonotonicTimer::now().count();
     // present submits render commands
-    parameters.encoder->present(parameters.backend.getDefaultRenderable());
+    {
+        terrain_perf::Scope terrainPerf(terrain_perf::Phase::Present);
+        parameters.encoder->present(parameters.backend.getDefaultRenderable());
+    }
     context.renderingStats().renderingTime = util::MonotonicTimer::now().count() - startRendering;
 
-    parameters.encoder.reset();
-    context.endFrame();
+    {
+        terrain_perf::Scope terrainPerf(terrain_perf::Phase::EndFrame);
+        parameters.encoder.reset();
+        context.endFrame();
+    }
 
 #if MLN_RENDER_BACKEND_METAL
     if constexpr (EnableMetalCapture) {
@@ -685,12 +778,28 @@ void Renderer::Impl::render(const RenderTree& renderTree, const std::shared_ptr<
 
     context.renderingStats().encodingTime = renderTree.getElapsedTime() - context.renderingStats().renderingTime;
 
+    // Sample terrain work after offscreen targets have rendered. Sampling it
+    // while building the render tree was one frame stale: a first publication
+    // could miss its consumer frame, while a source-blocked target could keep
+    // one redundant Goldfish rebuild queued. Tile/style updates still schedule
+    // their normal frame; this live predicate requests only render-progressable
+    // follow-up work.
+    const auto* finishedTerrain = orchestrator.getRenderTerrain();
+#if defined(__ANDROID__)
+    klattraLogGPUMemory(context.renderingStats(),
+                       finishedTerrain != nullptr,
+                       finishedTerrain && finishedTerrain->isEnabled(),
+                       frameCount);
+#endif
+    const bool terrainNeedsRepaint =
+        finishedTerrain && finishedTerrain->isEnabled() && finishedTerrain->hasPendingDrapeWork();
+
     observer->onDidFinishRenderingFrame(
         renderTreeParameters.loaded ? RendererObserver::RenderMode::Full : RendererObserver::RenderMode::Partial,
         // Held paper frames must keep the render loop alive: nothing else
         // is guaranteed to invalidate between the last bake completing and
         // the gate opening (or timing out).
-        renderTreeParameters.needsRepaint || holdMapContent,
+        renderTreeParameters.needsRepaint || holdMapContent || terrainNeedsRepaint,
         renderTreeParameters.placementChanged,
         context.threadSafeCopyRenderingStats());
 

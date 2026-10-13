@@ -9,12 +9,14 @@
 #include <mbgl/gfx/stencil_mode.hpp>
 #include <mbgl/gfx/color_mode.hpp>
 #include <mbgl/gfx/scissor_rect.hpp>
+#include <mbgl/gfx/texture2d.hpp>
 #include <mbgl/util/mat4.hpp>
 
 #include <array>
 #include <functional>
 #include <iterator>
 #include <map>
+#include <memory>
 #include <set>
 #include <vector>
 
@@ -80,6 +82,12 @@ public:
     /// tweakers and layers can read elevation-aware state without
     /// reaching into the orchestrator directly.
     const class RenderTerrain* activeTerrain = nullptr;
+
+    // Current-frame terrain depth, captured before Android world symbols.
+    // Whole-label visibility is tested at the anchor, avoiding glyphs sliced
+    // by the sloping ground beneath an otherwise visible label.
+    std::shared_ptr<gfx::Texture2D> terrainSymbolDepthTexture;
+    float terrainSymbolDepthEpsilon = 0.0f;
 
     RenderStaticData& staticData;
     LineAtlas& lineAtlas;

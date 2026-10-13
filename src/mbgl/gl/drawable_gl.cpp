@@ -1,4 +1,8 @@
+#include <mbgl/renderer/terrain_perf_diagnostic.hpp>
 #include <mbgl/gl/drawable_gl.hpp>
+#if defined(__ANDROID__)
+#include <mbgl/gfx/symbol_drawable_data.hpp>
+#endif
 #include <mbgl/gl/drawable_gl_impl.hpp>
 #include <mbgl/gl/texture2d.hpp>
 #include <mbgl/gl/upload_pass.hpp>
@@ -9,6 +13,7 @@
 #include <mbgl/shaders/gl/shader_program_gl.hpp>
 #include <mbgl/util/instrumentation.hpp>
 #include <mbgl/util/logging.hpp>
+#include <cmath>
 
 namespace mbgl {
 namespace gl {
@@ -42,9 +47,58 @@ void DrawableGL::draw(PaintParameters& parameters) const {
         return;
     }
 
+    // Tweakers run before final terrain. Bind visibility inputs here so no
+    // drawable retains or samples a previous frame's depth snapshot.
+    const bool hasTerrainOcclusionBlock = static_cast<const ShaderProgramGL&>(*shader).usesTerrainSymbolOcclusion();
+    const auto terrainDepthSampler = hasTerrainOcclusionBlock
+                                         ? shader->getSamplerLocation(shaders::idSymbolTerrainDepthTexture)
+                                         : std::nullopt;
+    gl::Texture2D* terrainDepthTexture = nullptr;
+    shaders::SymbolTerrainOcclusionUBO terrainOcclusion;
+#if defined(__ANDROID__)
+    const bool terrainSymbol = parameters.activeTerrain && getIs3D() &&
+                               dynamic_cast<const gfx::SymbolDrawableData*>(getData().get());
+    if (terrainSymbol && terrainDepthSampler && parameters.terrainSymbolDepthTexture &&
+        std::isfinite(parameters.terrainSymbolDepthEpsilon) && parameters.terrainSymbolDepthEpsilon >= 0.0f) {
+        auto* texture = static_cast<gl::Texture2D*>(parameters.terrainSymbolDepthTexture.get());
+        if (texture->getTextureID() != 0 && !texture->getSize().isEmpty()) {
+            terrainDepthTexture = texture;
+            terrainOcclusion.enabled = 1;
+            terrainOcclusion.depthEpsilon = parameters.terrainSymbolDepthEpsilon;
+        }
+    }
+#endif
+    if (terrainDepthSampler &&
+        (!impl->terrainSymbolOcclusion ||
+         impl->terrainSymbolOcclusion->enabled != terrainOcclusion.enabled ||
+         impl->terrainSymbolOcclusion->depthEpsilon != terrainOcclusion.depthEpsilon ||
+         !impl->uniformBuffers.get(shaders::idSymbolTerrainOcclusionUBO))) {
+        terrain_perf::Scope terrainPerf(terrain_perf::Phase::SymbolUBO);
+        terrain_perf::count(impl->uniformBuffers.get(shaders::idSymbolTerrainOcclusionUBO)
+                                ? terrain_perf::Counter::UBOUpdate : terrain_perf::Counter::UBOCreate);
+        impl->uniformBuffers.createOrUpdate(shaders::idSymbolTerrainOcclusionUBO, &terrainOcclusion, context);
+        impl->terrainSymbolOcclusion = terrainOcclusion;
+    }
+
     if (enableDepth) {
-        context.setDepthMode(getIs3D() ? parameters.depthModeFor3D()
-                                       : parameters.depthModeForSublayer(getSubLayerIndex(), getDepthType()));
+        auto depthMode = getIs3D() ? parameters.depthModeFor3D()
+                                   : parameters.depthModeForSublayer(getSubLayerIndex(), getDepthType());
+#if defined(__ANDROID__)
+        if (terrainSymbol) {
+            // A valid snapshot decides visibility once at the geographic
+            // anchor. Per-fragment testing would slice billboards into the
+            // adjacent slope. Without it, retain the prior depth test.
+            depthMode.mask = getDepthType();
+            if (terrainDepthTexture) {
+                depthMode.func = gfx::DepthFunctionType::Always;
+                depthMode.mask = gfx::DepthMaskType::ReadOnly;
+            }
+            // Symbol groups need no tile clipping; unlike mesh groups they
+            // may have no stencilTiles and therefore no group-level setup.
+            if (!getEnableStencil()) context.setStencilMode(gfx::StencilMode::disabled());
+        }
+#endif
+        context.setDepthMode(depthMode);
     } else {
         context.setDepthMode(gfx::DepthMode::disabled());
     }
@@ -64,6 +118,11 @@ void DrawableGL::draw(PaintParameters& parameters) const {
 
     impl->uniformBuffers.bind();
     bindTextures();
+    if (terrainDepthTexture) {
+        // Symbol atlases occupy at most units 0 and 1. Keep the transient
+        // depth input outside Drawable::textures and its retained ownership.
+        terrainDepthTexture->bind(static_cast<int32_t>(*terrainDepthSampler), 2);
+    }
 
     for (const auto& seg : impl->segments) {
         const auto& glSeg = static_cast<DrawSegmentGL&>(*seg);
@@ -76,6 +135,7 @@ void DrawableGL::draw(PaintParameters& parameters) const {
     // Unbind the VAO so that future buffer commands outside Drawable do not change the current VAO state
     context.bindVertexArray = value::BindVertexArray::Default;
 
+    if (terrainDepthTexture) terrainDepthTexture->unbind();
     unbindTextures();
     impl->uniformBuffers.unbind();
 }

@@ -9,7 +9,10 @@
 #include <mbgl/gfx/vertex_vector.hpp>
 #include <mbgl/gfx/index_vector.hpp>
 #include <mbgl/renderer/render_terrain_drape_cache.hpp>
+#include <mbgl/renderer/render_source.hpp>
+#include <mbgl/renderer/raster_drape_cohort.hpp>
 #include <mbgl/renderer/layer_tweaker.hpp>
+#include <mbgl/renderer/terrain_surface_sample.hpp>
 #include <mbgl/util/geo.hpp>
 
 #include <chrono>
@@ -42,7 +45,7 @@ class Context;
 class Drawable;
 class ShaderRegistry;
 class Texture2D;
-}
+} // namespace gfx
 
 /**
  * @brief Manages 3D terrain rendering using DEM (Digital Elevation Model) data
@@ -127,6 +130,12 @@ public:
      * tile containing the coordinate yet.
      */
     std::optional<float> getElevationAtLatLng(const LatLng& latLng) const;
+    // Raw elevation of the actual bound DEM and mesh triangle under an
+    // Android symbol anchor. Empty DEM planes return nullopt (render Z=0).
+    std::optional<float> getRenderedElevationAtLatLng(const LatLng& latLng) const;
+    // Changes when loaded image identities, coverage or in-place DEM borders
+    // change. Symbol buckets can cache anchor samples without retaining DEMs.
+    uint64_t getElevationRevision() const { return elevationRevision; }
 
     /**
      * @brief DEM elevation currently used as the terrain vertical origin.
@@ -161,7 +170,16 @@ public:
      * backlog on screen (paused-flyover voids that only filled when a
      * screenshot forced frames, 2026-07-04).
      */
-    bool hasPendingDrapeWork() const noexcept { return drapeWorkPending; }
+    bool hasPendingDrapeWork() const noexcept {
+        if (drapeWorkPending) return true;
+        bool pendingPublication = false;
+        drapeCache.visitAll([&](const OverscaledTileID&, const TerrainDrapeTargetPtr& target) {
+            pendingPublication = pendingPublication ||
+                                 (target && (target->hasPendingDrapePublication() ||
+                                             target->needsDrapeRenderAttempt(minCompletedDrapeRenders())));
+        });
+        return pendingPublication;
+    }
 
     /**
      * @brief Get the terrain implementation
@@ -181,8 +199,15 @@ public:
      * into the terrain drawable. Once Phase 2 exposes this to the
      * orchestrator + per-layer code, this signature is the public API.
      */
-    TerrainDrapeTargetPtr getDrapeTarget(const OverscaledTileID& tileID) const {
-        return drapeCache.get(tileID);
+    TerrainDrapeTargetPtr getDrapeTarget(const OverscaledTileID& tileID) const { return drapeCache.get(tileID); }
+
+    // Source pyramids update before terrain drawables each frame. Expose the
+    // last computed Topo drape cohort so the official vector sources request
+    // exactly the near-detail/far-overview surfaces that terrain will sample.
+    // A one-frame lag is intentional; pending terrain work keeps frames
+    // advancing until the source tiles arrive.
+    const std::unordered_set<OverscaledTileID>& getSourceCoverTileIDs() const noexcept {
+        return previousSourceDrapeIDs;
     }
 
     // Per-drawable DEM binding. With parent-fallback DEM sampling, a tile
@@ -199,6 +224,10 @@ public:
 
         std::shared_ptr<gfx::Texture2D> texture;
         OverscaledTileID sourceID; // tile whose DEM is bound (may be ancestor)
+        // An atomic held cover can outlive the raw source image cache. Retain
+        // exactly its bound CPU image, shared by all ideals using this DEM.
+        std::shared_ptr<const PremultipliedImage> demImage;
+        uint64_t demImageRevision = 0;
         std::array<float, 2> demTL{{0.0f, 0.0f}};
         float demScale = 1.0f;
         std::shared_ptr<gfx::Texture2D> drapeTexture;
@@ -208,6 +237,12 @@ public:
         bool drapeReady = false;
         bool usedEmptyDEM = false;
         bool usedDrapeFallback = false;
+
+        bool sameElevationSurface(const DEMBinding& other) const {
+            return sourceID == other.sourceID && demImage == other.demImage &&
+                   demImageRevision == other.demImageRevision && demTL == other.demTL &&
+                   demScale == other.demScale && usedEmptyDEM == other.usedEmptyDEM;
+        }
     };
 
     /**
@@ -250,52 +285,36 @@ public:
     }
 
     static bool isDrapeTargetReady(const TerrainDrapeTargetPtr& target) noexcept {
-        return target &&
-               target->getCompletedRenderCount() >= minCompletedDrapeRenders() &&
-               target->hasContentLayerGroups();
+        return target && target->hasPublishedDrapeSurface();
     }
 
     static bool isDrapeTargetReadyForTile(const TerrainDrapeTargetPtr& target,
                                           const OverscaledTileID& tileID) noexcept {
-        if (!target || target->getCompletedRenderCount() < minCompletedDrapeRenders()) {
+        if (!target || !target->hasPublishedDrapeSurface()) {
             return false;
         }
         (void)tileID;
-        return target->hasContentLayerGroups();
+        return !target->publishedSurfaceRequiresRasterDrapeContent() || target->publishedSurfaceHasRasterFloor();
     }
 
     bool hasReadyTerrainCoverage(const OverscaledTileID& sourceTileID) const {
         if (currentBindings.empty()) return false;
+        std::vector<OverscaledTileID> readyTileIDs;
+        readyTileIDs.reserve(currentBindings.size());
         for (const auto& [idealID, binding] : currentBindings) {
-            if (binding.drapeReady &&
-                binding.drapeTexture &&
-                LayerTweaker::tilesOverlap(sourceTileID, idealID)) {
-                return true;
+            if (binding.drapeReady && binding.drapeTexture && !binding.usedEmptyDEM) {
+                readyTileIDs.push_back(idealID);
             }
         }
-        return false;
+        return raster_drape::coversTargetAtAnyResolution(sourceTileID, readyTileIDs);
     }
 
     bool hasElevationCoverage(const OverscaledTileID& sourceTileID) const {
-        if (currentBindings.empty()) return false;
-        // Debug/visual experiment: at high pitch, low-zoom vector/raster
-        // source tiles that only partially overlap fine DEM drape targets can
-        // remain in the main pass as flat translucent polygons over the
-        // terrain. Force-skipping any source tile that overlaps a completed
-        // drape target lets us isolate that duplicate-main-pass failure mode.
-        const bool skipPartialMainPass =
-            std::getenv("KLATTRA_TERRAIN_SKIP_PARTIAL_MAIN_PASS") != nullptr;
-        for (const auto& [idealID, binding] : currentBindings) {
-            if (!binding.drapeReady ||
-                !binding.drapeTexture ||
-                !LayerTweaker::tilesOverlap(sourceTileID, idealID)) {
-                continue;
-            }
-            if (skipPartialMainPass || idealID.canonical.z <= sourceTileID.canonical.z) {
-                return true;
-            }
-        }
-        return false;
+        // Main-pass suppression must use the same exact union proof for every
+        // drapeable layer. Any-overlap drops a whole source tile and makes a
+        // hole; retaining a whole flat tile over 1-3 terrain children makes a
+        // diagonal perspective plate. Suppress only for a complete mesh cover.
+        return hasReadyTerrainCoverage(sourceTileID);
     }
 
     // ---- .53 stage diagnostics ----
@@ -331,6 +350,15 @@ public:
     void visitDrapeTargets(Func f) {
         drapeCache.visitAll(f);
     }
+
+    /// Record whether an authoritative map source has a complete tile cover
+    /// for every live drape target. Feature-empty but complete vector tiles
+    /// count as ready; pending covers hold the last published target pixels.
+    void noteDrapeSourceCoverage(const std::string& sourceID, const RenderTiles& renderTiles);
+    void declareDrapeSourceRequirement(const std::string& sourceKey, const RenderTiles& renderTiles);
+    void noteDrapeSourceTileCoverage(const std::string& sourceID, const std::vector<OverscaledTileID>& completeTileIDs);
+    void noteDrapeSourceTargetReadiness(const std::string& sourceID,
+                                        const std::vector<OverscaledTileID>& readyTargetIDs);
 
     /**
      * @brief Get the terrain mesh for a specific tile
@@ -437,6 +465,8 @@ private:
     // (getElevation) stay valid even if the source bucket gets torn down
     // mid-frame. Refreshed each update() to match the current cover set.
     std::unordered_map<OverscaledTileID, std::shared_ptr<const PremultipliedImage>> demImagesByTile;
+    std::unordered_map<OverscaledTileID, uint64_t> demImageRevisionsByTile;
+    uint64_t elevationRevision;
 
     // Smoothed-ish local terrain origin, sampled at the current map center
     // whenever a covering DEM tile is available. The shader subtracts this
@@ -464,6 +494,10 @@ private:
     // stayed unchanged while the camera is not actively moving. Used to
     // defer full-size near-ring drape targets until the view has settled.
     std::unordered_set<OverscaledTileID> previousIdealIDs;
+    // Previous-frame Android Topo drape cohort. This can mix near z10 detail
+    // groups with far z9 overview parents, unlike the disjoint DEM mesh cover
+    // above. The official vector source consumes this exact set.
+    std::unordered_set<OverscaledTileID> previousSourceDrapeIDs;
     uint32_t stableDrapeCoverFrames = 0;
 
     // Replaced drape targets stay here until their higher-resolution
@@ -485,6 +519,17 @@ private:
     // frames (unbaked targets, cap-deferred resizes, texture-less cover
     // tiles). Read by the orchestrator via hasPendingDrapeWork().
     bool drapeWorkPending = false;
+
+    // The same RenderTerrain instance survives Topo/Satellite style swaps
+    // because both styles use the same DEM. Remember which surface topology
+    // populated the cache so an old vector cohort cannot be reused as a
+    // raster target (or vice versa) when their tile keys overlap.
+    std::optional<bool> lastSharedTopoDrapeCohort;
+
+    // Monotonic publication generation. Terrain prepares the target set, then
+    // drape-capable layer updates acknowledge source coverage against this
+    // value before RenderTarget decides whether it can safely replace pixels.
+    uint64_t drapeSurfaceFrame = 0;
 
     // Launch-gated sticky response to the shared high-water signal or an
     // explicit platform memory warning. It reduces only out-of-view drape
@@ -561,7 +606,7 @@ private:
     // Mesh resolution (cells per side). A 128×128 grid keeps the terrain
     // surface dense enough for drone-distance relief while avoiding the
     // near-UInt16 vertex-limit mesh that made iOS Metal debugging painful.
-    static constexpr size_t MESH_SIZE = 128;
+    static constexpr size_t MESH_SIZE = terrain_surface::gridSize;
 
     // Cached DEM source
     RenderSource* demSource = nullptr;

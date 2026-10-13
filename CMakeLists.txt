@@ -628,6 +628,10 @@ list(APPEND SRC_FILES
     ${PROJECT_SOURCE_DIR}/src/mbgl/renderer/render_static_data.hpp
     ${PROJECT_SOURCE_DIR}/src/mbgl/renderer/render_tile.cpp
     ${PROJECT_SOURCE_DIR}/src/mbgl/renderer/render_tile.hpp
+    ${PROJECT_SOURCE_DIR}/src/mbgl/renderer/raster_drape_cohort.hpp
+    ${PROJECT_SOURCE_DIR}/src/mbgl/renderer/topo_vector_cohort.hpp
+    ${PROJECT_SOURCE_DIR}/src/mbgl/renderer/topo_drape_detail_policy.hpp
+    ${PROJECT_SOURCE_DIR}/src/mbgl/renderer/terrain_perf_diagnostic.hpp
     ${PROJECT_SOURCE_DIR}/src/mbgl/renderer/render_tree.hpp
     ${PROJECT_SOURCE_DIR}/src/mbgl/renderer/renderer.cpp
     ${PROJECT_SOURCE_DIR}/src/mbgl/renderer/renderer_impl.cpp
@@ -655,6 +659,9 @@ list(APPEND SRC_FILES
     ${PROJECT_SOURCE_DIR}/src/mbgl/renderer/tile_mask.hpp
     ${PROJECT_SOURCE_DIR}/src/mbgl/renderer/tile_parameters.hpp
     ${PROJECT_SOURCE_DIR}/src/mbgl/renderer/cover_hold_budget.hpp
+    ${PROJECT_SOURCE_DIR}/src/mbgl/renderer/android_memory_sample.hpp
+    ${PROJECT_SOURCE_DIR}/src/mbgl/renderer/terrain_symbol_projection.hpp
+    ${PROJECT_SOURCE_DIR}/src/mbgl/renderer/terrain_surface_sample.hpp
     ${PROJECT_SOURCE_DIR}/src/mbgl/renderer/tile_pyramid.cpp
     ${PROJECT_SOURCE_DIR}/src/mbgl/renderer/tile_pyramid.hpp
     ${PROJECT_SOURCE_DIR}/src/mbgl/renderer/tile_render_data.cpp

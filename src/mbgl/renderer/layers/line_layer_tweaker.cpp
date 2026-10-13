@@ -8,10 +8,14 @@
 #include <mbgl/renderer/layer_group.hpp>
 #include <mbgl/renderer/paint_parameters.hpp>
 #include <mbgl/renderer/render_tile.hpp>
+#if defined(__ANDROID__) && MLN_RENDER_BACKEND_OPENGL
+#include <mbgl/renderer/render_terrain.hpp>
+#endif
 #include <mbgl/shaders/line_layer_ubo.hpp>
 #include <mbgl/shaders/shader_program_base.hpp>
 #include <mbgl/style/layers/line_layer_properties.hpp>
 #include <mbgl/util/logging.hpp>
+#include <mbgl/util/constants.hpp>
 #include <mbgl/util/math.hpp>
 
 #if MLN_RENDER_BACKEND_METAL
@@ -79,6 +83,22 @@ void LineLayerTweaker::execute(LayerGroupBase& layerGroup, const PaintParameters
     const auto zoom = static_cast<float>(parameters.state.getZoom());
     const auto intZoom = parameters.state.getIntegerZoom();
 
+    // getDrapeMatrix is orthographic in the target's canonical geography.
+    // Keep line widths in camera pixels; only the antialias footprint uses
+    // target texels. Main-viewport units_to_pixels/DPR do not describe this FBO.
+    float drapeTexelDensity = 0.0f;
+#if defined(__ANDROID__) && MLN_RENDER_BACKEND_OPENGL
+    if (drapeTargetID && parameters.activeTerrain) {
+        if (const auto target = parameters.activeTerrain->getDrapeTarget(*drapeTargetID)) {
+            const auto size = target->getSize();
+            if (size.width > 0 && size.width == size.height) {
+                drapeTexelDensity = static_cast<float>(
+                    size.width / (util::tileSize_D * std::exp2(parameters.state.getZoom() - drapeTargetID->canonical.z)));
+            }
+        }
+    }
+#endif
+
 #if MLN_RENDER_BACKEND_METAL
     const auto getExpressionBuffer = [&]() {
         const bool enableEval = gfx::Backend::getEnableGPUExpressionEval();
@@ -99,7 +119,7 @@ void LineLayerTweaker::execute(LayerGroupBase& layerGroup, const PaintParameters
     };
 #endif // MLN_RENDER_BACKEND_METAL
 
-    if (!evaluatedPropsUniformBuffer || propertiesUpdated) {
+    if (!evaluatedPropsUniformBuffer || propertiesUpdated || evaluatedDrapeTexelDensity != drapeTexelDensity) {
 #if MLN_RENDER_BACKEND_METAL
         expressionMask =
             !gfx::Backend::getEnableGPUExpressionEval()
@@ -181,10 +201,11 @@ void LineLayerTweaker::execute(LayerGroupBase& layerGroup, const PaintParameters
                                              /*width =*/evaluate<LineWidth>(parameters),
                                              /*floorwidth =*/evaluate<LineFloorWidth>(parameters),
                                              LineExpressionMask::None,
-                                             0};
+                                             drapeTexelDensity};
 #endif // MLN_RENDER_BACKEND_METAL
 
         context.emplaceOrUpdateUniformBuffer(evaluatedPropsUniformBuffer, &propsUBO);
+        evaluatedDrapeTexelDensity = drapeTexelDensity;
         propertiesUpdated = false;
     }
     auto& layerUniforms = layerGroup.mutableUniformBuffers();
@@ -225,9 +246,9 @@ void LineLayerTweaker::execute(LayerGroupBase& layerGroup, const PaintParameters
         constexpr bool nearClipped = false;
         constexpr bool inViewportPixelUnits = false; // from RenderTile::translatedMatrix
         // Drape mode: route the drawable into the per-DEM-tile drape texture
-        // instead of the camera. Line width / ratio still uses the camera
-        // zoom — visually a touch off when source and drape zoom differ, but
-        // mirrors what gl-js does for layer-relative line metrics.
+        // instead of the camera. The camera-zoom ratio preserves geographic
+        // stroke widths even when the source and target canonical zooms differ.
+        // drapeTexelDensity changes coverage filtering, never that ratio.
         const auto matrix = drapeTargetID
                                 ? getDrapeMatrix(*drawable.getTileID(), *drapeTargetID)
                                 : getTileMatrix(tileID,
@@ -386,7 +407,10 @@ void LineLayerTweaker::execute(LayerGroupBase& layerGroup, const PaintParameters
                     const LineSDFTilePropsUBO tilePropsUBO = {
 #endif
                         .sdfgamma = static_cast<float>(dashPatternTexture.getSize().width) /
-                                    (std::min(widthA, widthB) * 256.0f * parameters.pixelRatio) / 2.0f,
+                                    (std::min(widthA, widthB) * 256.0f *
+                                     (drapeTexelDensity > 0.0f
+                                          ? drapeTexelDensity * std::exp2(zoom - intZoom)
+                                          : parameters.pixelRatio)) / 2.0f,
                         .mix = crossfade.t, .pad1 = 0, .pad2 = 0
                     };
 

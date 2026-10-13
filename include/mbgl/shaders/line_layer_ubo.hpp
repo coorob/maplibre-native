@@ -143,6 +143,8 @@ struct alignas(16) LineEvaluatedPropsUBO {
     /* 32 */ float width;
     /* 36 */ float floorwidth;
     /* 40 */ LineExpressionMask expressionMask;
+    // Android/OpenGL drapes: target texels per camera logical pixel. Zero
+    // retains the ordinary line shader; Metal/WebGPU keep this slot reserved.
     /* 44 */ float pad1;
     /* 48 */
 };

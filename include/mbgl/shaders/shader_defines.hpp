@@ -152,6 +152,9 @@ enum {
 
 enum {
     idSymbolEvaluatedPropsUBO = getEnumValue(symbolLayerSSBOCount, layerUBOStartId),
+#if MLN_RENDER_BACKEND_OPENGL
+    idSymbolTerrainOcclusionUBO,
+#endif
     symbolLayerUBOCount
 };
 
@@ -381,6 +384,7 @@ enum {
 enum {
     idSymbolImageTexture,
     idSymbolImageIconTexture,
+    idSymbolTerrainDepthTexture,
     symbolTextureCount
 };
 
@@ -559,6 +563,7 @@ enum {
     idSymbolHaloWidthVertexAttribute,
     idSymbolHaloBlurVertexAttribute,
 
+    idSymbolTerrainElevationVertexAttribute,
     symbolVertexAttributeCount
 };
 

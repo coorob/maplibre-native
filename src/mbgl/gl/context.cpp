@@ -1,3 +1,4 @@
+#include <mbgl/renderer/terrain_perf_diagnostic.hpp>
 #include <mbgl/gl/context.hpp>
 
 #include <mbgl/gfx/shader_registry.hpp>
@@ -123,7 +124,10 @@ Context::~Context() noexcept {
 void Context::beginFrame() {
     MLN_TRACE_FUNC();
 
-    backend.getThreadPool().runRenderJobs();
+    {
+        terrain_perf::Scope jobsScope(terrain_perf::Phase::RenderJobs);
+        backend.getThreadPool().runRenderJobs();
+    }
 
     frameInFlightFence = std::make_shared<gl::Fence>();
 
@@ -131,6 +135,7 @@ void Context::beginFrame() {
     constexpr auto defragFreq = 4;
 
     if (frameNum == defragFreq) {
+        terrain_perf::Scope defragScope(terrain_perf::Phase::UBODefragment);
         uboAllocator->defragment(frameInFlightFence);
         frameNum = 0;
     } else {
@@ -271,11 +276,12 @@ void Context::verifyProgramLinkage(ProgramID program_) {
 
 UniqueTexture Context::createUniqueTexture(const Size& size,
                                            gfx::TexturePixelType format,
-                                           gfx::TextureChannelDataType type) {
+                                           gfx::TextureChannelDataType type,
+                                           DepthTextureFormat depthFormat) {
     MLN_TRACE_FUNC();
 
     assert(texturePool);
-    TextureID id = texturePool->alloc(size, format, type);
+    TextureID id = texturePool->alloc({size, format, type, depthFormat});
 
     // NOLINTNEXTLINE(performance-move-const-arg)
     return UniqueTexture{std::move(id), {this}};
@@ -757,6 +763,7 @@ void Context::draw(const gfx::DrawMode& drawMode, std::size_t indexOffset, std::
 }
 
 void Context::performCleanup() {
+    terrain_perf::Scope terrainPerf(terrain_perf::Phase::GLCleanup);
     MLN_TRACE_FUNC();
 #ifndef NDEBUG
     // In debug builds, un-bind all texture units so that any incorrect use results in an

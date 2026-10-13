@@ -13,6 +13,7 @@ layout (location = 1) in vec4 a_data;
 layout (location = 2) in vec4 a_pixeloffset;
 layout (location = 3) in vec3 a_projected_pos;
 layout (location = 4) in float a_fade_opacity;
+layout (location = 5) in float a_terrain_elevation;
 
 // contents of a_size vary based on the type of property value
 // used for {text,icon}-size.
@@ -58,6 +59,7 @@ layout (std140) uniform SymbolDrawableUBO {
     highp float u_opacity_t;
     highp float u_halo_width_t;
     highp float u_halo_blur_t;
+    bool u_terrain;
 };
 
 layout (std140) uniform SymbolEvaluatedPropsUBO {
@@ -79,25 +81,58 @@ out vec2 v_data0;
 out vec3 v_data1;
 
 #ifndef HAS_UNIFORM_u_fill_color
-layout (location = 5) in highp vec4 a_fill_color;
+layout (location = 6) in highp vec4 a_fill_color;
 out highp vec4 fill_color;
 #endif
 #ifndef HAS_UNIFORM_u_halo_color
-layout (location = 6) in highp vec4 a_halo_color;
+layout (location = 7) in highp vec4 a_halo_color;
 out highp vec4 halo_color;
 #endif
 #ifndef HAS_UNIFORM_u_opacity
-layout (location = 7) in lowp vec2 a_opacity;
+layout (location = 8) in lowp vec2 a_opacity;
 out lowp float opacity;
 #endif
 #ifndef HAS_UNIFORM_u_halo_width
-layout (location = 8) in lowp vec2 a_halo_width;
+layout (location = 9) in lowp vec2 a_halo_width;
 out lowp float halo_width;
 #endif
 #ifndef HAS_UNIFORM_u_halo_blur
-layout (location = 9) in lowp vec2 a_halo_blur;
+layout (location = 10) in lowp vec2 a_halo_blur;
 out lowp float halo_blur;
 #endif
+
+// The current-frame terrain snapshot is bound at draw time, after terrain.
+layout (std140) uniform SymbolTerrainOcclusionUBO {
+    bool u_terrain_occlusion_enabled;
+    highp float u_terrain_depth_epsilon;
+    lowp float terrain_occlusion_pad1;
+    lowp float terrain_occlusion_pad2;
+};
+uniform highp sampler2D u_terrain_depth;
+
+// Visibility belongs to the geographic anchor, shared by every glyph/icon
+// vertex. Testing depth under each fragment cuts billboards into slopes.
+highp float terrain_anchor_visibility(highp vec4 projected_anchor) {
+    if (!u_terrain || !u_terrain_occlusion_enabled) return 1.0;
+    if (projected_anchor.w <= 0.0) return 0.0;
+    highp vec3 ndc = projected_anchor.xyz / projected_anchor.w;
+    if (any(isnan(ndc)) || any(isinf(ndc)) ||
+        any(lessThan(ndc, vec3(-1.0))) || any(greaterThan(ndc, vec3(1.0)))) return 0.0;
+
+    // A depth texel represents its center. The enclosing 2x2 footprint
+    // conservatively tolerates subpixel rasterization on slopes; epsilon
+    // only accounts for the captured depth format and float arithmetic.
+    ivec2 size = textureSize(u_terrain_depth, 0);
+    ivec2 last = size - ivec2(1);
+    ivec2 base = ivec2(floor((ndc.xy * 0.5 + 0.5) * vec2(size) - 0.5));
+    highp float d00 = texelFetch(u_terrain_depth, clamp(base, ivec2(0), last), 0).r;
+    highp float d10 = texelFetch(u_terrain_depth, clamp(base + ivec2(1, 0), ivec2(0), last), 0).r;
+    highp float d01 = texelFetch(u_terrain_depth, clamp(base + ivec2(0, 1), ivec2(0), last), 0).r;
+    highp float d11 = texelFetch(u_terrain_depth, clamp(base + ivec2(1, 1), ivec2(0), last), 0).r;
+    highp float terrain_depth = max(max(d00, d10), max(d01, d11));
+    highp float anchor_depth = ndc.z * 0.5 + 0.5;
+    return anchor_depth <= terrain_depth + u_terrain_depth_epsilon ? 1.0 : 0.0;
+}
 
 void main() {
     highp vec4 u_fill_color = u_is_text_prop ? u_text_fill_color : u_icon_fill_color;
@@ -152,7 +187,8 @@ lowp float halo_blur = u_halo_blur;
         size = u_size;
     }
 
-    vec4 projectedPoint = u_matrix * vec4(a_pos, 0, 1);
+    float elevation = u_terrain ? a_terrain_elevation : 0.0;
+    vec4 projectedPoint = u_matrix * vec4(a_pos, elevation, 1);
     highp float camera_to_anchor_distance = projectedPoint.w;
     // If the label is pitched with the map, layout is done in pitched space,
     // which makes labels in the distance smaller relative to viewport space.
@@ -179,7 +215,7 @@ lowp float halo_blur = u_halo_blur;
         // Point labels with 'rotation-alignment: map' are horizontal with respect to tile units
         // To figure out that angle in projected space, we draw a short horizontal line in tile
         // space, project it, and measure its angle in projected space.
-        vec4 offsetProjectedPoint = u_matrix * vec4(a_pos + vec2(1, 0), 0, 1);
+        vec4 offsetProjectedPoint = u_matrix * vec4(a_pos + vec2(1, 0), elevation, 1);
 
         vec2 a = projectedPoint.xy / projectedPoint.w;
         vec2 b = offsetProjectedPoint.xy / offsetProjectedPoint.w;
@@ -191,13 +227,26 @@ lowp float halo_blur = u_halo_blur;
     highp float angle_cos = cos(segment_angle + symbol_rotation);
     mat2 rotation_matrix = mat2(angle_cos, -1.0 * angle_sin, angle_sin, angle_cos);
 
-    vec4 projected_pos = u_label_plane_matrix * vec4(a_projected_pos.xy, 0.0, 1.0);
-    gl_Position = u_coord_matrix * vec4(projected_pos.xy / projected_pos.w + rotation_matrix * (a_offset / 32.0 * fontScale + a_pxoffset), 0.0, 1.0);
+    vec4 projected_pos = u_label_plane_matrix * vec4(a_projected_pos.xy, elevation, 1.0);
+    gl_Position = u_coord_matrix * vec4(projected_pos.xy / projected_pos.w + rotation_matrix * (a_offset / 32.0 * fontScale + a_pxoffset), elevation, 1.0);
+    if (u_terrain) {
+        if (projectedPoint.w <= 0.0) {
+            // A billboard behind the camera must not reappear after divide.
+            gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+        } else if (!u_pitch_with_map) {
+            // Viewport-facing labels keep their screen-space glyph offsets,
+            // but use the elevated anchor's clip depth for terrain occlusion.
+            gl_Position.z = projectedPoint.z / projectedPoint.w * gl_Position.w;
+        }
+    }
     float gamma_scale = gl_Position.w;
+
+    float terrain_visibility = terrain_anchor_visibility(projectedPoint);
+    if (terrain_visibility == 0.0) gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
 
     vec2 fade_opacity = unpack_opacity(a_fade_opacity);
     float fade_change = fade_opacity[1] > 0.5 ? u_symbol_fade_change : -u_symbol_fade_change;
-    float interpolated_fade_opacity = max(0.0, min(1.0, fade_opacity[0] + fade_change));
+    float interpolated_fade_opacity = max(0.0, min(1.0, fade_opacity[0] + fade_change)) * terrain_visibility;
 
     v_data0 = a_tex / u_texsize;
     v_data1 = vec3(gamma_scale, size, interpolated_fade_opacity);

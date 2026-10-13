@@ -21,6 +21,11 @@ add_library(
     ${PROJECT_SOURCE_DIR}/test/plugin/plugin.test.cpp
     ${PROJECT_SOURCE_DIR}/test/renderer/image_manager.test.cpp
     ${PROJECT_SOURCE_DIR}/test/renderer/cover_hold_budget.test.cpp
+    ${PROJECT_SOURCE_DIR}/test/renderer/android_memory_sample.test.cpp
+    ${PROJECT_SOURCE_DIR}/test/renderer/raster_drape_cohort.test.cpp
+    ${PROJECT_SOURCE_DIR}/test/renderer/topo_vector_cohort.test.cpp
+    ${PROJECT_SOURCE_DIR}/test/renderer/terrain_symbol_projection.test.cpp
+    ${PROJECT_SOURCE_DIR}/test/renderer/terrain_surface_sample.test.cpp
     ${PROJECT_SOURCE_DIR}/test/renderer/pattern_atlas.test.cpp
     ${PROJECT_SOURCE_DIR}/test/renderer/shader_registry.test.cpp
     $<$<BOOL:${MLN_WITH_WEBGPU}>:${PROJECT_SOURCE_DIR}/test/renderer/wgsl_preprocessor.test.cpp>

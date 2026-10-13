@@ -7,18 +7,37 @@ layout (std140) uniform LineEvaluatedPropsUBO {
     mediump float u_width;
     lowp float u_floorwidth;
     lowp float props_pad1;
-    lowp float props_pad2;
+    highp float u_drape_texels_per_pixel;
 };
 
 uniform sampler2D u_image;
 
 in vec2 v_width2;
+in highp vec2 v_drape_width;
 in vec2 v_normal;
 in float v_gamma_scale;
 in highp float v_lineprogress;
 
 #pragma mapbox: define lowp float blur
 #pragma mapbox: define lowp float opacity
+
+// CDF of a square pixel projected onto the line normal. Its two independent
+// uniform spans make a trapezoid (a triangle at 45 degrees). This integrates
+// both edges of subtexel strokes instead of merely widening their fade ramp.
+float drapePixelCDF(float distance, vec2 spans) {
+    float a = spans.x;
+    float b = spans.y;
+    if (b < 0.0001) return clamp(0.5 + distance / a, 0.0, 1.0);
+    float tailDistance = max(0.5 * (a + b) - abs(distance), 0.0);
+    float tail = tailDistance < b ? tailDistance * tailDistance / (2.0 * a * b)
+                                  : (tailDistance - 0.5 * b) / a;
+    return distance > 0.0 ? 1.0 - tail : tail;
+}
+
+float drapeIntervalCoverage(float distance, float radius, vec2 spans) {
+    return clamp(drapePixelCDF(distance + radius, spans) -
+                 drapePixelCDF(distance - radius, spans), 0.0, 1.0);
+}
 
 void main() {
     #pragma mapbox: initialize lowp float blur
@@ -32,6 +51,21 @@ void main() {
     // (v_width2.s)
     float blur2 = (blur + 1.0 / DEVICE_PIXEL_RATIO) * v_gamma_scale;
     float alpha = clamp(min(dist - (v_width2.t - blur2), v_width2.s - dist) / blur2, 0.0, 1.0);
+    if (u_drape_texels_per_pixel > 0.0) {
+        // The FBO is orthographic: use its texel footprint directly, without
+        // the main viewport's perspective gamma or device pixel ratio.
+        vec2 pixelNormal = vec2(dot(v_normal, dFdx(v_normal)), dot(v_normal, dFdy(v_normal)));
+        if (dot(pixelNormal, pixelNormal) < 0.00000001) {
+            pixelNormal = vec2(dFdx(v_normal.y), dFdy(v_normal.y));
+        }
+        pixelNormal = abs(normalize(pixelNormal));
+        vec2 spans = vec2(max(pixelNormal.x, pixelNormal.y) + max(blur, 0.0) * u_drape_texels_per_pixel,
+                          min(pixelNormal.x, pixelNormal.y));
+        float targetDistance = dist * u_drape_texels_per_pixel;
+        vec2 targetRadii = v_drape_width * u_drape_texels_per_pixel;
+        alpha = clamp(drapeIntervalCoverage(targetDistance, targetRadii.x, spans) -
+                      drapeIntervalCoverage(targetDistance, targetRadii.y, spans), 0.0, 1.0);
+    }
 
     // For gradient lines, v_lineprogress is the ratio along the entire line,
     // scaled to [0, 2^15), and the gradient ramp is stored in a texture.

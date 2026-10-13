@@ -63,11 +63,13 @@ layout (std140) uniform LineEvaluatedPropsUBO {
     mediump float u_width;
     lowp float u_floorwidth;
     lowp float props_pad1;
-    lowp float props_pad2;
+    highp float u_drape_texels_per_pixel;
 };
 
 out vec2 v_normal;
 out vec2 v_width2;
+// Unpadded outer/inner radii, in camera pixels.
+out highp vec2 v_drape_width;
 out vec2 v_tex_a;
 out vec2 v_tex_b;
 out float v_gamma_scale;
@@ -138,7 +140,10 @@ lowp float floorwidth = u_floorwidth;
 
     // the distance over which the line edge fades out.
     // Retina devices need a smaller distance to avoid aliasing.
-    float ANTIALIASING = 1.0 / DEVICE_PIXEL_RATIO / 2.0;
+    bool draped = u_drape_texels_per_pixel > 0.0;
+    float ANTIALIASING = draped
+        ? 0.70710678118 / u_drape_texels_per_pixel + 0.5 * max(blur, 0.0)
+        : 1.0 / DEVICE_PIXEL_RATIO / 2.0;
 
     vec2 a_extrude = a_data.xy - 128.0;
     float a_direction = mod(a_data.z, 4.0) - 1.0;
@@ -158,6 +163,11 @@ lowp float floorwidth = u_floorwidth;
     gapwidth = gapwidth / 2.0;
     float halfwidth = width / 2.0;
     offset = -1.0 * offset;
+
+    // Half a texel diagonal covers the pixel footprint at every line angle.
+    // The larger drape skirt lets subtexel strokes reach raster samples.
+    // Save the original stroke bounds so filtering cannot widen the stroke.
+    v_drape_width = vec2(gapwidth + halfwidth * (gapwidth > 0.0 ? 2.0 : 1.0), gapwidth);
 
     float inset = gapwidth + (gapwidth > 0.0 ? ANTIALIASING : 0.0);
     float outset = gapwidth + halfwidth * (gapwidth > 0.0 ? 2.0 : 1.0) + (halfwidth == 0.0 ? 0.0 : ANTIALIASING);
@@ -182,8 +192,15 @@ lowp float floorwidth = u_floorwidth;
     float extrude_length_with_perspective = length(projected_extrude.xy / gl_Position.w * u_units_to_pixels);
     v_gamma_scale = extrude_length_without_perspective / extrude_length_with_perspective;
 
-    v_tex_a = vec2(a_linesofar * u_patternscale_a.x / floorwidth, normal.y * u_patternscale_a.y + u_tex_y_a);
-    v_tex_b = vec2(a_linesofar * u_patternscale_b.x / floorwidth, normal.y * u_patternscale_b.y + u_tex_y_b);
+    // Preserve the dash atlas's transverse scale inside the original stroke
+    // when the drape antialias skirt expands. Clamp to this pattern's atlas row.
+    float dashNormal = normal.y;
+    if (draped) {
+        float originalOutset = v_drape_width.x + (halfwidth == 0.0 ? 0.0 : 0.5 / DEVICE_PIXEL_RATIO);
+        dashNormal = clamp(normal.y * outset / max(originalOutset, 0.0001), -1.0, 1.0);
+    }
+    v_tex_a = vec2(a_linesofar * u_patternscale_a.x / floorwidth, dashNormal * u_patternscale_a.y + u_tex_y_a);
+    v_tex_b = vec2(a_linesofar * u_patternscale_b.x / floorwidth, dashNormal * u_patternscale_b.y + u_tex_y_b);
 
     v_width2 = vec2(outset, inset);
 }
@@ -204,13 +221,14 @@ layout (std140) uniform LineEvaluatedPropsUBO {
     mediump float u_width;
     lowp float u_floorwidth;
     lowp float props_pad1;
-    lowp float props_pad2;
+    highp float u_drape_texels_per_pixel;
 };
 
 uniform sampler2D u_image;
 
 in vec2 v_normal;
 in vec2 v_width2;
+in highp vec2 v_drape_width;
 in vec2 v_tex_a;
 in vec2 v_tex_b;
 in float v_gamma_scale;
@@ -230,6 +248,24 @@ in mediump float width;
 #ifndef HAS_UNIFORM_u_floorwidth
 in lowp float floorwidth;
 #endif
+
+// CDF of a square pixel projected onto the line normal. Its two independent
+// uniform spans make a trapezoid (a triangle at 45 degrees). This integrates
+// both edges of subtexel strokes instead of merely widening their fade ramp.
+float drapePixelCDF(float distance, vec2 spans) {
+    float a = spans.x;
+    float b = spans.y;
+    if (b < 0.0001) return clamp(0.5 + distance / a, 0.0, 1.0);
+    float tailDistance = max(0.5 * (a + b) - abs(distance), 0.0);
+    float tail = tailDistance < b ? tailDistance * tailDistance / (2.0 * a * b)
+                                  : (tailDistance - 0.5 * b) / a;
+    return distance > 0.0 ? 1.0 - tail : tail;
+}
+
+float drapeIntervalCoverage(float distance, float radius, vec2 spans) {
+    return clamp(drapePixelCDF(distance + radius, spans) -
+                 drapePixelCDF(distance - radius, spans), 0.0, 1.0);
+}
 
 void main() {
     #ifdef HAS_UNIFORM_u_color
@@ -256,6 +292,21 @@ lowp float floorwidth = u_floorwidth;
     // (v_width2.s)
     float blur2 = (blur + 1.0 / DEVICE_PIXEL_RATIO) * v_gamma_scale;
     float alpha = clamp(min(dist - (v_width2.t - blur2), v_width2.s - dist) / blur2, 0.0, 1.0);
+    if (u_drape_texels_per_pixel > 0.0) {
+        // The FBO is orthographic: use its texel footprint directly, without
+        // the main viewport's perspective gamma or device pixel ratio.
+        vec2 pixelNormal = vec2(dot(v_normal, dFdx(v_normal)), dot(v_normal, dFdy(v_normal)));
+        if (dot(pixelNormal, pixelNormal) < 0.00000001) {
+            pixelNormal = vec2(dFdx(v_normal.y), dFdy(v_normal.y));
+        }
+        pixelNormal = abs(normalize(pixelNormal));
+        vec2 spans = vec2(max(pixelNormal.x, pixelNormal.y) + max(blur, 0.0) * u_drape_texels_per_pixel,
+                          min(pixelNormal.x, pixelNormal.y));
+        float targetDistance = dist * u_drape_texels_per_pixel;
+        vec2 targetRadii = v_drape_width * u_drape_texels_per_pixel;
+        alpha = clamp(drapeIntervalCoverage(targetDistance, targetRadii.x, spans) -
+                      drapeIntervalCoverage(targetDistance, targetRadii.y, spans), 0.0, 1.0);
+    }
 
     float sdfdist_a = texture(u_image, v_tex_a).a;
     float sdfdist_b = texture(u_image, v_tex_b).a;

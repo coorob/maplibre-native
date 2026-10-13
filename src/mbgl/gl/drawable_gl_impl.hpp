@@ -9,6 +9,7 @@
 #include <mbgl/gl/vertex_array.hpp>
 #include <mbgl/platform/gl_functions.hpp>
 #include <mbgl/shaders/segment.hpp>
+#include <mbgl/shaders/symbol_layer_ubo.hpp>
 #include <mbgl/renderer/paint_parameters.hpp>
 #include <mbgl/util/mat4.hpp>
 
@@ -40,6 +41,7 @@ public:
     std::vector<gfx::UniqueVertexBufferResource> attributeBuffers;
 
     UniformBufferArrayGL uniformBuffers;
+    std::optional<shaders::SymbolTerrainOcclusionUBO> terrainSymbolOcclusion;
 
     gfx::DepthMode depthMode = gfx::DepthMode::disabled();
     gfx::StencilMode stencilMode;

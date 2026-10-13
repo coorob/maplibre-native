@@ -1,4 +1,8 @@
+#include <mbgl/renderer/terrain_perf_diagnostic.hpp>
 #include <mbgl/text/placement.hpp>
+#include <mbgl/renderer/render_terrain.hpp>
+#include <mbgl/renderer/terrain_symbol_projection.hpp>
+#include <cstdlib>
 
 #include <mbgl/layout/symbol_layout.hpp>
 #include <mbgl/renderer/bucket.hpp>
@@ -214,6 +218,11 @@ void Placement::placeLayer(const RenderLayer& layer, std::set<uint32_t>& seenCro
 }
 
 namespace {
+float terrainSymbolOrigin(const RenderTerrain& terrain, const TransformState& state) {
+    if (std::getenv("KLATTRA_TERRAIN_ABSOLUTE_HEIGHTS")) return 0.0f;
+    return terrain.getElevationOriginMeters().value_or(std::abs(state.getLatLng().latitude()) >= 60.0 ? 1000.0f : 0.0f);
+}
+
 Point<float> calculateVariableLayoutOffset(style::SymbolAnchorType anchor,
                                            float width,
                                            float height,
@@ -265,7 +274,8 @@ void Placement::placeSymbolBucket(const BucketPlacementData& params, std::set<ui
         std::forward_as_tuple(symbolBucket.bucketInstanceId, params.featureIndex, ctx.getOverscaledID()));
 }
 
-JointPlacement Placement::placeSymbol(const SymbolInstance& symbolInstance, const PlacementContext& ctx) {
+JointPlacement Placement::placeSymbol(const SymbolInstance& symbolInstance, const PlacementContext& originalContext) {
+    PlacementContext ctx = originalContext;
     static const JointPlacement kUnplaced(false, false, false);
     if (!symbolInstance.check(SYM_GUARD_LOC)) return kUnplaced;
     if (symbolInstance.getCrossTileID() == SymbolInstance::invalidCrossTileID) return kUnplaced;
@@ -277,7 +287,19 @@ JointPlacement Placement::placeSymbol(const SymbolInstance& symbolInstance, cons
         return kUnplaced;
     }
     const SymbolBucket& bucket = ctx.getBucket();
-    const mat4& posMatrix = ctx.getRenderTile().matrix;
+    mat4 posMatrix = ctx.getRenderTile().matrix;
+    if (terrainForPlacement && !ctx.getLayout().get<SymbolScreenSpace>()) {
+        const auto& tile = ctx.getRenderTile();
+        const auto anchor = Point<float>{symbolInstance.getAnchor().point};
+        const float elevation = terrainSymbolRenderHeight(
+            terrainForPlacement->getRenderedElevationAtLatLng(terrainSymbolAnchorLatLng(tile.id, anchor)),
+            terrainForPlacement->getExaggeration(), terrainSymbolOrigin(*terrainForPlacement, ctx.getTransformState()));
+        posMatrix = terrainSymbolMatrix(tile.nearClippedMatrix, elevation);
+        ctx.textLabelPlaneMatrix = getLabelPlaneMatrix(posMatrix, ctx.pitchTextWithMap, ctx.rotateTextWithMap,
+                                                       ctx.getTransformState(), ctx.pixelsToTileUnits);
+        ctx.iconLabelPlaneMatrix = getLabelPlaneMatrix(posMatrix, ctx.pitchIconWithMap, ctx.rotateIconWithMap,
+                                                       ctx.getTransformState(), ctx.pixelsToTileUnits);
+    }
     const auto& collisionGroup = ctx.collisionGroup;
     auto variableTextAnchors = symbolInstance.getTextAnchors();
     textBoxes.clear();
@@ -758,6 +780,16 @@ void Placement::updateLayerBuckets(const RenderLayer& layer, const TransformStat
     }
 }
 
+void Placement::updateLayerTerrainSymbols(const RenderLayer& layer,
+                                           const TransformState& state,
+                                           const RenderTerrain* terrain) const {
+    for (const auto& item : layer.getPlacementData()) {
+        if (!item.sortKeyRange || item.sortKeyRange->isFirstRange()) {
+            static_cast<SymbolBucket&>(item.bucket.get()).updateTerrainVertices(*this, state, item.tile, terrain);
+        }
+    }
+}
+
 namespace {
 Point<float> calculateVariableRenderShift(style::SymbolAnchorType anchor,
                                           float width,
@@ -775,7 +807,8 @@ Point<float> calculateVariableRenderShift(style::SymbolAnchorType anchor,
 
 bool Placement::updateBucketDynamicVertices(SymbolBucket& bucket,
                                             const TransformState& state,
-                                            const RenderTile& tile) const {
+                                            const RenderTile& tile,
+                                            const RenderTerrain* terrain) const {
     using namespace style;
     const auto& layout = *bucket.layout;
     const bool alongLine = layout.get<SymbolPlacement>() != SymbolPlacementType::Point;
@@ -784,6 +817,47 @@ bool Placement::updateBucketDynamicVertices(SymbolBucket& bucket,
                                    (bucket.allowVerticalPlacement || hasVariableAnchors) &&
                                    (bucket.hasIconData() || bucket.hasSdfIconData());
     bool result = false;
+    SymbolElevationFunction elevation;
+    if (terrain) {
+        terrain_perf::Scope terrainPerf(terrain_perf::Phase::HeightStreams);
+        terrain_perf::count(terrain_perf::Counter::SymbolBuckets);
+        if (!bucket.terrainElevationSampler || bucket.terrainElevationOwner != terrain ||
+            bucket.terrainElevationRevision != terrain->getElevationRevision() ||
+            bucket.terrainElevationTile != tile.id) {
+            terrain_perf::count(terrain_perf::Counter::CacheReset);
+            bucket.terrainElevationSampler.emplace(
+                tile.id, terrain->getExaggeration(), terrainSymbolOrigin(*terrain, state),
+                [terrain](const LatLng& position) { return terrain->getRenderedElevationAtLatLng(position); });
+            bucket.terrainElevationOwner = terrain;
+            bucket.terrainElevationRevision = terrain->getElevationRevision();
+            bucket.terrainElevationTile = tile.id;
+        } else {
+            bucket.terrainElevationSampler->setTransform(terrain->getExaggeration(), terrainSymbolOrigin(*terrain, state));
+        }
+        elevation = [&bucket](const Point<float>& anchor) { return (*bucket.terrainElevationSampler)(anchor); };
+        const auto fillHeights = [&](SymbolBucket::Buffer& buffer) {
+            if (buffer.vertices().empty()) return;
+            if (!buffer.sharedTerrainVertices) buffer.sharedTerrainVertices = std::make_shared<SymbolBucket::TerrainVertexVector>();
+            const auto heights = terrainSymbolVertexElevations(buffer.placedSymbols, buffer.vertices().elements(), elevation);
+            terrain_perf::count(terrain_perf::Counter::HeightVertices, heights.size());
+            auto& vertices = *buffer.sharedTerrainVertices;
+            bool changed = vertices.elements() != heights.size();
+            for (size_t i = 0; !changed && i < heights.size(); ++i) {
+                changed = std::as_const(vertices).at(i).a1[0] != heights[i];
+            }
+            if (changed) {
+                terrain_perf::count(terrain_perf::Counter::HeightRebuilds);
+                vertices.clear();
+                vertices.reserve(heights.size());
+                for (float height : heights) vertices.emplace_back(gfx::Vertex<SymbolTerrainAttributes>{{{height}}});
+                vertices.updateModified();
+            }
+        };
+        fillHeights(bucket.text);
+        fillHeights(bucket.icon);
+        fillHeights(bucket.sdfIcon);
+    }
+    const mat4& baseMatrix = terrain ? tile.nearClippedMatrix : tile.matrix;
 
     if (alongLine) {
         if (layout.get<IconRotationAlignment>() == AlignmentType::Map) {
@@ -792,25 +866,25 @@ bool Placement::updateBucketDynamicVertices(SymbolBucket& bucket,
             if (bucket.hasSdfIconData()) {
                 reprojectLineLabels(bucket.sdfIcon.dynamicVertices(),
                                     bucket.sdfIcon.placedSymbols,
-                                    tile.matrix,
+                                    baseMatrix,
                                     pitchWithMap,
                                     true /*rotateWithMap*/,
                                     keepUpright,
                                     tile,
                                     *bucket.iconSizeBinder,
-                                    state);
+                                    state, elevation);
                 result = true;
             }
             if (bucket.hasIconData()) {
                 reprojectLineLabels(bucket.icon.dynamicVertices(),
                                     bucket.icon.placedSymbols,
-                                    tile.matrix,
+                                    baseMatrix,
                                     pitchWithMap,
                                     true /*rotateWithMap*/,
                                     keepUpright,
                                     tile,
                                     *bucket.iconSizeBinder,
-                                    state);
+                                    state, elevation);
                 result = true;
             }
         }
@@ -820,13 +894,13 @@ bool Placement::updateBucketDynamicVertices(SymbolBucket& bucket,
             const bool keepUpright = layout.get<style::TextKeepUpright>();
             reprojectLineLabels(bucket.text.dynamicVertices(),
                                 bucket.text.placedSymbols,
-                                tile.matrix,
+                                baseMatrix,
                                 pitchWithMap,
                                 true /*rotateWithMap*/,
                                 keepUpright,
                                 tile,
                                 *bucket.textSizeBinder,
-                                state);
+                                state, elevation);
             result = true;
         }
     } else if (hasVariableAnchors) {
@@ -839,8 +913,8 @@ bool Placement::updateBucketDynamicVertices(SymbolBucket& bucket,
         const bool rotateWithMap = layout.get<TextRotationAlignment>() == AlignmentType::Map;
         const bool pitchWithMap = layout.get<TextPitchAlignment>() == AlignmentType::Map;
         const float pixelsToTileUnits = tile.id.pixelsToTileUnits(1.0f, static_cast<float>(state.getZoom()));
-        const auto labelPlaneMatrix = getLabelPlaneMatrix(
-            tile.matrix, pitchWithMap, rotateWithMap, state, pixelsToTileUnits);
+        const auto defaultLabelPlaneMatrix = getLabelPlaneMatrix(
+            baseMatrix, pitchWithMap, rotateWithMap, state, pixelsToTileUnits);
         std::unordered_map<std::size_t, std::pair<std::size_t, Point<float>>> placedTextShifts;
 
         for (std::size_t i = 0; i < bucket.text.placedSymbols.size(); ++i) {
@@ -862,7 +936,11 @@ bool Placement::updateBucketDynamicVertices(SymbolBucket& bucket,
                 hideGlyphs(symbol.glyphOffsets.size(), bucket.text.dynamicVertices());
             } else {
                 const Point<float> tileAnchor = symbol.anchorPoint;
-                const auto projectedAnchor = project(tileAnchor, pitchWithMap ? tile.matrix : labelPlaneMatrix);
+                const mat4 symbolMatrix = elevation ? terrainSymbolMatrix(baseMatrix, elevation(tileAnchor)) : baseMatrix;
+                const mat4 labelPlaneMatrix = elevation
+                    ? getLabelPlaneMatrix(symbolMatrix, pitchWithMap, rotateWithMap, state, pixelsToTileUnits)
+                    : defaultLabelPlaneMatrix;
+                const auto projectedAnchor = project(tileAnchor, pitchWithMap ? symbolMatrix : labelPlaneMatrix);
                 const float perspectiveRatio = 0.5f +
                                                0.5f * (state.getCameraToCenterDistance() / projectedAnchor.second);
                 float renderTextSize = evaluateSizeForFeature(partiallyEvaluatedSize, symbol) * perspectiveRatio /

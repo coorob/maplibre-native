@@ -9,6 +9,8 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <optional>
+#include <set>
 #include <string>
 #include <utility>
 
@@ -32,6 +34,25 @@ using LayerGroupBasePtr = std::shared_ptr<LayerGroupBase>;
 /// Render target class
 class RenderTarget {
 public:
+    enum class DrapeRenderDiagnosticReason : uint8_t {
+        NeverAttempted,
+        Unrenderable,
+        NoAuthoritativeRequirement,
+        WriterUnacknowledged,
+        SourceIncomplete,
+        MissingRasterFloor,
+        Published,
+    };
+
+    struct DrapeRenderDiagnostic {
+        uint64_t generation = 0;
+        DrapeRenderDiagnosticReason reason = DrapeRenderDiagnosticReason::NeverAttempted;
+        std::size_t declaredRequirements = 0;
+        std::size_t acknowledgedRequirements = 0;
+        std::size_t incompleteRequirements = 0;
+        std::string blockedSourceKey;
+    };
+
     RenderTarget(gfx::Context& context, const Size size, const gfx::TextureChannelDataType type);
     ~RenderTarget();
 
@@ -46,6 +67,11 @@ public:
 
     /// Whether the target has at least one completed texture ready to sample.
     bool hasCompletedRender() const noexcept { return completedRenderCount > 0; }
+
+    /// Whether another rendered frame can advance this target toward the
+    /// configured minimum bake count. Source-blocked attempts wait for the
+    /// external update that can change their coverage instead of self-waking.
+    bool needsDrapeRenderAttempt(uint64_t minimumCompletedRenders) const noexcept;
 
     /// Optional name used by debug tracing to identify offscreen targets.
     /// Defined in the .cpp so the name also reaches the colour attachment's
@@ -93,9 +119,37 @@ public:
     /// safely sample it. Vector-only drape content (trail lines, labels) is
     /// not enough for satellite terrain, because the mesh would otherwise
     /// sample empty colour where the raster tile has not arrived yet.
-    void requireRasterDrapeContent() noexcept { requiresRasterDrape = true; }
+    void requireRasterDrapeContent(int32_t layerIndex, const std::string& sourceID) noexcept;
     bool requiresRasterDrapeContent() const noexcept { return requiresRasterDrape; }
+    bool publishedSurfaceRequiresRasterDrapeContent() const noexcept { return publishedRequiresRasterDrape; }
+    bool publishedSurfaceHasRasterFloor() const noexcept { return publishedHasRasterFloor; }
+    bool hasRasterFloorForTile(const OverscaledTileID&,
+                               std::optional<int32_t> layerIndex = std::nullopt) const noexcept;
     bool hasRasterDrawableCoveringTile(const OverscaledTileID&) const noexcept;
+
+    /// Diagnostic-only classification of the highest single raster zoom that
+    /// completely covers this target. A complete z+1 quartet reports z+1;
+    /// an ancestor/equal fallback reports its own zoom. This reads CPU-side
+    /// drawable metadata only and never performs a GPU readback.
+    std::optional<uint8_t> diagnosticRasterSurfaceZoomForTile(
+        const OverscaledTileID&,
+        std::optional<int32_t> layerIndex = std::nullopt) const noexcept;
+
+    /// Start a new terrain-drape publication generation. Layer updates that
+    /// follow acknowledge source coverage for this generation; render() only
+    /// replaces the texture after every reported authoritative source has a
+    /// complete tile cover. Until then the previously published pixels remain
+    /// untouched.
+    void beginDrapeSurfaceFrame(uint64_t generation, const OverscaledTileID& tileID);
+    void declareDrapeSourceRequirement(uint64_t generation, const std::string& sourceKey);
+    void noteDrapeSourceCoverage(uint64_t generation, const std::string& sourceID, bool complete);
+    bool hasPublishedDrapeSurface() const noexcept { return publishedDrapeGeneration > 0; }
+    uint64_t getPublishedDrapeGeneration() const noexcept { return publishedDrapeGeneration; }
+    bool hasPendingDrapePublication() const noexcept;
+    void acknowledgeFirstDrapePublication() noexcept { firstDrapePublicationNeedsConsumerFrame = false; }
+    const DrapeRenderDiagnostic& getLastDrapeRenderDiagnostic() const noexcept {
+        return lastDrapeRenderDiagnostic;
+    }
 
     /// @brief  Get a specific layer group by index
     /// @param layerIndex index
@@ -152,6 +206,17 @@ protected:
     std::string debugName;
     bool mipmapped = false;
     bool requiresRasterDrape = false;
+    std::optional<int32_t> requiredRasterDrapeLayerIndex;
+    std::string requiredRasterDrapeSourceID;
+    bool publishedRequiresRasterDrape = false;
+    bool publishedHasRasterFloor = false;
+    uint64_t pendingDrapeGeneration = 0;
+    uint64_t publishedDrapeGeneration = 0;
+    bool firstDrapePublicationNeedsConsumerFrame = false;
+    std::optional<OverscaledTileID> pendingDrapeTileID;
+    std::map<std::string, bool> pendingDrapeSourceCoverage;
+    std::set<std::string> pendingDrapeSourceAcknowledgements;
+    DrapeRenderDiagnostic lastDrapeRenderDiagnostic;
 };
 
 } // namespace mbgl

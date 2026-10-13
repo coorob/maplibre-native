@@ -12,6 +12,7 @@
 namespace mbgl {
 
 class PatternAtlas;
+class RenderTerrain;
 class PaintParameters;
 
 namespace gfx {
@@ -89,6 +90,7 @@ class RenderTree {
 public:
     virtual ~RenderTree() = default;
     virtual void prepare() {}
+    virtual void prepareTerrainSymbols(const RenderTerrain*) const {}
     // Render items
     virtual const std::set<LayerRenderItem>& getLayerRenderItemMap() const noexcept = 0;
     virtual RenderItems getLayerRenderItems() const = 0;

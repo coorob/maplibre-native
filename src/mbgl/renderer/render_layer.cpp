@@ -201,6 +201,19 @@ void RenderLayer::changeLayerIndex(const LayerGroupBasePtr& group, int32_t newIn
 }
 
 void RenderLayer::markLayerRenderable(bool willRender, UniqueChangeRequestVec& changes) {
+#if defined(__ANDROID__) && MLN_RENDER_BACKEND_OPENGL
+    if (isRenderable && !willRender) {
+        // Out-of-zoom/hidden layers do not run prepare/update again until they
+        // reactivate. Drop their old geometry cohort instead of retaining every
+        // bucket in it through the layer and its drawables indefinitely.
+        removeAllDrawables(); // Dispatches to collision/offscreen group overrides.
+        placementData.clear();
+        renderTiles.reset();
+        renderTileIDs.clear();
+        newRenderTileIDs.clear();
+        renderTilesOwner = makeMutable<std::vector<RenderTile>>();
+    }
+#endif
     isRenderable = willRender;
 
     // This layer is either being freshly included in the renderable set or excluded
@@ -226,6 +239,16 @@ void RenderLayer::activateLayerGroup(const LayerGroupBasePtr& layerGroup_,
             // The RenderTree has determined this layer should be included in the renderable set for a frame
             changes.emplace_back(std::make_unique<AddLayerGroupRequest>(layerGroup_));
         } else {
+#if defined(__ANDROID__) && MLN_RENDER_BACKEND_OPENGL
+            if (!isRenderable) {
+                // Derived layers also deactivate separately owned groups here
+                // (for example raster image and symbol collision groups).
+                stats.drawablesRemoved += layerGroup_->clearDrawables();
+                if (layerGroup_->getType() == LayerGroupBase::Type::TileLayerGroup) {
+                    static_cast<TileLayerGroup&>(*layerGroup_).setStencilTiles(nullptr);
+                }
+            }
+#endif
             // The RenderTree is informing us we should not render anything
             changes.emplace_back(std::make_unique<RemoveLayerGroupRequest>(layerGroup_));
         }

@@ -50,6 +50,8 @@ size_t Texture2DDesc::channelStorageSize() const {
             return 2;
         case gfx::TextureChannelDataType::UnsignedByte:
             return 1;
+        case gfx::TextureChannelDataType::UnsignedShort565:
+            return 2;
         default:
             assert(!"Unknown texture channel data type");
             return 0;
@@ -57,6 +59,12 @@ size_t Texture2DDesc::channelStorageSize() const {
 }
 
 size_t Texture2DDesc::getStorageSize() const {
+    if (depthFormat != DepthTextureFormat::None) {
+        return size_t(size.width) * size.height * (depthFormat == DepthTextureFormat::Depth16 ? 2 : 4);
+    }
+    if (channelType == gfx::TextureChannelDataType::UnsignedShort565) {
+        return size.width * size.height * 2;
+    }
     return size.width * size.height * channelCount() * channelStorageSize();
 }
 
@@ -66,6 +74,7 @@ std::size_t Texture2DDescHash::operator()(const Texture2DDesc& desc) const {
     util::hash_combine(seed, desc.size.height);
     util::hash_combine(seed, std::underlying_type_t<gfx::TexturePixelType>(desc.pixelFormat));
     util::hash_combine(seed, std::underlying_type_t<gfx::TextureChannelDataType>(desc.channelType));
+    util::hash_combine(seed, std::underlying_type_t<DepthTextureFormat>(desc.depthFormat));
     return seed;
 }
 
@@ -115,7 +124,12 @@ TextureID Texture2DPool::alloc(const Texture2DDesc& desc) {
 
     // Allocate a new texture
     ++allocCount;
-    return allocateGLMemory(desc);
+    try {
+        return allocateGLMemory(desc);
+    } catch (...) {
+        context->renderingStats().numActiveTextures--;
+        throw;
+    }
 }
 
 void Texture2DPool::release(TextureID id) {
@@ -127,8 +141,13 @@ void Texture2DPool::release(TextureID id) {
     set_it->second.used.erase(id);
     set_it->second.free.insert(id);
     lru_cache.touch(id);
-    // Evict old textures if necessary
-    evict();
+    // Frame-sized depth snapshots have an explicit renderer lifetime. Do not
+    // retain their storage in the color texture pool after terrain is disabled.
+    if (desc.depthFormat != DepthTextureFormat::None) {
+        freeAllocatedGLMemory(id);
+    } else {
+        evict();
+    }
 
     ++releaseCount;
 }
@@ -145,16 +164,36 @@ TextureID Texture2DPool::allocateGLMemory(const Texture2DDesc& desc) {
     // Bind to TU 0 and upload
     context->activeTextureUnit = 0;
     context->texture[0] = id;
-    MBGL_CHECK_ERROR(glTexImage2D(GL_TEXTURE_2D,
-                                  0,
-                                  Enum<gfx::TexturePixelType>::sizedFor(desc.pixelFormat, desc.channelType),
-                                  desc.size.width,
-                                  desc.size.height,
-                                  0,
-                                  Enum<gfx::TexturePixelType>::to(desc.pixelFormat),
-                                  Enum<gfx::TextureChannelDataType>::to(desc.channelType),
-                                  nullptr));
-    if (glGetError()) {
+    auto uploadFormat = desc.channelType == gfx::TextureChannelDataType::UnsignedShort565
+                            ? GL_RGB : Enum<gfx::TexturePixelType>::to(desc.pixelFormat);
+    auto internalFormat = Enum<gfx::TexturePixelType>::sizedFor(desc.pixelFormat, desc.channelType);
+    auto uploadType = Enum<gfx::TextureChannelDataType>::to(desc.channelType);
+    switch (desc.depthFormat) {
+        case DepthTextureFormat::Depth16:
+            internalFormat = GL_DEPTH_COMPONENT16;
+            uploadFormat = GL_DEPTH_COMPONENT;
+            uploadType = GL_UNSIGNED_SHORT;
+            break;
+        case DepthTextureFormat::Depth24:
+            internalFormat = GL_DEPTH_COMPONENT24;
+            uploadFormat = GL_DEPTH_COMPONENT;
+            uploadType = GL_UNSIGNED_INT;
+            break;
+        case DepthTextureFormat::Depth24Stencil8:
+            internalFormat = GL_DEPTH24_STENCIL8;
+            uploadFormat = GL_DEPTH_STENCIL;
+            uploadType = GL_UNSIGNED_INT_24_8;
+            break;
+        case DepthTextureFormat::None:
+            break;
+    }
+    // Check this call directly: the debug error macro consumes errors before
+    // callers can fail closed. Failed allocations must not leak a GL handle.
+    glTexImage2D(GL_TEXTURE_2D, 0, internalFormat, desc.size.width, desc.size.height,
+                 0, uploadFormat, uploadType, nullptr);
+    if (glGetError() != GL_NO_ERROR) {
+        glDeleteTextures(1, &id);
+        context->texture[0].setDirty();
         throw std::bad_alloc();
     }
 

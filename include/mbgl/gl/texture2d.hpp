@@ -2,6 +2,7 @@
 
 #include <mbgl/gfx/texture2d.hpp>
 #include <mbgl/gl/object.hpp>
+#include <mbgl/gl/resource_pool.hpp>
 #include <mbgl/platform/gl_functions.hpp>
 #include <mbgl/util/image.hpp>
 
@@ -46,6 +47,9 @@ public: // gfx::Texture2D
     bool needsUpload() const noexcept override { return !!image; };
 
 public:
+    // GL-only raw-depth storage; must be selected before allocation.
+    Texture2D& setDepthFormat(DepthTextureFormat) noexcept;
+
     /// @brief Get the OpenGL handle ID for the underlying resource
     /// @return GLuint
     platform::GLuint getTextureID() const noexcept;
@@ -70,6 +74,7 @@ private:
     std::unique_ptr<UniqueTexture> texture;
 
     SamplerState samplerState{};
+    DepthTextureFormat depthFormat{DepthTextureFormat::None};
     gfx::TexturePixelType pixelFormat{gfx::TexturePixelType::RGBA};
     gfx::TextureChannelDataType channelType{gfx::TextureChannelDataType::UnsignedByte};
 

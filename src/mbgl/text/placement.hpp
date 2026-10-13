@@ -12,6 +12,7 @@
 namespace mbgl {
 
 class SymbolBucket;
+class RenderTerrain;
 class SymbolInstance;
 using SymbolInstanceReferences = std::vector<std::reference_wrapper<const SymbolInstance>>;
 class UpdateParameters;
@@ -123,6 +124,9 @@ public:
     virtual ~Placement();
     virtual void placeLayers(const RenderLayerReferences&);
     void updateLayerBuckets(const RenderLayer&, const TransformState&, bool updateOpacities) const;
+    void updateLayerTerrainSymbols(const RenderLayer&, const TransformState&, const RenderTerrain*) const;
+    // Set only for the synchronous Android GL collision-placement call.
+    void setTerrainForPlacement(const RenderTerrain* terrain) { terrainForPlacement = terrain; }
     virtual float symbolFadeChange(TimePoint now) const;
     virtual bool hasTransitions(TimePoint now) const;
     virtual bool transitionsEnabled() const;
@@ -171,7 +175,8 @@ protected:
     }
 
     // Returns `true` if bucket vertices were updated; returns `false` otherwise.
-    bool updateBucketDynamicVertices(SymbolBucket&, const TransformState&, const RenderTile& tile) const;
+    bool updateBucketDynamicVertices(SymbolBucket&, const TransformState&, const RenderTile& tile,
+                                     const RenderTerrain* terrain = nullptr) const;
     void updateBucketOpacities(SymbolBucket&, const TransformState&, std::set<uint32_t>&) const;
     void markUsedJustification(SymbolBucket&,
                                style::TextVariableAnchorType,
@@ -181,6 +186,7 @@ protected:
     const Placement* getPrevPlacement() const { return prevPlacement ? prevPlacement->get() : nullptr; }
     bool isTiltedView() const;
 
+    const RenderTerrain* terrainForPlacement = nullptr;
     std::shared_ptr<const UpdateParameters> updateParameters;
     CollisionIndex collisionIndex;
 

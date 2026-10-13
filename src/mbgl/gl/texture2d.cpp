@@ -20,13 +20,23 @@ Texture2D& Texture2D::setSamplerConfiguration(const SamplerState& samplerState_)
 }
 
 Texture2D& Texture2D::setFormat(gfx::TexturePixelType pixelFormat_, gfx::TextureChannelDataType channelType_) noexcept {
-    if (pixelFormat_ == pixelFormat && channelType_ == channelType) {
+    if (pixelFormat_ == pixelFormat && channelType_ == channelType && depthFormat == DepthTextureFormat::None) {
         return *this;
     }
 
     assert(!texture);
+    depthFormat = DepthTextureFormat::None;
     pixelFormat = pixelFormat_;
     channelType = channelType_;
+    storageDirty = true;
+    return *this;
+}
+
+Texture2D& Texture2D::setDepthFormat(DepthTextureFormat format) noexcept {
+    assert(!texture && format != DepthTextureFormat::None);
+    depthFormat = format;
+    pixelFormat = gfx::TexturePixelType::Depth;
+    channelType = gfx::TextureChannelDataType::UnsignedByte;
     storageDirty = true;
     return *this;
 }
@@ -47,6 +57,9 @@ size_t Texture2D::getDataSize() const noexcept {
 }
 
 size_t Texture2D::getPixelStride() const noexcept {
+    if (depthFormat != DepthTextureFormat::None) {
+        return depthFormat == DepthTextureFormat::Depth16 ? 2 : 4;
+    }
     switch (channelType) {
         case gfx::TextureChannelDataType::UnsignedByte:
             return 1 * numChannels();
@@ -54,6 +67,8 @@ size_t Texture2D::getPixelStride() const noexcept {
             return 2 * numChannels();
         case gfx::TextureChannelDataType::Float:
             return 4 * numChannels();
+        case gfx::TextureChannelDataType::UnsignedShort565:
+            return 2;
         default:
             return 0;
     }
@@ -64,6 +79,7 @@ size_t Texture2D::numChannels() const noexcept {
         case gfx::TexturePixelType::RGBA:
             return 4;
         case gfx::TexturePixelType::Alpha:
+        case gfx::TexturePixelType::Depth:
             return 1;
         default:
             return 0;
@@ -74,7 +90,7 @@ void Texture2D::allocateTexture() {
     MLN_TRACE_FUNC();
 
     // Create a new texture object
-    auto obj = context.createUniqueTexture(size, pixelFormat, channelType);
+    auto obj = context.createUniqueTexture(size, pixelFormat, channelType, depthFormat);
     texture = std::make_unique<UniqueTexture>(std::move(obj));
 }
 
@@ -102,6 +118,9 @@ platform::GLuint Texture2D::getTextureID() const noexcept {
 void Texture2D::updateSamplerConfiguration() noexcept {
     using namespace platform;
     samplerStateDirty = false;
+    if (depthFormat != DepthTextureFormat::None) {
+        MBGL_CHECK_ERROR(glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_MODE, GL_NONE));
+    }
 
     MBGL_CHECK_ERROR(glTexParameteri(GL_TEXTURE_2D,
                                      GL_TEXTURE_MIN_FILTER,
@@ -180,13 +199,16 @@ void Texture2D::uploadSubRegion(const void* pixelData, const Size& size_, uint16
     context.activeTextureUnit = 0;
     context.texture[0] = getTextureID();
     context.pixelStoreUnpack = {1};
+    const auto uploadFormat = channelType == gfx::TextureChannelDataType::UnsignedShort565
+                                  ? GL_RGB
+                                  : Enum<gfx::TexturePixelType>::to(pixelFormat);
     MBGL_CHECK_ERROR(glTexSubImage2D(GL_TEXTURE_2D,
                                      0,
                                      xOffset,
                                      yOffset,
                                      size_.width,
                                      size_.height,
-                                     Enum<gfx::TexturePixelType>::to(pixelFormat),
+                                     uploadFormat,
                                      Enum<gfx::TextureChannelDataType>::to(channelType),
                                      pixelData));
 

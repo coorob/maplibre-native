@@ -17,6 +17,12 @@ class RendererObserver;
 class RenderStaticData;
 class RenderTree;
 
+#if defined(__ANDROID__) && MLN_RENDER_BACKEND_OPENGL
+namespace gl {
+class TerrainSymbolDepthSnapshot;
+}
+#endif
+
 namespace gfx {
 class RendererBackend;
 class ShadeRegistry;
@@ -54,6 +60,9 @@ private:
     const float pixelRatio;
     std::unique_ptr<RenderStaticData> staticData;
     gfx::DynamicTextureAtlasPtr dynamicTextureAtlas;
+#if defined(__ANDROID__) && MLN_RENDER_BACKEND_OPENGL
+    std::unique_ptr<gl::TerrainSymbolDepthSnapshot> terrainSymbolDepthSnapshot;
+#endif
     bool styleLoaded = false;
 
     enum class RenderState {

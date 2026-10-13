@@ -35,6 +35,22 @@ TEST(OffscreenTexture, EmptyRed) {
     test::checkImage("test/fixtures/offscreen_texture/empty-red", image, 0, 0);
 }
 
+TEST(OffscreenTexture, ReportsRequestedSize) {
+    if (gfx::Backend::GetType() != gfx::Backend::Type::OpenGL) {
+        return;
+    }
+
+    gl::HeadlessBackend backend({32, 32});
+    gfx::BackendScope scope{backend};
+    auto& context = static_cast<gl::Context&>(backend.getContext());
+
+    for (const Size requested : {Size{512, 512}, Size{1024, 1024}, Size{1536, 1536}}) {
+        gl::OffscreenTexture offscreenTexture(context, requested);
+        EXPECT_EQ(requested.width, offscreenTexture.getSize().width);
+        EXPECT_EQ(requested.height, offscreenTexture.getSize().height);
+    }
+}
+
 struct Shader {
     Shader(const GLchar* vertex, const GLchar* fragment) {
         program = MBGL_CHECK_ERROR(glCreateProgram());

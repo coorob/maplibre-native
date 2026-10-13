@@ -71,17 +71,32 @@ void FillLayerTweaker::execute(LayerGroupBase& layerGroup, const PaintParameters
         const UnwrappedTileID tileID = drawable.getTileID()->toUnwrapped();
 
         auto* binders = static_cast<FillBinders*>(drawable.getBinders());
-        const auto* tile = drawable.getRenderTile();
-        if (!binders || !tile) {
+        bool needsRenderTile = true;
+#if defined(__ANDROID__) && MLN_RENDER_BACKEND_OPENGL
+        const auto variant = static_cast<RenderFillLayer::FillVariant>(drawable.getType());
+        // Plain drape geometry retains its own bucket/binders. Only pattern
+        // variants need the tile snapshot for atlas positions; keeping the
+        // whole source cohort here otherwise retains unrelated old geometry.
+        needsRenderTile = !drapeTargetID ||
+                          (variant != RenderFillLayer::FillVariant::Fill &&
+                           variant != RenderFillLayer::FillVariant::FillOutline &&
+                           variant != RenderFillLayer::FillVariant::FillOutlineTriangulated);
+#endif
+        const auto* tile = needsRenderTile ? drawable.getRenderTile() : nullptr;
+        if (!binders || (needsRenderTile && !tile)) {
             assert(false);
             return;
         }
 
-        const auto& fillPatternValue = evaluated.get<FillPattern>().constantOr(
-            Faded<expression::Image>{.from = "", .to = ""});
-        const auto patternPosA = tile->getPattern(fillPatternValue.from.id());
-        const auto patternPosB = tile->getPattern(fillPatternValue.to.id());
-        binders->setPatternParameters(patternPosA, patternPosB, crossfade);
+        std::optional<ImagePosition> patternPosA;
+        std::optional<ImagePosition> patternPosB;
+        if (tile) {
+            const auto& fillPatternValue = evaluated.get<FillPattern>().constantOr(
+                Faded<expression::Image>{.from = "", .to = ""});
+            patternPosA = tile->getPattern(fillPatternValue.from.id());
+            patternPosB = tile->getPattern(fillPatternValue.to.id());
+            binders->setPatternParameters(patternPosA, patternPosB, crossfade);
+        }
 
         constexpr bool inViewportPixelUnits = false; // from RenderTile::translatedMatrix
         constexpr bool nearClipped = false;

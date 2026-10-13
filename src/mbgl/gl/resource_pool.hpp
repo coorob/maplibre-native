@@ -15,10 +15,14 @@ namespace gl {
 
 class Context;
 
+// Explicit GL depth storage keeps snapshots format-compatible with the source FBO.
+enum class DepthTextureFormat { None, Depth16, Depth24, Depth24Stencil8 };
+
 struct Texture2DDesc {
     Size size;
     gfx::TexturePixelType pixelFormat;
     gfx::TextureChannelDataType channelType;
+    DepthTextureFormat depthFormat = DepthTextureFormat::None;
 
     size_t channelCount() const;
     size_t channelStorageSize() const;
@@ -30,7 +34,8 @@ struct Texture2DDescHash {
 };
 
 inline bool operator==(const Texture2DDesc& desc1, const Texture2DDesc& desc2) {
-    return desc1.size == desc2.size && desc1.pixelFormat == desc2.pixelFormat && desc1.channelType == desc2.channelType;
+    return desc1.size == desc2.size && desc1.pixelFormat == desc2.pixelFormat && desc1.channelType == desc2.channelType &&
+           desc1.depthFormat == desc2.depthFormat;
 }
 
 inline bool operator!=(const Texture2DDesc& desc1, const Texture2DDesc& desc2) {

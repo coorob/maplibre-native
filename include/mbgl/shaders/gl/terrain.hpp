@@ -53,14 +53,22 @@ float decodeElevation(vec4 demSample) {
 float sampleElevationBilinear(sampler2D tex, vec2 uv) {
     ivec2 textureSize2D = textureSize(tex, 0);
     vec2 texSize = vec2(textureSize2D);
-    vec2 texelCoord = clamp(uv, vec2(0.0), vec2(1.0)) * texSize - 0.5;
+    // DEMData stores one neighbor-border texel around the source tile.
+    // uv is SOURCE-geographic UV (after any ancestor remap), so convert
+    // into the interior N texels before filtering the N+2 padded upload.
+    // The 1x1 empty-DEM placeholder has no border and keeps ordinary UVs.
+    bool padded = all(greaterThan(textureSize2D, ivec2(2)));
+    vec2 contentSize = padded ? texSize - vec2(2.0) : texSize;
+    vec2 texelCoord = clamp(uv, vec2(0.0), vec2(1.0)) * contentSize +
+                      (padded ? vec2(0.5) : vec2(-0.5));
     vec2 floorTexel = floor(texelCoord);
     vec2 frac = texelCoord - floorTexel;
     ivec2 maxTexel = textureSize2D - ivec2(1);
-    ivec2 texel00 = clamp(ivec2(floorTexel), ivec2(0), maxTexel);
-    ivec2 texel10 = min(texel00 + ivec2(1, 0), maxTexel);
-    ivec2 texel01 = min(texel00 + ivec2(0, 1), maxTexel);
-    ivec2 texel11 = min(texel00 + ivec2(1, 1), maxTexel);
+    ivec2 baseTexel = ivec2(floorTexel);
+    ivec2 texel00 = clamp(baseTexel, ivec2(0), maxTexel);
+    ivec2 texel10 = clamp(baseTexel + ivec2(1, 0), ivec2(0), maxTexel);
+    ivec2 texel01 = clamp(baseTexel + ivec2(0, 1), ivec2(0), maxTexel);
+    ivec2 texel11 = clamp(baseTexel + ivec2(1, 1), ivec2(0), maxTexel);
     float e00 = decodeElevation(texelFetch(tex, texel00, 0));
     float e10 = decodeElevation(texelFetch(tex, texel10, 0));
     float e01 = decodeElevation(texelFetch(tex, texel01, 0));
@@ -141,14 +149,22 @@ float decodeElevation(vec4 demSample) {
 float sampleElevationBilinear(sampler2D tex, vec2 uv) {
     ivec2 textureSize2D = textureSize(tex, 0);
     vec2 texSize = vec2(textureSize2D);
-    vec2 texelCoord = clamp(uv, vec2(0.0), vec2(1.0)) * texSize - 0.5;
+    // DEMData stores one neighbor-border texel around the source tile.
+    // uv is SOURCE-geographic UV (after any ancestor remap), so convert
+    // into the interior N texels before filtering the N+2 padded upload.
+    // The 1x1 empty-DEM placeholder has no border and keeps ordinary UVs.
+    bool padded = all(greaterThan(textureSize2D, ivec2(2)));
+    vec2 contentSize = padded ? texSize - vec2(2.0) : texSize;
+    vec2 texelCoord = clamp(uv, vec2(0.0), vec2(1.0)) * contentSize +
+                      (padded ? vec2(0.5) : vec2(-0.5));
     vec2 floorTexel = floor(texelCoord);
     vec2 frac = texelCoord - floorTexel;
     ivec2 maxTexel = textureSize2D - ivec2(1);
-    ivec2 texel00 = clamp(ivec2(floorTexel), ivec2(0), maxTexel);
-    ivec2 texel10 = min(texel00 + ivec2(1, 0), maxTexel);
-    ivec2 texel01 = min(texel00 + ivec2(0, 1), maxTexel);
-    ivec2 texel11 = min(texel00 + ivec2(1, 1), maxTexel);
+    ivec2 baseTexel = ivec2(floorTexel);
+    ivec2 texel00 = clamp(baseTexel, ivec2(0), maxTexel);
+    ivec2 texel10 = clamp(baseTexel + ivec2(1, 0), ivec2(0), maxTexel);
+    ivec2 texel01 = clamp(baseTexel + ivec2(0, 1), ivec2(0), maxTexel);
+    ivec2 texel11 = clamp(baseTexel + ivec2(1, 1), ivec2(0), maxTexel);
     float e00 = decodeElevation(texelFetch(tex, texel00, 0));
     float e10 = decodeElevation(texelFetch(tex, texel10, 0));
     float e01 = decodeElevation(texelFetch(tex, texel01, 0));
@@ -162,11 +178,11 @@ bool terrainReliefValidElevation(float elevation) {
     return elevation > -500.0 && elevation < 9000.0;
 }
 
-float terrainReliefSampleOrCenter(float sample, float center) {
-    if (!terrainReliefValidElevation(sample)) {
+float terrainReliefSampleOrCenter(float elevationSample, float center) {
+    if (!terrainReliefValidElevation(elevationSample)) {
         return center;
     }
-    return abs(sample - center) > 900.0 ? center : sample;
+    return abs(elevationSample - center) > 900.0 ? center : elevationSample;
 }
 
 float terrainReliefShade(sampler2D demTexture, vec2 mapUV, float metersPerTile) {
@@ -220,12 +236,17 @@ void main() {
     // Sample the drape target for topo colour, then apply DEM-derived
     // relief in the final terrain pass instead of baking hillshade into
     // the drape texture.
-    // Note: Y-coordinate is flipped (1.0 - y) to match OpenGL convention.
+    // OpenGL drape targets are already written Y-flipped by
+    // LayerTweaker::getDrapeMatrix(): geographic north lands at texture
+    // v=0. Sampling raw v_drapeUV therefore restores the original tile
+    // orientation. Flipping here a second time vertically mirrors every
+    // target and puts imagery, water, trails, and land colour on the wrong
+    // terrain relief. Metal keeps its backend-specific final-sample flip.
     // `v_drapeUV` is normally the ideal-tile UV, but can temporarily remap
     // into a ready parent drape target while a zoomed-in child target warms.
     // `v_mapUV` remains the DEM parent-fallback sub-rect and is used only
     // for elevation/relief.
-    vec4 mapColor = texture(u_map_texture, vec2(v_drapeUV.x, 1.0 - v_drapeUV.y));
+    vec4 mapColor = texture(u_map_texture, v_drapeUV);
     if (mapColor.a > 0.01 || max(max(mapColor.r, mapColor.g), mapColor.b) > 0.001) {
         float shade = terrainReliefShade(u_dem_texture, v_mapUV, v_meters_per_tile);
         fragColor = vec4(clamp(mapColor.rgb * shade, vec3(0.0), vec3(1.0)), 1.0);

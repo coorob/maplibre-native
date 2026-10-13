@@ -1,3 +1,4 @@
+#include <mbgl/renderer/terrain_perf_diagnostic.hpp>
 #include <mbgl/geometry/dem_data.hpp>
 #include <mbgl/math/clamp.hpp>
 
@@ -52,6 +53,12 @@ DEMData::DEMData(const PremultipliedImage& _image, Tileset::RasterEncoding _enco
 void DEMData::backfillBorder(const DEMData& borderTileData, int8_t dx, int8_t dy) {
     auto& o = borderTileData;
 
+#if defined(__ANDROID__) && MLN_RENDER_BACKEND_OPENGL
+    if (dim <= 0 || dim != o.dim || dx < -1 || dx > 1 || dy < -1 || dy > 1 || (!dx && !dy)) {
+        return;
+    }
+#endif
+
     // Tiles from the same source should always be of the same dimensions.
     assert(dim == o.dim);
 
@@ -77,6 +84,30 @@ void DEMData::backfillBorder(const DEMData& borderTileData, int8_t dx, int8_t dy
     int32_t ox = -dx * dim;
     int32_t oy = -dy * dim;
 
+#if defined(__ANDROID__) && MLN_RENDER_BACKEND_OPENGL
+    // A held terrain binding can keep the previous GPU upload and its CPU
+    // elevation image. Preserve that matching snapshot when border pixels
+    // change; a revision counter alone cannot undo an in-place mutation.
+    if (image.use_count() > 1) {
+        const auto* current = reinterpret_cast<const uint32_t*>(image->data.get());
+        const auto* neighbor = reinterpret_cast<const uint32_t*>(o.image->data.get());
+        bool changed = false;
+        for (int32_t y = yMin; y < yMax && !changed; y++) {
+            for (int32_t x = xMin; x < xMax; x++) {
+                if (current[idx(x, y)] != neighbor[idx(x + ox, y + oy)]) {
+                    changed = true;
+                    break;
+                }
+            }
+        }
+        if (!changed) return;
+        terrain_perf::Scope terrainPerf(terrain_perf::Phase::DEMClone);
+        terrain_perf::count(terrain_perf::Counter::DEMClones);
+        terrain_perf::count(terrain_perf::Counter::DEMCloneBytes, image->bytes());
+        image = std::make_shared<PremultipliedImage>(image->clone());
+    }
+#endif
+
     auto* dest = reinterpret_cast<uint32_t*>(image->data.get());
     auto* source = reinterpret_cast<uint32_t*>(o.image->data.get());
 
@@ -85,6 +116,7 @@ void DEMData::backfillBorder(const DEMData& borderTileData, int8_t dx, int8_t dy
             dest[idx(x, y)] = source[idx(x + ox, y + oy)];
         }
     }
+    ++revision;
 }
 
 int32_t DEMData::get(const int32_t x, const int32_t y) const {

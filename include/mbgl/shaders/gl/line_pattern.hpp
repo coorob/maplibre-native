@@ -65,11 +65,13 @@ layout (std140) uniform LineEvaluatedPropsUBO {
     mediump float u_width;
     lowp float u_floorwidth;
     lowp float props_pad1;
-    lowp float props_pad2;
+    highp float u_drape_texels_per_pixel;
 };
 
 out vec2 v_normal;
 out vec2 v_width2;
+// Unpadded outer/inner radii, in camera pixels.
+out highp vec2 v_drape_width;
 out float v_linesofar;
 out float v_gamma_scale;
 
@@ -138,7 +140,10 @@ mediump vec4 pattern_to = u_pattern_to;
 
     // the distance over which the line edge fades out.
     // Retina devices need a smaller distance to avoid aliasing.
-    float ANTIALIASING = 1.0 / DEVICE_PIXEL_RATIO / 2.0;
+    bool draped = u_drape_texels_per_pixel > 0.0;
+    float ANTIALIASING = draped
+        ? 0.70710678118 / u_drape_texels_per_pixel + 0.5 * max(blur, 0.0)
+        : 1.0 / DEVICE_PIXEL_RATIO / 2.0;
 
     vec2 a_extrude = a_data.xy - 128.0;
     float a_direction = mod(a_data.z, 4.0) - 1.0;
@@ -158,6 +163,11 @@ mediump vec4 pattern_to = u_pattern_to;
     gapwidth = gapwidth / 2.0;
     float halfwidth = width / 2.0;
     offset = -1.0 * offset;
+
+    // Half a texel diagonal covers the pixel footprint at every line angle.
+    // The larger drape skirt lets subtexel strokes reach raster samples.
+    // Save the original stroke bounds so filtering cannot widen the stroke.
+    v_drape_width = vec2(gapwidth + halfwidth * (gapwidth > 0.0 ? 2.0 : 1.0), gapwidth);
 
     float inset = gapwidth + (gapwidth > 0.0 ? ANTIALIASING : 0.0);
     float outset = gapwidth + halfwidth * (gapwidth > 0.0 ? 2.0 : 1.0) + (halfwidth == 0.0 ? 0.0 : ANTIALIASING);
@@ -204,13 +214,14 @@ layout (std140) uniform LineEvaluatedPropsUBO {
     mediump float u_width;
     lowp float u_floorwidth;
     lowp float props_pad1;
-    lowp float props_pad2;
+    highp float u_drape_texels_per_pixel;
 };
 
 uniform sampler2D u_image;
 
 in vec2 v_normal;
 in vec2 v_width2;
+in highp vec2 v_drape_width;
 in float v_linesofar;
 in float v_gamma_scale;
 
@@ -226,6 +237,24 @@ in lowp float blur;
 #ifndef HAS_UNIFORM_u_opacity
 in lowp float opacity;
 #endif
+
+// CDF of a square pixel projected onto the line normal. Its two independent
+// uniform spans make a trapezoid (a triangle at 45 degrees). This integrates
+// both edges of subtexel strokes instead of merely widening their fade ramp.
+float drapePixelCDF(float distance, vec2 spans) {
+    float a = spans.x;
+    float b = spans.y;
+    if (b < 0.0001) return clamp(0.5 + distance / a, 0.0, 1.0);
+    float tailDistance = max(0.5 * (a + b) - abs(distance), 0.0);
+    float tail = tailDistance < b ? tailDistance * tailDistance / (2.0 * a * b)
+                                  : (tailDistance - 0.5 * b) / a;
+    return distance > 0.0 ? 1.0 - tail : tail;
+}
+
+float drapeIntervalCoverage(float distance, float radius, vec2 spans) {
+    return clamp(drapePixelCDF(distance + radius, spans) -
+                 drapePixelCDF(distance - radius, spans), 0.0, 1.0);
+}
 
 void main() {
     #ifdef HAS_UNIFORM_u_pattern_from
@@ -266,6 +295,21 @@ lowp float opacity = u_opacity;
     // (v_width2.s)
     float blur2 = (blur + 1.0 / DEVICE_PIXEL_RATIO) * v_gamma_scale;
     float alpha = clamp(min(dist - (v_width2.t - blur2), v_width2.s - dist) / blur2, 0.0, 1.0);
+    if (u_drape_texels_per_pixel > 0.0) {
+        // The FBO is orthographic: use its texel footprint directly, without
+        // the main viewport's perspective gamma or device pixel ratio.
+        vec2 pixelNormal = vec2(dot(v_normal, dFdx(v_normal)), dot(v_normal, dFdy(v_normal)));
+        if (dot(pixelNormal, pixelNormal) < 0.00000001) {
+            pixelNormal = vec2(dFdx(v_normal.y), dFdy(v_normal.y));
+        }
+        pixelNormal = abs(normalize(pixelNormal));
+        vec2 spans = vec2(max(pixelNormal.x, pixelNormal.y) + max(blur, 0.0) * u_drape_texels_per_pixel,
+                          min(pixelNormal.x, pixelNormal.y));
+        float targetDistance = dist * u_drape_texels_per_pixel;
+        vec2 targetRadii = v_drape_width * u_drape_texels_per_pixel;
+        alpha = clamp(drapeIntervalCoverage(targetDistance, targetRadii.x, spans) -
+                      drapeIntervalCoverage(targetDistance, targetRadii.y, spans), 0.0, 1.0);
+    }
 
     float x_a = mod(v_linesofar / pattern_size_a.x, 1.0);
     float x_b = mod(v_linesofar / pattern_size_b.x, 1.0);

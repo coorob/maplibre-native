@@ -43,6 +43,7 @@ public:
     const gfx::VertexAttributeArray& getInstanceAttributes() const override { return instanceAttributes; }
 
     ProgramID getGLProgramID() const { return glProgram; }
+    bool usesTerrainSymbolOcclusion() const { return terrainSymbolOcclusion; }
 
 protected:
     UniqueProgram glProgram;
@@ -50,6 +51,7 @@ protected:
     VertexAttributeArrayGL vertexAttributes;
     VertexAttributeArrayGL instanceAttributes;
     SamplerLocationArray samplerLocations;
+    bool terrainSymbolOcclusion = false;
 };
 
 } // namespace gl

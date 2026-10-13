@@ -1,6 +1,11 @@
 #include <mbgl/renderer/tile_pyramid.hpp>
+#if defined(__ANDROID__)
+#include <mbgl/renderer/android_memory_sample.hpp>
+#endif
+#include <mbgl/renderer/topo_vector_cohort.hpp>
 #include <mbgl/renderer/cover_hold_budget.hpp>
 #include <mbgl/renderer/paint_parameters.hpp>
+#include <mbgl/renderer/raster_drape_cohort.hpp>
 #include <mbgl/renderer/render_source.hpp>
 #include <mbgl/renderer/tile_parameters.hpp>
 #include <mbgl/renderer/query.hpp>
@@ -60,7 +65,7 @@ size_t klattraRasterCacheScale() {
     return scale;
 }
 
-// DIAG: sample the same physical-footprint counter used by iOS jetsam while
+// Sample the same physical-footprint counter used by iOS jetsam while
 // the flat 2D RasterDEM path is active. RenderTerrain owns the older sampler,
 // but 2D never enters that code. Keep a sampled peak so the log remains useful
 // when the current footprint falls between COVERHOLD heartbeats.
@@ -82,6 +87,12 @@ KlattraMemorySample klattraMemorySample() {
             static_cast<int64_t>(std::lround(static_cast<double>(sampledPeakBytes) / bytesPerMB)),
         };
     }
+#elif defined(__ANDROID__)
+    // Android 14+ no longer delivers foreground low-memory callbacks. The
+    // existing high-water policy must have a live process measurement there
+    // too. RSS + swap is approximate and excludes some driver/GPU memory.
+    const auto memory = android_memory::sample();
+    return {memory.residentAndSwapMiB, memory.peakMiB};
 #endif
     return {};
 }
@@ -179,6 +190,16 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
                 }
             }
         }
+#if defined(__ANDROID__) && MLN_RENDER_BACKEND_OPENGL
+        // This entire source is invisible. Pressure can first arrive while it
+        // is inactive, before the active-update pressure policy is evaluated.
+        // Drop only its in-memory inactive reserve; an active update restores
+        // the bounded reserve and can reload through the existing disk cache.
+        if ((sourceImpl.type == SourceType::Raster || sourceImpl.type == SourceType::RasterDEM) &&
+            cover_hold::processPressureActive()) {
+            cache.setSize(0);
+        }
+#endif
         for (auto& entry : tiles) {
             if (!needsRelayout) {
                 // These tiles are invisible, we set optional necessity
@@ -273,6 +294,33 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
         }
     }
 
+    // Some terrain surface writers have semantically sparse overview tiles:
+    // their low-zoom parents are renderable, but intentionally omit the
+    // detail needed on a 3D Topo canvas. Keep ordinary sources unchanged;
+    // when a floor is supplied, stop the parent-fallback walk at that floor.
+    // Cameras whose ideal cover is below it clamp back to the ideal zoom.
+    Range<uint8_t> renderableZoomRange = zoomRange;
+    if (parameters.tileFallbackMinZoom > zoomRange.min) {
+        // Keep the floor active during transient empty/fragmented ideal-cover
+        // frames too. Otherwise an old z7-z9 parent can re-enter through the
+        // fade/cover-hold path for one frame and leave a coarse target-shaped
+        // patch on an otherwise detailed z10+ Topo canvas.
+        const uint8_t cameraFloor = static_cast<uint8_t>(
+            std::clamp<int32_t>(overscaledZoom, zoomRange.min, zoomRange.max));
+        uint8_t effectiveFloor = std::min<uint8_t>(
+            cameraFloor,
+            std::min<uint8_t>(parameters.tileFallbackMinZoom, zoomRange.max));
+
+        if (!idealTiles.empty()) {
+            const auto minIdeal = std::min_element(
+                idealTiles.begin(), idealTiles.end(), [](const auto& lhs, const auto& rhs) {
+                    return lhs.canonical.z < rhs.canonical.z;
+                });
+            effectiveFloor = std::min<uint8_t>(effectiveFloor, minIdeal->canonical.z);
+        }
+        renderableZoomRange.min = effectiveFloor;
+    }
+
     // Stores a list of all the tiles that we're definitely going to retain.
     // There are two kinds of tiles we need: the ideal tiles determined by the
     // tile cover. They may not yet be in use because they're still loading. In
@@ -319,6 +367,65 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
         return tiles.emplace(tileID, std::move(tile)).first->second.get();
     };
 
+    // Terrain and source covers are projected independently. At a pitched
+    // camera the official Topo vector cover can therefore miss a handful of
+    // exact terrain mesh slots even when its broader viewport cover looks
+    // complete. Add only terrain targets not already covered by a source
+    // parent or a complete child cohort. The terrain set is from the previous
+    // frame because sources update first; RenderTerrain's pending-work repaint
+    // advances the handoff until these tiles become renderable.
+    if (parameters.mode == MapMode::Continuous && parameters.terrainCoverTileIDs &&
+        !parameters.terrainCoverTileIDs->empty() && parameters.terrainCoverCohortZoom) {
+        // Android official Topo: the terrain-provided drape cohort is
+        // authoritative. It is already a non-overlapping mix of near z10
+        // detail groups and far z9 overview parents; this normalization keeps
+        // those ids unchanged while still protecting against accidental finer
+        // leaves. The generic elevation-expanded cover must not consume the
+        // budget first.
+        idealTiles = topo_vector::cohortForTerrainLeaves(*parameters.terrainCoverTileIDs,
+                                                        *parameters.terrainCoverCohortZoom);
+        if (tileRange) {
+            idealTiles.erase(std::remove_if(idealTiles.begin(),
+                                            idealTiles.end(),
+                                            [&](const auto& tileID) {
+                                                return !tileRange->contains(tileID.canonical);
+                                            }),
+                             idealTiles.end());
+        }
+        if (!idealTiles.empty()) {
+            const auto minIdeal = std::min_element(
+                idealTiles.begin(), idealTiles.end(), [](const auto& lhs, const auto& rhs) {
+                    return lhs.canonical.z < rhs.canonical.z;
+                });
+            // The generic cover used to calculate renderableZoomRange above
+            // is normally all z10. Honor the adaptive z9 parents introduced
+            // by the authoritative cohort instead of rejecting them as
+            // below the fallback floor.
+            renderableZoomRange.min = std::min(renderableZoomRange.min, minIdeal->canonical.z);
+        }
+    } else if (parameters.mode == MapMode::Continuous && parameters.terrainCoverTileIDs &&
+               !parameters.terrainCoverTileIDs->empty()) {
+        std::vector<OverscaledTileID> terrainTargets(parameters.terrainCoverTileIDs->begin(),
+                                                     parameters.terrainCoverTileIDs->end());
+        std::sort(terrainTargets.begin(), terrainTargets.end());
+
+        for (const auto& terrainTarget : terrainTargets) {
+            if (terrainTarget.canonical.z < zoomRange.min) continue;
+
+            OverscaledTileID sourceTarget = terrainTarget;
+            if (terrainTarget.canonical.z > zoomRange.max) {
+                sourceTarget = OverscaledTileID{terrainTarget.overscaledZ,
+                                                terrainTarget.wrap,
+                                                terrainTarget.canonical.scaledTo(zoomRange.max)};
+            }
+            if (tileRange && !tileRange->contains(sourceTarget.canonical)) continue;
+            if (raster_drape::coversTargetAtAnyResolution(sourceTarget, idealTiles)) continue;
+            if (parameters.tileCoverMaxTiles && idealTiles.size() >= parameters.tileCoverMaxTiles) break;
+
+            idealTiles.push_back(sourceTarget);
+        }
+    }
+
     auto previouslyRenderedTiles = std::move(renderedTiles);
     // renderTileFn erases still-rendering tiles from previouslyRenderedTiles,
     // so keep the full previous render set for 2D relief ancestor retirement.
@@ -355,7 +462,7 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
                                  renderTileFn,
                                  idealTiles,
                                  tiles,
-                                 zoomRange,
+                                 renderableZoomRange,
                                  maxParentTileOverscaleFactor);
 
     // KLATTRA cover-hold v2 (2D transition flash): mid-gesture the tile cover
@@ -438,7 +545,26 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
     // layers cannot use the main-pass stencil masks that normally de-duplicate
     // retained parent/child tiles. Keep standard holdForFade handling below,
     // but reserve the custom long-lived cover hold for network-backed sources.
-    const bool coverHoldEnabledForSource = !coverHoldDisabled && type != SourceType::GeoJSON;
+    // An authoritative terrain cohort already has an atomic continuity owner:
+    // RenderTerrain keeps the last fully published drape cover until every new
+    // target is ready. Holding a second previous vector cohort here retains
+    // decoded contour/fill buckets and fans them into canvases that cannot be
+    // part of the next exact z10 publication. Ordinary source fades still run
+    // through holdForFade below; suppress only the custom long-lived hold.
+    const bool exactTerrainCohort = parameters.terrainCoverCohortZoom.has_value();
+    if (exactTerrainCohort) {
+        // The first terrain frame can request a broad generic vector cover
+        // before RenderTerrain publishes its compact authoritative cohort.
+        // Reusing matching active tiles is useful, but retaining every
+        // discarded contour/fill bucket in the ordinary inactive LRU keeps a
+        // second near-screenful of Topo data alive and defeats the cohort's
+        // memory bound. Active and fade-held tiles remain in `tiles`; only
+        // inactive terrain-only Topo entries are released here and below.
+        cache.setSize(0);
+        cache.clear();
+    }
+    const bool coverHoldEnabledForSource =
+        !coverHoldDisabled && type != SourceType::GeoJSON && !exactTerrainCohort;
 
     const bool boundedRasterDEMCoverHold = coverHoldEnabledForSource && type == SourceType::RasterDEM;
     const std::size_t normalRasterDEMCoverHoldBudget =
@@ -462,7 +588,7 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
     if (highWaterHalfHoldEnabled) {
         highWaterMemory = klattraMemorySample();
         if (!rasterDEMPressureHalfHold && highWaterMemory.physicalMB >= rasterDEMHighWaterHalfHoldMB) {
-            // Match the explicit iOS memory-pressure path: shed cached tiles
+            // Match the explicit platform memory-pressure path: shed cached tiles
             // immediately, then keep the reduced cover-hold budget sticky for
             // the rest of this source's lifetime.
             cache.clear();
@@ -512,16 +638,21 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
         boundedRasterDEMCoverHold && halfHoldEnabled && rasterDEMPressureHalfHold;
     const bool boundedNonRasterDEMCoverHold =
         nonRasterDEMPressureCapEnabled && nonRasterDEMPressureCoverHold;
-    const bool boundedCoverHold = boundedRasterDEMCoverHold || boundedNonRasterDEMCoverHold;
-    const std::size_t coverHoldBudget = boundedRasterDEMCoverHold
-                                            ? (pressureHalfHold
-                                                   ? cover_hold::rasterDEMPressureCoverHoldBudget(
-                                                         normalRasterDEMCoverHoldBudget)
-                                                   : normalRasterDEMCoverHoldBudget)
-                                            : (boundedNonRasterDEMCoverHold
-                                                   ? cover_hold::nonRasterDEMPressureCoverHoldBudget(
-                                                         configuredNonRasterDEMPressureCap, idealTiles.size())
-                                                   : 0);
+    const bool boundedIdealCohortCoverHold =
+        coverHoldEnabledForSource && parameters.boundCoverHoldToIdealCohort;
+    const bool boundedCoverHold =
+        boundedRasterDEMCoverHold || boundedNonRasterDEMCoverHold || boundedIdealCohortCoverHold;
+    std::size_t coverHoldBudget = 0;
+    if (boundedRasterDEMCoverHold) {
+        coverHoldBudget = pressureHalfHold
+                              ? cover_hold::rasterDEMPressureCoverHoldBudget(normalRasterDEMCoverHoldBudget)
+                              : normalRasterDEMCoverHoldBudget;
+    } else if (boundedIdealCohortCoverHold) {
+        coverHoldBudget = idealTiles.size();
+    } else if (boundedNonRasterDEMCoverHold) {
+        coverHoldBudget = cover_hold::nonRasterDEMPressureCoverHoldBudget(configuredNonRasterDEMPressureCap,
+                                                                          idealTiles.size());
+    }
     const std::size_t recentIdealCap = boundedCoverHold ? cover_hold::recentIdealBudget(coverHoldBudget) : 0;
     const bool retireLoadedRasterDEMAncestors =
         boundedRasterDEMCoverHold && parameters.usedByTerrain && rasterDEMRetireLoadedAncestors;
@@ -567,6 +698,11 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
     std::vector<cover_hold::Candidate> boundedCandidates;
     for (auto previouslyRenderedTile : previouslyRenderedTiles) {
         Tile& tile = previouslyRenderedTile.second;
+        if (previouslyRenderedTile.first.canonical.z < renderableZoomRange.min) {
+            // Do not let fade/continuity retention re-introduce a parent that
+            // the terrain writer's semantic fallback floor excluded above.
+            continue;
+        }
         tile.markRenderedPreviously();
         if (tile.holdForFade()) {
             // Since it was rendered in the last frame, we know we have it
@@ -744,7 +880,9 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
         }
     }
 
-    if (type != SourceType::Annotations && cacheEnabled) {
+    if (exactTerrainCohort) {
+        cache.setSize(0);
+    } else if (type != SourceType::Annotations && cacheEnabled) {
         auto conservativeCacheSize = static_cast<size_t>(
             std::max(static_cast<double>(parameters.transformState.getSize().width) / tileSize, 1.0) *
             std::max(static_cast<double>(parameters.transformState.getSize().height) / tileSize, 1.0) *
@@ -754,6 +892,16 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
         if (type == SourceType::Raster) {
             conservativeCacheSize *= klattraRasterCacheScale();
         }
+#if defined(__ANDROID__) && MLN_RENDER_BACKEND_OPENGL
+        // A one-time pressure clear must not refill the normal inactive cache
+        // on the next update. Reuse the active pressure retention allowance:
+        // one ideal-sized raster reserve, or the reduced DEM reserve. Visible,
+        // loading, fade and fallback tiles are already protected by retain.
+        if ((type == SourceType::Raster && boundedNonRasterDEMCoverHold) ||
+            (type == SourceType::RasterDEM && pressureHalfHold)) {
+            conservativeCacheSize = std::min(conservativeCacheSize, coverHoldBudget);
+        }
+#endif
         cache.setSize(conservativeCacheSize);
     } else {
         cache.setSize(0);

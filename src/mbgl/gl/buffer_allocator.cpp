@@ -79,8 +79,8 @@ public:
         // a monotonic allocation scheme on our buffers and recycle the whole buffer at once.
         size_t tombstones = 0;
 
-        // Used to drive defragmentation, occupancy is a measure of the number of bytes held by
-        // living references
+        // Used to drive defragmentation, occupancy includes each living reference's
+        // alignment padding, which cannot be shared with another allocation.
         size_t occupancyBytes = 0;
 
         // We need to know the index to ourselves in the main buffer list
@@ -185,7 +185,7 @@ public:
             }
 
             refs.emplace_back(bufObj, bufferIndex, bufPtr, size_);
-            occupancyBytes += size_;
+            occupancyBytes += align(size_, allocator.sharedBufferAlignment);
             return &refs.back();
         }
 
@@ -208,16 +208,20 @@ public:
 #endif
             bufObj->setOwner(nullptr);
 
-            assert(occupancyBytes >= bufObj->getSize());
-            occupancyBytes -= bufObj->getSize();
+            const auto reservedSize = align(bufObj->getSize(), allocator.sharedBufferAlignment);
+            assert(occupancyBytes >= reservedSize);
+            occupancyBytes -= reservedSize;
         }
 
         // Align a pointer on a set block size
         static size_t align(size_t ptr, size_t alignment) {
-            if (ptr == alignment) {
-                return ptr;
+            assert(alignment > 0);
+            // Preserve the allocator's empty-payload contract: glMapBufferRange
+            // requires a positive length, so even an empty ref owns one slot.
+            if (ptr == 0) {
+                return alignment;
             }
-            return ((ptr + alignment) / alignment) * alignment;
+            return (ptr / alignment + (ptr % alignment != 0)) * alignment;
         }
     };
 
@@ -312,7 +316,12 @@ public:
         // Phase two: Consolidate fragmentation
         MBGL_CHECK_ERROR(glBindBuffer(type, buffers[recycleIndex].id));
 
-        for (auto it = inFlightBuffers.begin(); it != inFlightBuffers.end();) {
+        // Moving refs can fill and append destination pages to this list. Process
+        // only pages present at entry, so a live allocation moves at most once
+        // in this pass even when a newly filled page meets the threshold.
+        auto remainingBuffers = inFlightBuffers.size();
+        for (auto it = inFlightBuffers.begin(); it != inFlightBuffers.end() && remainingBuffers > 0;
+             --remainingBuffers) {
             auto& fragBuffer = buffers[*it];
             if (fragBuffer.occupancyBytes > FragmentedOccupancyLevel) {
                 ++it;

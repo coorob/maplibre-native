@@ -64,6 +64,7 @@ private:
 
 protected:
     gfx::UniformBufferPtr evaluatedPropsUniformBuffer;
+    float evaluatedDrapeTexelDensity = 0.0f;
 
 #if MLN_UBO_CONSOLIDATION
     gfx::UniformBufferPtr drawableUniformBuffer;

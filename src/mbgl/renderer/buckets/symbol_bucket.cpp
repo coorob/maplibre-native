@@ -311,4 +311,27 @@ void SymbolBucket::updateVertices(const Placement& placement,
     }
 }
 
+void SymbolBucket::updateTerrainVertices(const Placement& placement,
+                                          const TransformState& state,
+                                          const RenderTile& tile,
+                                          const RenderTerrain* terrain) {
+    terrainSymbols = terrain && !layout->get<style::SymbolScreenSpace>();
+    if (!terrainSymbols) {
+        text.sharedTerrainVertices.reset();
+        icon.sharedTerrainVertices.reset();
+        sdfIcon.sharedTerrainVertices.reset();
+        terrainElevationSampler.reset();
+        terrainElevationOwner = nullptr;
+        terrainElevationTile.reset();
+        return;
+    }
+    if (placement.updateBucketDynamicVertices(*this, state, tile, terrain)) {
+        dynamicUploaded = false;
+        uploaded = false;
+    }
+    text.updateModified();
+    icon.updateModified();
+    sdfIcon.updateModified();
+}
+
 } // namespace mbgl

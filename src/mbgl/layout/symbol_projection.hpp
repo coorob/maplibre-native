@@ -1,6 +1,7 @@
 #pragma once
 
 #include <mbgl/util/mat4.hpp>
+#include <mbgl/renderer/terrain_symbol_projection.hpp>
 #include <mbgl/gfx/vertex_buffer.hpp>
 #include <mbgl/renderer/buckets/symbol_bucket.hpp>
 
@@ -56,7 +57,8 @@ void reprojectLineLabels(gfx::VertexVector<gfx::Vertex<SymbolDynamicLayoutAttrib
                          bool keepUpright,
                          const RenderTile&,
                          const SymbolSizeBinder& sizeBinder,
-                         const TransformState&);
+                         const TransformState&,
+                         const SymbolElevationFunction& elevation = {});
 
 std::optional<std::pair<PlacedGlyph, PlacedGlyph>> placeFirstAndLastGlyph(float fontScale,
                                                                           float lineOffsetX,

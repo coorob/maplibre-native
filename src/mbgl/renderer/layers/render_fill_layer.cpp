@@ -69,8 +69,8 @@ bool klattraKeepStaleFillDrape() {
 }
 
 std::string klattraDrapeIDString(const OverscaledTileID& id) {
-    return "z" + std::to_string(static_cast<int>(id.canonical.z)) + "/" +
-           std::to_string(id.canonical.x) + "/" + std::to_string(id.canonical.y);
+    return "z" + std::to_string(static_cast<int>(id.canonical.z)) + "/" + std::to_string(id.canonical.x) + "/" +
+           std::to_string(id.canonical.y);
 }
 
 inline const FillLayer::Impl& impl_cast(const Immutable<style::Layer::Impl>& impl) {
@@ -158,6 +158,17 @@ void RenderFillLayer::update(gfx::ShaderRegistry& shaders,
                              const std::shared_ptr<UpdateParameters>&,
                              const RenderTree&,
                              UniqueChangeRequestVec& changes) {
+    const bool authoritativeTopoFill = activeTerrain && hasRenderPass(RenderPass::Opaque) &&
+                                       (baseImpl->source == "topo" || baseImpl->source == "norway-topo-vector");
+    const std::string drapeCoverageKey = baseImpl->source + "/" + getID();
+    bool authoritativeTopoUpdateFailed = false;
+    if (authoritativeTopoFill) {
+        // Every official opaque fill layer is a separate publication
+        // requirement. Declaring it before shader/group work means an early
+        // failure leaves the generation pending instead of clearing and
+        // publishing a partially styled Topo canvas.
+        activeTerrain->declareDrapeSourceRequirement(drapeCoverageKey, renderTiles);
+    }
     if (!renderTiles || renderTiles->empty()) {
         removeAllDrawables();
         return;
@@ -248,16 +259,13 @@ void RenderFillLayer::update(gfx::ShaderRegistry& shaders,
     // emit path below bounds those retained copies.
     if (activeTerrain) {
         std::unordered_set<OverscaledTileID> liveDrapeIDs;
-        activeTerrain->visitDrapeTargets(
-            [&](const OverscaledTileID& drapeID, TerrainDrapeTargetPtr& drapeTarget) {
+        activeTerrain->visitDrapeTargets([&](const OverscaledTileID& drapeID, TerrainDrapeTargetPtr& drapeTarget) {
                 if (!drapeTarget) return;
                 liveDrapeIDs.insert(drapeID);
-                if (auto* drapeGroup = static_cast<TileLayerGroup*>(
-                        drapeTarget->getLayerGroup(layerIndex).get())) {
+            if (auto* drapeGroup = static_cast<TileLayerGroup*>(drapeTarget->getLayerGroup(layerIndex).get())) {
                     std::size_t removedNotInCover = 0;
                     std::size_t removedNoOverlap = 0;
-                    const auto removed = drapeGroup->removeDrawablesIf(
-                        [&](gfx::Drawable& drawable) {
+                const auto removed = drapeGroup->removeDrawablesIf([&](gfx::Drawable& drawable) {
                             const auto& dID = drawable.getTileID();
                             if (!dID) return false;
                             if (!hasRenderTile(*dID)) {
@@ -285,9 +293,8 @@ void RenderFillLayer::update(gfx::ShaderRegistry& shaders,
                     stats.drawablesRemoved += removed;
                     if (removed && klattraLogDrapeStale()) {
                         Log::Info(Event::Render,
-                                  "[Klättra DRAPE_STALE] layer=" + getID() +
-                                      " kind=fill drape=" + klattraDrapeIDString(drapeID) +
-                                      " removed=" + std::to_string(removed) +
+                              "[Klättra DRAPE_STALE] layer=" + getID() + " kind=fill drape=" +
+                                  klattraDrapeIDString(drapeID) + " removed=" + std::to_string(removed) +
                                       " not-in-cover=" + std::to_string(removedNotInCover) +
                                       " no-overlap=" + std::to_string(removedNoOverlap));
                     }
@@ -329,11 +336,9 @@ void RenderFillLayer::update(gfx::ShaderRegistry& shaders,
             // practice by camera pans that swap a tile's bucket while a
             // drape target is still live.
             if (activeTerrain && !klattraKeepStaleFillDrape()) {
-                activeTerrain->visitDrapeTargets(
-                    [&](const OverscaledTileID&, TerrainDrapeTargetPtr& drapeTarget) {
+                activeTerrain->visitDrapeTargets([&](const OverscaledTileID&, TerrainDrapeTargetPtr& drapeTarget) {
                         if (!drapeTarget) return;
-                        if (auto* drapeGroup = static_cast<TileLayerGroup*>(
-                                drapeTarget->getLayerGroup(layerIndex).get())) {
+                    if (auto* drapeGroup = static_cast<TileLayerGroup*>(drapeTarget->getLayerGroup(layerIndex).get())) {
                             stats.drawablesRemoved += drapeGroup->removeDrawables(renderPass, tileID).size();
                         }
                     });
@@ -454,7 +459,14 @@ void RenderFillLayer::update(gfx::ShaderRegistry& shaders,
                 // This drawable was produced on a previous style/bucket, and should not be updated.
                 return false;
             }
-            return updateDrawableGeometry(drawable);
+            if (!updateDrawableGeometry(drawable)) {
+                return false;
+            }
+            // Source prepare replaces the RenderTiles snapshot each frame. A reused
+            // drawable must release its old cohort, which owns every tile's buckets.
+            drawable.setRenderTile(renderTilesOwner, &tile);
+            drawable.setBinders(renderData->bucket, &binders);
+            return true;
         };
         const bool mainTileUpdated = updateTile(renderPass, tileID, updateExisting);
         if (mainTileUpdated && !activeTerrain) {
@@ -511,22 +523,41 @@ void RenderFillLayer::update(gfx::ShaderRegistry& shaders,
                                            const std::function<void(gfx::DrawableBuilder&)>& setSegments,
                                            const std::function<void(gfx::DrawableBuilder&)>& configureExtras = {}) {
             if (!activeTerrain || !shaderGroup || klattraDisableFillDrape()) return;
-            activeTerrain->visitDrapeTargets(
-                [&](const OverscaledTileID& drapeID, TerrainDrapeTargetPtr& drapeTarget) {
+            const bool requiredSurfaceVariant = variant == FillVariant::Fill || variant == FillVariant::FillPattern;
+            const auto markRequiredFailure = [&]() {
+                if (authoritativeTopoFill && requiredSurfaceVariant) authoritativeTopoUpdateFailed = true;
+            };
+            const auto setDrapeRenderTile = [&](gfx::Drawable& drawable) {
+#if defined(__ANDROID__) && MLN_RENDER_BACKEND_OPENGL
+                if (variant == FillVariant::Fill || variant == FillVariant::FillOutline ||
+                    variant == FillVariant::FillOutlineTriangulated) {
+                    // Plain drape fills need their bucket/binders and geometry,
+                    // but no tile atlas lookup. A retained fallback polygon
+                    // must not pin every other tile in its old source cohort.
+                    // FillLayerTweaker skips tile access for these variants.
+                    static const Immutable<std::vector<RenderTile>> noRenderTiles =
+                        makeMutable<std::vector<RenderTile>>();
+                    drawable.setRenderTile(noRenderTiles, nullptr);
+                    return;
+                }
+#endif
+                drawable.setRenderTile(renderTilesOwner, &tile);
+            };
+            activeTerrain->visitDrapeTargets([&](const OverscaledTileID& drapeID, TerrainDrapeTargetPtr& drapeTarget) {
                     if (!drapeTarget || !LayerTweaker::tilesOverlap(tileID, drapeID)) return;
 
                     auto& tw = drapeLayerTweakers[drapeID];
                     if (!tw) {
-                        tw = std::make_shared<FillLayerTweaker>(
-                            getID() + "-drape", evaluatedProperties, drapeID);
+                    tw = std::make_shared<FillLayerTweaker>(getID() + "-drape", evaluatedProperties, drapeID);
                     }
 
-                    auto* drapeGroup = static_cast<TileLayerGroup*>(
-                        drapeTarget->getLayerGroup(layerIndex).get());
+                auto* drapeGroup = static_cast<TileLayerGroup*>(drapeTarget->getLayerGroup(layerIndex).get());
                     if (!drapeGroup) {
-                        auto newGroup = context.createTileLayerGroup(
-                            layerIndex, /*initialCapacity=*/4, getID() + "-drape");
-                        if (!newGroup) return;
+                    auto newGroup = context.createTileLayerGroup(layerIndex, /*initialCapacity=*/4, getID() + "-drape");
+                    if (!newGroup) {
+                        markRequiredFailure();
+                        return;
+                    }
                         newGroup->addLayerTweaker(tw);
                         drapeTarget->addLayerGroup(newGroup, /*replace=*/false);
                         drapeGroup = newGroup.get();
@@ -543,7 +574,7 @@ void RenderFillLayer::update(gfx::ShaderRegistry& shaders,
                         if (drawable.getType() != static_cast<size_t>(variant)) return;
                         if (!updateDrawableGeometry(drawable)) return;
                         drawable.setBinders(renderData->bucket, &binders);
-                        drawable.setRenderTile(renderTilesOwner, &tile);
+                        setDrapeRenderTile(drawable);
                         drawable.setDrawPriority(static_cast<gfx::DrawPriority>(tileID.canonical.z));
                         if (variant == FillVariant::FillPattern || variant == FillVariant::FillOutlinePattern) {
                             drawable.clearTweakers();
@@ -567,10 +598,16 @@ void RenderFillLayer::update(gfx::ShaderRegistry& shaders,
 
                     auto drapeShader = std::static_pointer_cast<gfx::ShaderProgramBase>(
                         shaderGroup->getOrCreateShader(context, propertiesAsUniforms));
-                    if (!drapeShader) return;
+                if (!drapeShader) {
+                    markRequiredFailure();
+                    return;
+                }
 
                     auto drapeBuilder = context.createDrawableBuilder(layerPrefix + nameSuffix + "-drape");
-                    if (!drapeBuilder) return;
+                if (!drapeBuilder) {
+                    markRequiredFailure();
+                    return;
+                }
                     drapeBuilder->setShader(drapeShader);
                     drapeBuilder->setCullFaceMode(gfx::CullFaceMode::disabled());
                     drapeBuilder->setDepthType(gfx::DepthMaskType::ReadOnly);
@@ -603,6 +640,10 @@ void RenderFillLayer::update(gfx::ShaderRegistry& shaders,
                     drapeBuilder->flush(context);
 
                     auto freshDrawables = drapeBuilder->clearDrawables();
+                if (freshDrawables.empty()) {
+                    markRequiredFailure();
+                    return;
+                }
                     if (!freshDrawables.empty() && klattraKeepStaleFillDrape()) {
                         // Supersede only stale copies whose whole footprint is
                         // covered by this fresh source tile. A finer child must
@@ -612,9 +653,8 @@ void RenderFillLayer::update(gfx::ShaderRegistry& shaders,
                         // Fill and outline variants are managed independently.
                         drapeGroup->removeDrawablesIf([&](gfx::Drawable& drawable) {
                             const auto& dID = drawable.getTileID();
-                            if (!dID || drawable.getType() != static_cast<size_t>(variant) ||
-                                *dID == tileID || hasRenderTile(*dID) ||
-                                !LayerTweaker::tilesOverlap(*dID, tileID)) {
+                        if (!dID || drawable.getType() != static_cast<size_t>(variant) || *dID == tileID ||
+                            hasRenderTile(*dID) || !LayerTweaker::tilesOverlap(*dID, tileID)) {
                                 return false;
                             }
                             if (dID->canonical.z <= drapeID.canonical.z) {
@@ -628,7 +668,7 @@ void RenderFillLayer::update(gfx::ShaderRegistry& shaders,
                         drapeDrawable->setType(static_cast<size_t>(variant));
                         drapeDrawable->setLayerTweaker(tw);
                         drapeDrawable->setBinders(renderData->bucket, &binders);
-                        drapeDrawable->setRenderTile(renderTilesOwner, &tile);
+                        setDrapeRenderTile(*drapeDrawable);
                         // Coarse retained parents paint first and current
                         // higher-resolution tiles replace their detail.
                         drapeDrawable->setDrawPriority(static_cast<gfx::DrawPriority>(tileID.canonical.z));
@@ -688,6 +728,9 @@ void RenderFillLayer::update(gfx::ShaderRegistry& shaders,
                     fillBuilder = std::move(builder);
                 }
             }
+            if (authoritativeTopoFill && bucket.sharedTriangles->elements() && (!fillShader || !fillBuilder)) {
+                authoritativeTopoUpdateFailed = true;
+            }
             if (doOutline && !outlineBuilder && outlineShader) {
                 if (auto builder = context.createDrawableBuilder(layerPrefix + "fill-outline")) {
                     commonInit(*builder);
@@ -712,8 +755,7 @@ void RenderFillLayer::update(gfx::ShaderRegistry& shaders,
                 }
 #endif
 
-                emitDrapeVariant(
-                    FillVariant::Fill, fillShaderGroup, "fill", [&](gfx::DrawableBuilder& b) {
+                emitDrapeVariant(FillVariant::Fill, fillShaderGroup, "fill", [&](gfx::DrawableBuilder& b) {
                         b.setSegments(gfx::Triangles(),
                                       bucket.sharedTriangles,
                                       bucket.triangleSegments.data(),
@@ -721,10 +763,7 @@ void RenderFillLayer::update(gfx::ShaderRegistry& shaders,
                     });
                 if (doOutline && outlineShader && bucket.sharedBasicLineIndexes->elements()) {
                     emitDrapeVariant(
-                        FillVariant::FillOutline,
-                        outlineShaderGroup,
-                        "fill-outline",
-                        [&](gfx::DrawableBuilder& b) {
+                        FillVariant::FillOutline, outlineShaderGroup, "fill-outline", [&](gfx::DrawableBuilder& b) {
                             b.setSegments(gfx::Lines(lineWidth),
                                           bucket.sharedBasicLineIndexes,
                                           bucket.basicLineSegments.data(),
@@ -797,6 +836,9 @@ void RenderFillLayer::update(gfx::ShaderRegistry& shaders,
                     builder->setRenderPass(RenderPass::Translucent);
                     patternBuilder = std::move(builder);
                 }
+            }
+            if (authoritativeTopoFill && bucket.sharedTriangles->elements() && (!fillShader || !patternBuilder)) {
+                authoritativeTopoUpdateFailed = true;
             }
             if (doOutline && !outlinePatternBuilder) {
                 if (auto builder = context.createDrawableBuilder(layerPrefix + "fill-outline-pattern")) {
@@ -889,6 +931,13 @@ void RenderFillLayer::update(gfx::ShaderRegistry& shaders,
                 finish(*outlinePatternBuilder, FillVariant::FillOutlinePattern);
             }
         }
+    }
+
+    if (authoritativeTopoFill && !authoritativeTopoUpdateFailed) {
+        // A complete source tile with no bucket for this particular fill is a
+        // legitimate loaded-empty result, so source completeness is the final
+        // acknowledgement once the layer update itself reached completion.
+        activeTerrain->noteDrapeSourceCoverage(drapeCoverageKey, renderTiles);
     }
 }
 

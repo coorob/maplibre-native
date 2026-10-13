@@ -440,16 +440,26 @@ void RenderLineLayer::update(gfx::ShaderRegistry& shaders,
                 // This drawable was produced on a previous style/bucket, and should not be updated.
                 return false;
             }
+            // Unchanged geometry can outlive a cover generation. Refresh its
+            // owner so a surviving line does not pin every tile in an old
+            // immutable RenderTiles snapshot.
+            drawable.setRenderTile(renderTilesOwner, &tile);
+            drawable.setBinders(renderData->bucket, &paintPropertyBinders);
             return true;
         };
-        if (updateTile(renderPass, tileID, std::move(updateExisting))) {
+        const bool mainTileUpdated = updateTile(renderPass, tileID, std::move(updateExisting));
+        if (mainTileUpdated && !activeTerrain) {
             continue;
         }
 
         const auto addDrawable = [&](std::unique_ptr<gfx::Drawable>&& drawable, LineLayerTweaker::LineType type) {
-            if (activeTerrain && activeTerrain->hasElevationCoverage(tileID)) {
+            if (mainTileUpdated || (activeTerrain && activeTerrain->hasElevationCoverage(tileID))) {
                 // Skip main-pass — drape variant carries this layer onto
                 // the terrain mesh. See cleanup-on-terrain block above.
+                // An already-updated main drawable also needs no duplicate,
+                // but must not short-circuit the drape routing below: a new
+                // terrain target can overlap an otherwise unchanged source
+                // tile and still needs its own line copy.
                 // When this tile has no DEM coverage, fall through to the
                 // main-pass emit so the layer doesn't vanish.
                 return;
@@ -516,8 +526,10 @@ void RenderLineLayer::update(gfx::ShaderRegistry& shaders,
                     }
 
                     bool alreadyHasVariant = false;
-                    drapeGroup->visitDrawables(passes, tileID, [&](const gfx::Drawable& d) {
+                    drapeGroup->visitDrawables(passes, tileID, [&](gfx::Drawable& d) {
                         if (d.getType() == static_cast<size_t>(mbgl::underlying_type(variant))) {
+                            d.setRenderTile(renderTilesOwner, &tile);
+                            d.setBinders(renderData->bucket, &paintPropertyBinders);
                             alreadyHasVariant = true;
                         }
                     });

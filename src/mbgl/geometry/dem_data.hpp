@@ -5,6 +5,7 @@
 #include <mbgl/util/tileset.hpp>
 
 #include <memory>
+#include <cstdint>
 #include <array>
 #include <cassert>
 #include <vector>
@@ -21,6 +22,7 @@ public:
 
     const PremultipliedImage* getImage() const { return &*image; }
     const std::shared_ptr<PremultipliedImage>& getImagePtr() const { return image; }
+    uint64_t getRevision() const { return revision; }
 
     const int32_t dim;
     const int32_t stride;
@@ -28,6 +30,7 @@ public:
 
 private:
     std::shared_ptr<PremultipliedImage> image;
+    uint64_t revision = 0;
 
     size_t idx(const int32_t x, const int32_t y) const {
         assert(x >= -1);

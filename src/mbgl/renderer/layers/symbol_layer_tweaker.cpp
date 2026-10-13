@@ -20,6 +20,9 @@
 #include <mbgl/util/projection.hpp>
 #include <mbgl/util/std.hpp>
 
+#include <cmath>
+#include <cstdlib>
+
 #if MLN_RENDER_BACKEND_METAL
 #include <mbgl/shaders/mtl/symbol.hpp>
 #endif // MLN_RENDER_BACKEND_METAL
@@ -103,6 +106,14 @@ void SymbolLayerTweaker::execute(LayerGroupBase& layerGroup, const PaintParamete
                                                             : SymbolScreenSpace::defaultValue();
 
     visitLayerGroupDrawables(layerGroup, [&](gfx::Drawable& drawable) {
+#if defined(__ANDROID__) && MLN_RENDER_BACKEND_OPENGL
+        // Android's final terrain pass clears flat-map depth and paints over
+        // ordinary translucent groups. World symbols must join the existing
+        // depth-tested post-terrain pass. Update reused drawables every frame
+        // so returning to 2D restores their normal sublayer depth behavior.
+        // Screen-space symbols retain their existing overlay projection.
+        drawable.setIs3D(parameters.activeTerrain != nullptr && !isScreenSpace);
+#endif
         if (!drawable.getTileID() || !drawable.getData()) {
             return;
         }
@@ -133,18 +144,21 @@ void SymbolLayerTweaker::execute(LayerGroupBase& layerGroup, const PaintParamete
             matrix::translate(matrix, matrix, 0, -util::EXTENT, 0);
             matrix::translate(matrix, matrix, translate[0], translate[1], 0);
         } else {
+#if defined(__ANDROID__) && MLN_RENDER_BACKEND_OPENGL
+            // Terrain writes depth with this same near-clipped projection.
+            // Mixing the ordinary near plane with its depth buffer can hide
+            // symbols even after they move to the post-terrain pass.
+            const bool nearClipped = parameters.activeTerrain != nullptr;
+#else
             constexpr bool nearClipped = false;
+#endif
             constexpr bool inViewportPixelUnits = false;
             const auto anchor = isText ? evaluated.get<style::TextTranslateAnchor>()
                                        : evaluated.get<style::IconTranslateAnchor>();
             matrix = getTileMatrix(tileID, parameters, translate, anchor, nearClipped, inViewportPixelUnits, drawable);
 
-            // Phase 5: when terrain is active, lift symbols off z=0 to the
-            // terrain elevation at the tile's centre so labels follow ridges
-            // and valleys instead of clipping into mountains. Per-tile
-            // sampling is coarse (all labels in a tile get the same offset)
-            // — a finer per-symbol elevation would need a vertex attribute,
-            // deferred for later. Same Z-scale fix the terrain mesh uses.
+#if !defined(__ANDROID__) || !MLN_RENDER_BACKEND_OPENGL
+            // Preserve the existing non-Android renderer path.
             if (parameters.activeTerrain) {
                 const float elevation = parameters.activeTerrain->getElevation(tileID, 0.5f, 0.5f);
                 if (elevation != 0.0f) {
@@ -153,6 +167,7 @@ void SymbolLayerTweaker::execute(LayerGroupBase& layerGroup, const PaintParamete
                     matrix::translate(matrix, matrix, 0.0, 0.0, elevation * pixelsPerMeter);
                 }
             }
+#endif
         }
 
         // from symbol_program, makeValues
@@ -209,6 +224,11 @@ void SymbolLayerTweaker::execute(LayerGroupBase& layerGroup, const PaintParamete
             .opacity_t = getInterpFactor<TextOpacity, IconOpacity, 0>(paintProperties, isText, zoom),
             .halo_width_t = getInterpFactor<TextHaloWidth, IconHaloWidth, 0>(paintProperties, isText, zoom),
             .halo_blur_t = getInterpFactor<TextHaloBlur, IconHaloBlur, 0>(paintProperties, isText, zoom),
+#if defined(__ANDROID__) && MLN_RENDER_BACKEND_OPENGL
+            .terrain = parameters.activeTerrain && bucket->terrainSymbols && !isScreenSpace,
+#else
+            .terrain = 0,
+#endif
         };
 
 #if MLN_UBO_CONSOLIDATION

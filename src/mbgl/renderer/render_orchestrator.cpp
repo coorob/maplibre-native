@@ -1,3 +1,4 @@
+#include <mbgl/renderer/terrain_perf_diagnostic.hpp>
 #include <mbgl/renderer/render_orchestrator.hpp>
 
 #include <mbgl/annotation/annotation_manager.hpp>
@@ -97,6 +98,12 @@ public:
         }
     }
 
+    void prepareTerrainSymbols(const RenderTerrain* terrain) const override {
+        for (auto it = layersNeedPlacement.rbegin(); it != layersNeedPlacement.rend(); ++it) {
+            placement->updateLayerTerrainSymbols(*it, parameters->transformParams.state, terrain);
+        }
+    }
+
     const std::set<LayerRenderItem>& getLayerRenderItemMap() const noexcept override { return layerRenderItems; }
     RenderItems getLayerRenderItems() const override { return {layerRenderItems.begin(), layerRenderItems.end()}; }
     RenderItems getSourceRenderItems() const override {
@@ -164,6 +171,7 @@ void RenderOrchestrator::setObserver(RendererObserver* observer_) {
 std::unique_ptr<RenderTree> RenderOrchestrator::createRenderTree(
     const std::shared_ptr<UpdateParameters>& updateParameters, gfx::DynamicTextureAtlasPtr dynamicTextureAtlas) {
     MLN_TRACE_FUNC();
+    terrain_perf::Scope terrainPerf(terrain_perf::Phase::CreateTree);
 
     const auto startTime = util::MonotonicTimer::now().count();
 
@@ -208,6 +216,8 @@ std::unique_ptr<RenderTree> RenderOrchestrator::createRenderTree(
                                   .tileLodPitchThreshold = updateParameters->tileLodPitchThreshold,
                                   .tileLodZoomShift = updateParameters->tileLodZoomShift,
                                   .tileLodMode = updateParameters->tileLodMode,
+                                  .terrainCoverCohortZoom = std::nullopt,
+                                  .boundCoverHoldToIdealCohort = false,
                                   .dynamicTextureAtlas = dynamicTextureAtlas};
 
     glyphManager->setURL(updateParameters->glyphURL);
@@ -459,16 +469,22 @@ std::unique_ptr<RenderTree> RenderOrchestrator::createRenderTree(
             }
         }
         // Mark the active DEM source as needed for terrain rendering and pass
-        // that ownership into the source update. RasterDEM is also valid as a
-        // flat hillshade/color-relief source, which must not use the terrain
-        // mesh's elevation-expanded cover.
+        // terrain ownership into every source that writes the official Topo
+        // surface. RasterDEM is also valid as a flat hillshade/color-relief
+        // source, which must not use the terrain mesh's elevation-expanded
+        // cover unless it is the active terrain source.
         const bool sourceIsTerrainDEM = renderTerrain && renderTerrain->isEnabled() &&
                                         sourceImpl->id == renderTerrain->getSourceID();
+        const bool sourceIsTerrainTopoVector = renderTerrain && renderTerrain->isEnabled() && sourceNeedsRendering &&
+                                               (sourceImpl->id == "topo" ||
+                                                sourceImpl->id == "norway-topo-vector");
         if (sourceIsTerrainDEM) {
             sourceNeedsRendering = true;
         }
 
-        tileParameters.usedByTerrain = sourceIsTerrainDEM;
+        tileParameters.usedByTerrain = sourceIsTerrainDEM || sourceIsTerrainTopoVector;
+        tileParameters.terrainCoverTileIDs =
+            sourceIsTerrainTopoVector ? &renderTerrain->getSourceCoverTileIDs() : nullptr;
         tileParameters.isUpdateSynchronous = sourceImpl->isUpdateSynchronous();
         source->update(sourceImpl, filteredLayersForSource, sourceNeedsRendering, sourceNeedsRelayout, tileParameters);
         filteredLayersForSource.clear();
@@ -630,7 +646,13 @@ std::unique_ptr<RenderTree> RenderOrchestrator::createRenderTree(
         symbolBucketsChanged |= renderTreeParameters->placementChanged;
         if (renderTreeParameters->placementChanged) {
             Mutable<Placement> placement = Placement::create(updateParameters, placementController.getPlacement());
+#if defined(__ANDROID__) && MLN_RENDER_BACKEND_OPENGL
+            placement->setTerrainForPlacement(renderTerrain && renderTerrain->isEnabled() ? renderTerrain.get() : nullptr);
+#endif
             placement->placeLayers(layersNeedPlacement);
+#if defined(__ANDROID__) && MLN_RENDER_BACKEND_OPENGL
+            placement->setTerrainForPlacement(nullptr);
+#endif
             placementController.setPlacement(std::move(placement));
             crossTileSymbolIndex.pruneUnusedLayers(usedSymbolLayers);
             for (const auto& entry : renderSources) {
@@ -642,16 +664,6 @@ std::unique_ptr<RenderTree> RenderOrchestrator::createRenderTree(
         renderTreeParameters->symbolFadeChange = placementController.getPlacement()->symbolFadeChange(
             updateParameters->timePoint);
         renderTreeParameters->needsRepaint = hasTransitions(updateParameters->timePoint);
-        // Drape bakes, cap-deferred resizes, and first-bake texture waits
-        // only progress on rendered frames. Without this, a static camera
-        // (paused flyover) freezes the drape backlog on screen — the holes
-        // stayed until an external event (screenshot flash) forced frames
-        // (2026-07-04 device finding). The flag self-extinguishes once the
-        // backlog drains, so an idle map still idles.
-        if (!renderTreeParameters->needsRepaint && renderTerrain && renderTerrain->isEnabled() &&
-            renderTerrain->hasPendingDrapeWork()) {
-            renderTreeParameters->needsRepaint = true;
-        }
     } else {
         MLN_TRACE_ZONE(placement);
 
@@ -659,7 +671,13 @@ std::unique_ptr<RenderTree> RenderOrchestrator::createRenderTree(
         if (renderTreeParameters->placementChanged) {
             Mutable<Placement> placement = Placement::create(updateParameters);
             placement->collectPlacedSymbolData(placedSymbolDataCollected);
+#if defined(__ANDROID__) && MLN_RENDER_BACKEND_OPENGL
+            placement->setTerrainForPlacement(renderTerrain && renderTerrain->isEnabled() ? renderTerrain.get() : nullptr);
+#endif
             placement->placeLayers(layersNeedPlacement);
+#if defined(__ANDROID__) && MLN_RENDER_BACKEND_OPENGL
+            placement->setTerrainForPlacement(nullptr);
+#endif
             placementController.setPlacement(std::move(placement));
         }
         crossTileSymbolIndex.reset();
@@ -1162,19 +1180,30 @@ void RenderOrchestrator::updateLayers(gfx::ShaderRegistry& shaders,
     // the terrain mesh samples those textures), regardless of the order
     // in which the CPU-side drawables were created.
     if (renderTerrain && renderTerrain->isEnabled()) {
+        terrain_perf::Scope terrainPerf(terrain_perf::Phase::TerrainUpdate);
         renderTerrain->update(*this, shaders, context, state, updateParameters, renderTree, changes);
     }
 
     RenderTerrain* const activeTerrain = (renderTerrain && renderTerrain->isEnabled())
                                              ? renderTerrain.get()
                                              : nullptr;
+#if defined(__ANDROID__) && MLN_RENDER_BACKEND_OPENGL
+    // DEMs/origin now match this frame's terrain. Reproject dynamic symbols at
+    // their own anchors without repeating collision placement or shaping.
+    {
+        terrain_perf::Scope terrainPerf(terrain_perf::Phase::PrepareSymbols);
+        renderTree.prepareTerrainSymbols(activeTerrain);
+    }
+#endif
 
     for (const auto& item : items) {
+        terrain_perf::Scope terrainPerf(terrain_perf::Phase::LayerUpdate);
         auto& renderLayer = item.layer.get();
 #if MLN_RENDER_BACKEND_OPENGL
         // Android Emulator: Goldfish is *very* broken. This will prevent a crash
         // inside the GL translation layer at the cost of emulator performance.
         if (androidGoldfishMitigationEnabled) {
+            terrain_perf::count(terrain_perf::Counter::GoldfishLayerRebuilds);
             renderLayer.removeAllDrawables();
         }
 #endif
@@ -1194,6 +1223,7 @@ void RenderOrchestrator::updateLayers(gfx::ShaderRegistry& shaders,
 }
 
 void RenderOrchestrator::processChanges() {
+    terrain_perf::Scope terrainPerf(terrain_perf::Phase::ProcessChanges);
     auto localChanges = std::move(pendingChanges);
     for (auto& change : localChanges) {
         change->execute(*this);

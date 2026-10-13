@@ -233,6 +233,10 @@ void RenderCircleLayer::update(gfx::ShaderRegistry& shaders,
                 // This drawable was produced on a previous style/bucket, and should not be updated.
                 return false;
             }
+            // Source prepare replaces the RenderTiles snapshot each frame. A reused
+            // drawable must release its old cohort, which owns every tile's buckets.
+            drawable.setRenderTile(renderTilesOwner, &tile);
+            drawable.setBinders(renderData->bucket, &paintPropertyBinders);
             return true;
         };
         if (updateTile(renderPass, tileID, std::move(updateExisting))) {

@@ -17,13 +17,16 @@
 #include <mbgl/gfx/drawable_impl.hpp>
 #include <mbgl/gfx/drawable_builder.hpp>
 #include <mbgl/renderer/layer_group.hpp>
+#include <mbgl/renderer/raster_drape_cohort.hpp>
 #include <mbgl/renderer/render_terrain.hpp>
 #include <mbgl/renderer/update_parameters.hpp>
 #include <mbgl/shaders/shader_program_base.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cstdlib>
 #include <cstring>
+#include <iterator>
 #include <unordered_set>
 
 namespace mbgl {
@@ -63,6 +66,19 @@ bool klattraDrapeFullQuad() {
     return enabled;
 }
 
+// Metal needs per-drawable attribute storage here because a raster bucket can
+// outlive the uploaded shared buffer it originally referenced. OpenGL's raw
+// attribute path, however, does not preserve the interleaved raster layout and
+// silently draws no pixels into terrain drape targets. Keep the Metal safety
+// workaround while using the normal shared raster vertices on OpenGL.
+constexpr bool klattraDrapeUsesLocalVertexBuffers() {
+#if MLN_RENDER_BACKEND_OPENGL
+    return false;
+#else
+    return true;
+#endif
+}
+
 // .63: raster drape gap-fill. A drape canvas recreated by a ring resize
 // (~490 per flight) can only re-acquire raster content from tiles in the
 // CURRENT render set — behind the advancing camera the raster cover has
@@ -80,17 +96,6 @@ bool klattraDrapeFullQuad() {
 // routes. Kill switch for A/B.
 bool klattraDrapeGapfillEnabled() {
     static const bool enabled = std::getenv("KLATTRA_DISABLE_DRAPE_GAPFILL") == nullptr;
-    return enabled;
-}
-
-// .70: every live drape target keeps one ancestor-or-equal satellite
-// drawable as a full-canvas floor. A logically complete set of sharper child
-// TileIDs can still leave the target's background pixels exposed after GPU
-// transform/clipping; the old gap-fill never ran because the raster group was
-// non-empty. Coarse-first draw priority keeps this floor behind all detail.
-// Kill switch restores the empty-group-only .63/.64 behavior.
-bool klattraDrapeRasterFloorEnabled() {
-    static const bool enabled = std::getenv("KLATTRA_DISABLE_DRAPE_RASTER_FLOOR") == nullptr;
     return enabled;
 }
 
@@ -116,8 +121,18 @@ void klattraGapfillEmit(const std::string& message) {
 }
 
 std::string klattraDrapeIDString(const OverscaledTileID& id) {
-    return "z" + std::to_string(static_cast<int>(id.canonical.z)) + "/" +
-           std::to_string(id.canonical.x) + "/" + std::to_string(id.canonical.y);
+    return "z" + std::to_string(static_cast<int>(id.canonical.z)) + "/" + std::to_string(id.canonical.x) + "/" +
+           std::to_string(id.canonical.y);
+}
+
+std::string klattraRasterZoomHistogramString(const std::array<uint32_t, 26>& counts) {
+    std::string out;
+    for (std::size_t z = 0; z < counts.size(); ++z) {
+        if (!counts[z]) continue;
+        if (!out.empty()) out += ' ';
+        out += 'z' + std::to_string(z) + ':' + std::to_string(counts[z]);
+    }
+    return out.empty() ? std::string("-") : out;
 }
 
 } // namespace
@@ -201,6 +216,13 @@ void RenderRasterLayer::update(gfx::ShaderRegistry& shaders,
                                const std::shared_ptr<UpdateParameters>&,
                                [[maybe_unused]] const RenderTree& renderTree,
                                [[maybe_unused]] UniqueChangeRequestVec& changes) {
+    const bool authoritativeTerrainRaster = raster_drape::isAuthoritativeTerrainRaster(getID(), baseImpl->source);
+    if (activeTerrain && authoritativeTerrainRaster) {
+        activeTerrain->visitDrapeTargets([&](const OverscaledTileID&, TerrainDrapeTargetPtr& target) {
+            if (target) target->requireRasterDrapeContent(layerIndex, baseImpl->source);
+        });
+    }
+
     if ((!renderTiles || renderTiles->empty()) && !imageData) {
         if (layerGroup) {
             stats.drawablesRemoved += layerGroup->clearDrawables();
@@ -208,7 +230,11 @@ void RenderRasterLayer::update(gfx::ShaderRegistry& shaders,
         if (imageLayerGroup) {
             stats.drawablesRemoved += imageLayerGroup->clearDrawables();
         }
-        return;
+        // A terrain target can outlive the raster source's instantaneous
+        // render cover. Continue into the cache-backed recovery transaction;
+        // otherwise a resized target can never reacquire its floor while the
+        // camera is paused or looking behind the raster cover.
+        if (!activeTerrain || !drapeGapfillSource) return;
     }
 
     constexpr auto renderPass = RenderPass::Translucent;
@@ -285,8 +311,7 @@ void RenderRasterLayer::update(gfx::ShaderRegistry& shaders,
     // Build vertex attributes and apply them to a drawable or a builder.
     // Populates a drawable xor a drawable builder for creates and updates, respectively.
     // Returns false if the drawable must be re-created.
-    const auto buildVertexData =
-        [&](const gfx::UniqueDrawableBuilder& builder,
+    const auto buildVertexData = [&](const gfx::UniqueDrawableBuilder& builder,
             gfx::Drawable* drawable,
             const RasterBucket& bucket,
             bool freshIndexBuffer = false,
@@ -309,13 +334,11 @@ void RenderRasterLayer::update(gfx::ShaderRegistry& shaders,
             // green patches). Painter's order (drawPriority = z, set at the
             // emit site) keeps coarse under fine, so full-quad overdraw is
             // visually correct and costs one extra textured quad per parent.
-            const bool shared = !fullTileQuad &&
-                                (!bucket.sharedVertices->empty() && !bucket.sharedTriangles->empty() &&
+        const bool shared = !fullTileQuad && (!bucket.sharedVertices->empty() && !bucket.sharedTriangles->empty() &&
                                  !bucket.segments.empty());
             const auto& vertices = shared ? bucket.sharedVertices : staticDataVertices;
             const auto& indices = shared ? bucket.sharedTriangles : staticDataIndices;
-            const auto drawableIndices =
-                freshIndexBuffer && shared
+        const auto drawableIndices = freshIndexBuffer && shared
                     ? std::make_shared<gfx::IndexVectorBase>(*indices)
                     : std::static_pointer_cast<gfx::IndexVectorBase>(indices);
             const auto* segments = shared ? &bucket.segments : staticDataSegments.get();
@@ -327,8 +350,7 @@ void RenderRasterLayer::update(gfx::ShaderRegistry& shaders,
                 const auto vertexCount = vertices->elements();
                 const auto* vertexData = vertices->data();
                 if (vertexData && vertexCount > 0) {
-                    if (auto& attr = vertexAttrs->set(
-                            idRasterPosVertexAttribute,
+                if (auto& attr = vertexAttrs->set(idRasterPosVertexAttribute,
                             /*index=*/-1,
                             gfx::AttributeDataType::Short2,
                             vertexCount)) {
@@ -341,8 +363,7 @@ void RenderRasterLayer::update(gfx::ShaderRegistry& shaders,
                         attr->setRawData(std::move(raw));
                     }
 
-                    if (auto& attr = vertexAttrs->set(
-                            idRasterTexturePosVertexAttribute,
+                if (auto& attr = vertexAttrs->set(idRasterTexturePosVertexAttribute,
                             /*index=*/-1,
                             gfx::AttributeDataType::Short2,
                             vertexCount)) {
@@ -377,8 +398,7 @@ void RenderRasterLayer::update(gfx::ShaderRegistry& shaders,
 
             assert(!!drawable ^ !!builder);
             if (drawable) {
-                drawable->updateVertexAttributes(
-                    vertexAttrs,
+            drawable->updateVertexAttributes(vertexAttrs,
                     vertices->elements(),
                     gfx::Triangles(),
                     drawableIndices,
@@ -444,17 +464,16 @@ void RenderRasterLayer::update(gfx::ShaderRegistry& shaders,
         // drape tweakers — same pattern as fill / line.
         if (activeTerrain) {
             std::unordered_set<OverscaledTileID> liveDrapeIDs;
-            activeTerrain->visitDrapeTargets(
-                [&](const OverscaledTileID& drapeID, TerrainDrapeTargetPtr& drapeTarget) {
+            activeTerrain->visitDrapeTargets([&](const OverscaledTileID& drapeID, TerrainDrapeTargetPtr& drapeTarget) {
                     if (!drapeTarget) return;
-                    drapeTarget->requireRasterDrapeContent();
+                if (authoritativeTerrainRaster) {
+                    drapeTarget->requireRasterDrapeContent(layerIndex, baseImpl->source);
+                }
                     liveDrapeIDs.insert(drapeID);
-                    if (auto* drapeGroup = static_cast<TileLayerGroup*>(
-                            drapeTarget->getLayerGroup(layerIndex).get())) {
+                if (auto* drapeGroup = static_cast<TileLayerGroup*>(drapeTarget->getLayerGroup(layerIndex).get())) {
                         std::size_t removedNotInCover = 0;
                         std::size_t removedNoOverlap = 0;
-                        const auto removed = drapeGroup->removeDrawablesIf(
-                            [&](gfx::Drawable& drawable) {
+                    const auto removed = drapeGroup->removeDrawablesIf([&](gfx::Drawable& drawable) {
                                 const auto& dID = drawable.getTileID();
                                 if (!dID) return false;
                                 if (!hasRenderTile(*dID)) {
@@ -489,9 +508,8 @@ void RenderRasterLayer::update(gfx::ShaderRegistry& shaders,
                         activeTerrain->diagNoteRasterRevoked(drapeID, removed);
                         if (removed && klattraLogDrapeStale()) {
                             Log::Info(Event::Render,
-                                      "[Klättra DRAPE_STALE] layer=" + getID() +
-                                          " kind=raster drape=" + klattraDrapeIDString(drapeID) +
-                                          " removed=" + std::to_string(removed) +
+                                  "[Klättra DRAPE_STALE] layer=" + getID() + " kind=raster drape=" +
+                                      klattraDrapeIDString(drapeID) + " removed=" + std::to_string(removed) +
                                           " not-in-cover=" + std::to_string(removedNotInCover) +
                                           " no-overlap=" + std::to_string(removedNoOverlap));
                         }
@@ -523,21 +541,24 @@ void RenderRasterLayer::update(gfx::ShaderRegistry& shaders,
 
         // [KLATTRA RASTER_DRAPE] probe counters for this update pass — which
     // exit of the drape-routing pipeline drops the far field?
-    std::size_t probeTiles = 0, probeBypassed = 0, probeBackfills = 0, probeBlockTiles = 0,
-                probeOverlaps = 0, probeAdded = 0, probeSkipNoTexSrc = 0, probeSkipBuilderTex = 0,
-                probeRemovedStale = 0;
+        std::size_t probeTiles = 0, probeBypassed = 0, probeBackfills = 0, probeBlockTiles = 0, probeOverlaps = 0,
+                    probeAdded = 0, probeSkipNoTexSrc = 0, probeSkipBuilderTex = 0, probeRemovedStale = 0;
     for (const RenderTile& tile : *renderTiles) {
         ++probeTiles;
             const auto& tileID = tile.getOverscaledTileID();
 
             auto* bucket_ = tile.getBucket(*baseImpl);
-            if (!bucket_ || !bucket_->hasData()) {
+            if (!bucket_) {
                 removeTile(renderPass, tileID);
                 continue;
             }
 
             bool cleared = false;
             auto& bucket = static_cast<RasterBucket&>(*bucket_);
+            if (!raster_drape::bucketHasTextureSource(bucket)) {
+                removeTile(renderPass, tileID);
+                continue;
+            }
 
             if (setRenderTileBucketID(tileID, bucket.getID())) {
                 // Bucket ID changed, we need to rebuild the drawables
@@ -617,10 +638,9 @@ void RenderRasterLayer::update(gfx::ShaderRegistry& shaders,
                     bool drapeBackfillNeeded = false;
                     if (activeTerrain && !klattraDisableRasterDrape() && (bucket.image || bucket.texture2d)) {
                 ++probeBlockTiles;
-                        activeTerrain->visitDrapeTargets(
-                            [&](const OverscaledTileID& drapeID, TerrainDrapeTargetPtr& drapeTarget) {
-                                if (drapeBackfillNeeded || !drapeTarget ||
-                                    !LayerTweaker::tilesOverlap(tileID, drapeID)) {
+                        activeTerrain->visitDrapeTargets([&](const OverscaledTileID& drapeID,
+                                                             TerrainDrapeTargetPtr& drapeTarget) {
+                            if (drapeBackfillNeeded || !drapeTarget || !LayerTweaker::tilesOverlap(tileID, drapeID)) {
                                     return;
                                 }
                                 auto* drapeGroup = static_cast<TileLayerGroup*>(
@@ -670,288 +690,286 @@ void RenderRasterLayer::update(gfx::ShaderRegistry& shaders,
                 ++stats.drawablesAdded;
             }
 
-            // Phase 2 drape routing: emit a copy of this raster tile into each
-            // overlapping DEM drape RenderTarget so the terrain mesh can sample
-            // raster basemap content (e.g. satellite tiles) as it displaces.
-            if (activeTerrain && !klattraDisableRasterDrape()) {
-                activeTerrain->visitDrapeTargets(
-                    [&](const OverscaledTileID& drapeID, TerrainDrapeTargetPtr& drapeTarget) {
-                        if (!drapeTarget || !LayerTweaker::tilesOverlap(tileID, drapeID)) return;
-                        ++probeOverlaps;
-                        // .53 stage diag: a raster tile covers this canvas;
-                        // paintable = it could actually route content now.
-                        activeTerrain->diagNoteRasterOverlap(
-                            drapeID, tileID.canonical.z, bucket.image || bucket.texture2d);
-
-                        // Do not bake a raster drawable into terrain until a
-                        // texture source exists (fresh image OR the already-
-                        // uploaded GPU texture). Otherwise the drape target
-                        // can be marked ready while sampling the renderer's
-                        // default white texture. Crucially: when NEITHER is
-                        // available, leave any existing drape drawable alone —
-                        // the previous behaviour REMOVED it whenever the CPU
-                        // image had been released, evaporating far-field
-                        // imagery from targets on every routing pass
-                        // (2026-07-04 satellite beige wedges).
-                        if (!bucket.image && !bucket.texture2d) {
-                            ++probeSkipNoTexSrc;
-                            return;
+            // Terrain raster routing is finalized below from one full-pyramid
+            // snapshot. Per-tile mutation here can publish 1-3 detail children
+            // before their siblings arrive, which is the diagonal mixed-LOD
+            // plate this transaction deliberately prevents.
                         }
 
-                        auto& tw = drapeLayerTweakers[drapeID];
-                        if (!tw) {
-                            tw = std::make_shared<RasterLayerTweaker>(
-                                getID() + "-drape", evaluatedProperties, drapeID);
-                        }
-
-                        auto* drapeGroup = static_cast<TileLayerGroup*>(
-                            drapeTarget->getLayerGroup(layerIndex).get());
-                        if (!drapeGroup) {
-                            auto newGroup = context.createTileLayerGroup(
-                                layerIndex, /*initialCapacity=*/4, getID() + "-raster-drape");
-                            if (!newGroup) return;
-                            newGroup->addLayerTweaker(tw);
-                            drapeTarget->addLayerGroup(newGroup, /*replace=*/false);
-                            drapeGroup = newGroup.get();
-                        }
-
-                        // Raster buckets can change their mask geometry while
-                        // reusing the same shared index vector. The shared
-                        // vector may still point at an older uploaded Metal
-                        // buffer, which leaves current segments addressing a
-                        // shorter index buffer and produces white terrain
-                        // patches. Terrain drape targets are rebuilt here
-                        // instead of updated in place so each drawable gets a
-                        // fresh index vector/buffer that matches its segments.
-                        stats.drawablesRemoved += drapeGroup->removeDrawables(renderPass, tileID).size();
-
-                        auto drapeBuilder = createBuilder();
-                        if (!drapeBuilder) return;
-                        setTextures(drapeBuilder, bucket);
-                        if (!drapeBuilder->getTexture(idRasterImage0Texture) ||
-                            !drapeBuilder->getTexture(idRasterImage1Texture)) {
-                            ++probeSkipBuilderTex;
-                            return;
-                        }
-                        buildVertexData(drapeBuilder,
-                                        /*drawable=*/nullptr,
-                                        bucket,
-                                        /*freshIndexBuffer=*/true,
-                                        /*localVertexBuffers=*/true,
-                                        /*fullTileQuad=*/klattraDrapeFullQuad());
-                        drapeBuilder->flush(context);
-
-                        auto freshDrawables = drapeBuilder->clearDrawables();
-                        if (!freshDrawables.empty() && klattraKeepStaleRasterDrape()) {
-                            // .55 supersede, tightened in .57: drop a stale
-                            // (left-the-raster-cover) drawable only when the
-                            // fresh tile covers AT LEAST everything the
-                            // stale one painted in this canvas — otherwise a
-                            // fresh quarter-tile could evict a full-canvas
-                            // parent and reopen background holes. Stale
-                            // footprint in the canvas is the deeper of
-                            // (stale, canvas); the fresh tile covers it iff
-                            // it is at same-or-coarser zoom and overlaps it.
-                            drapeGroup->removeDrawablesIf([&](gfx::Drawable& drawable) {
-                                const auto& dID = drawable.getTileID();
-                                if (!dID || *dID == tileID || hasRenderTile(*dID) ||
-                                    !LayerTweaker::tilesOverlap(*dID, tileID)) {
-                                    return false;
-                                }
-                                if (dID->canonical.z <= drapeID.canonical.z) {
-                                    // Stale painted the whole canvas: fresh
-                                    // must cover the whole canvas too.
-                                    return tileID.canonical.z <= drapeID.canonical.z;
-                                }
-                                // Stale painted a sub-region (its own
-                                // footprint): fresh must contain it.
-                                return tileID.canonical.z <= dID->canonical.z;
-                            });
-                        }
-                        for (auto& drapeDrawable : freshDrawables) {
-                            drapeDrawable->setTileID(tileID);
-                            drapeDrawable->setLayerTweaker(tw);
-                            // .57 painter's order inside the canvas: coarse
-                            // parents draw first, fine tiles over them —
-                            // required once drawables are full-extent quads.
-                            drapeDrawable->setDrawPriority(static_cast<gfx::DrawPriority>(tileID.canonical.z));
-                            drapeGroup->addDrawable(renderPass, tileID, std::move(drapeDrawable));
-                            ++stats.drawablesAdded;
-                            ++probeAdded;
-                            // .53 stage diag: raster content actually routed.
-                            activeTerrain->diagNoteRasterRouted(drapeID, tileID.canonical.z);
-                        }
-                    });
-            }
-    }
-
-    // .63 phase 3: raster drape gap-fill (rationale on the helper up
-    // top). .70 widens the invariant from "non-empty raster group" to
-    // "one ancestor-or-equal full-canvas floor": sharper children remain
-    // on top, but can no longer expose satellite-background pixels.
+        // Raster publication transaction. Every target retains one complete
+        // ancestor/equal floor. z+1 detail is staged as exactly four canonical
+        // children and replaces the prior detail cohort only after every builder
+        // succeeds. No render frame can therefore observe a 1-3 child mosaic.
     std::size_t probeGapsNow = 0, probeGapFilledNow = 0, probeGapDryNow = 0;
     std::size_t probeFloorNeededNow = 0, probeFloorRoutedNow = 0, probeFloorDryNow = 0;
     if (activeTerrain && !klattraDisableRasterDrape() && klattraDrapeGapfillEnabled() && drapeGapfillSource) {
-        struct CoverageNeed {
-            OverscaledTileID drapeID;
-            TerrainDrapeTargetPtr drapeTarget;
-            bool wasEmpty;
+            std::vector<std::pair<OverscaledTileID, RasterBucket*>> candidates;
+            std::vector<OverscaledTileID> candidateIDs;
+            drapeGapfillSource->visitRasterTileBuckets([&](const OverscaledTileID& tileID, RasterBucket& bucket) {
+                if (!raster_drape::bucketHasTextureSource(bucket)) return;
+                candidates.emplace_back(tileID, &bucket);
+                candidateIDs.push_back(tileID);
+            });
+            std::vector<OverscaledTileID> publicationReadyTargetIDs;
+
+            const auto bucketForID = [&](const OverscaledTileID& tileID) -> RasterBucket* {
+                for (const auto& [candidateID, bucket] : candidates) {
+                    if (candidateID == tileID) return bucket;
+                }
+                return nullptr;
         };
-        std::vector<CoverageNeed> coverageNeeds;
+
         activeTerrain->visitDrapeTargets([&](const OverscaledTileID& drapeID, TerrainDrapeTargetPtr& drapeTarget) {
             if (!drapeTarget) return;
-            auto* drapeGroup = static_cast<TileLayerGroup*>(drapeTarget->getLayerGroup(layerIndex).get());
-            const bool wasEmpty = !drapeGroup || drapeGroup->getDrawableCount() == 0;
-            const bool floorMissing = !drapeGroup || !klattraDrapeHasRasterFloor(*drapeGroup, drapeID);
-            if (wasEmpty) {
-                ++probeGapsNow;
-            }
-            if (wasEmpty || (klattraDrapeRasterFloorEnabled() && floorMissing)) {
-                coverageNeeds.push_back({drapeID, drapeTarget, wasEmpty});
-                if (floorMissing) {
-                    ++probeFloorNeededNow;
+                if (authoritativeTerrainRaster) {
+                    drapeTarget->requireRasterDrapeContent(layerIndex, baseImpl->source);
                 }
-            }
-        });
-        if (!coverageNeeds.empty()) {
-            // One pyramid sweep for the whole gap list: every loaded
-            // tile with a usable texture source (uploaded GPU texture
-            // or still-held CPU image — setTextures takes either).
-            std::vector<std::pair<OverscaledTileID, RasterBucket*>> candidates;
-            drapeGapfillSource->visitRasterTileBuckets([&](const OverscaledTileID& tid, RasterBucket& b) {
-                if (!b.hasData() || (!b.image && !b.texture2d)) return;
-                candidates.emplace_back(tid, &b);
-            });
-            // Mirror of the phase-2 emit above, minus the supersede
-            // scan (an empty group has nothing to supersede). Returns
-            // false only on builder/texture failure.
-            const auto emitGapDrawable = [&](const OverscaledTileID& drapeID,
-                                             TerrainDrapeTargetPtr& drapeTarget,
-                                             const OverscaledTileID& tileID,
-                                             RasterBucket& bucket) {
                 auto& tw = drapeLayerTweakers[drapeID];
                 if (!tw) {
                     tw = std::make_shared<RasterLayerTweaker>(getID() + "-drape", evaluatedProperties, drapeID);
                 }
+
                 auto* drapeGroup = static_cast<TileLayerGroup*>(drapeTarget->getLayerGroup(layerIndex).get());
-                if (!drapeGroup) {
-                    auto newGroup = context.createTileLayerGroup(
-                        layerIndex, /*initialCapacity=*/4, getID() + "-raster-drape");
-                    if (!newGroup) return false;
-                    newGroup->addLayerTweaker(tw);
-                    drapeTarget->addLayerGroup(newGroup, /*replace=*/false);
-                    drapeGroup = newGroup.get();
+                const bool wasEmpty = !drapeGroup || drapeGroup->getDrawableCount() == 0;
+                if (wasEmpty) ++probeGapsNow;
+
+                const auto selection = raster_drape::selectCohort(drapeID, candidateIDs);
+                const auto stageDrawables = [&](const OverscaledTileID& tileID,
+                                                RasterBucket& bucket) -> std::vector<gfx::UniqueDrawable> {
+                    auto stagedBuilder = createBuilder();
+                    if (!stagedBuilder) return {};
+                    setTextures(stagedBuilder, bucket);
+                    if (!stagedBuilder->getTexture(idRasterImage0Texture) ||
+                        !stagedBuilder->getTexture(idRasterImage1Texture)) {
+                        ++probeSkipBuilderTex;
+                        return {};
                 }
-                auto gapBuilder = createBuilder();
-                if (!gapBuilder) return false;
-                setTextures(gapBuilder, bucket);
-                if (!gapBuilder->getTexture(idRasterImage0Texture) || !gapBuilder->getTexture(idRasterImage1Texture)) {
-                    return false;
-                }
-                buildVertexData(gapBuilder,
+                    buildVertexData(stagedBuilder,
                                 /*drawable=*/nullptr,
                                 bucket,
                                 /*freshIndexBuffer=*/true,
-                                /*localVertexBuffers=*/true,
+                                    /*localVertexBuffers=*/klattraDrapeUsesLocalVertexBuffers(),
                                 /*fullTileQuad=*/klattraDrapeFullQuad());
-                gapBuilder->flush(context);
-                bool added = false;
-                for (auto& gapDrawable : gapBuilder->clearDrawables()) {
-                    gapDrawable->setTileID(tileID);
-                    gapDrawable->setLayerTweaker(tw);
-                    gapDrawable->setDrawPriority(static_cast<gfx::DrawPriority>(tileID.canonical.z));
-                    drapeGroup->addDrawable(renderPass, tileID, std::move(gapDrawable));
-                    ++stats.drawablesAdded;
-                    ++probeGapFilledNow;
-                    activeTerrain->diagNoteRasterRouted(drapeID, tileID.canonical.z);
-                    // Cumulative fill-resolution histogram: c1 = child
-                    // (sharper than the canvas), eq = exact zoom, aN =
-                    // ancestor N levels coarser (the .63 flight's
-                    // "green mush" = a3+/a4p fills — phone-63 named the
-                    // class but not the resolution; this does).
-                    const int dz = static_cast<int>(drapeID.canonical.z) - static_cast<int>(tileID.canonical.z);
-                    drapeGapfillDzHist[static_cast<std::size_t>(std::clamp(dz + 1, 0, 5))]++;
-                    added = true;
-                }
-                // A few named routes per second: WHERE got WHAT
-                // resolution (complements the dz histogram).
-                if (added && RenderTerrain::stageDiagEnabled()) {
-                    static std::chrono::steady_clock::time_point lastRouteEmit{};
-                    const auto nowR = std::chrono::steady_clock::now();
-                    if (nowR - lastRouteEmit >= std::chrono::seconds(1)) {
-                        lastRouteEmit = nowR;
-                        klattraGapfillEmit("[KLATTRA STAGE] gapfillRoute canvas=" + klattraDrapeIDString(drapeID) +
-                                           " from=" + klattraDrapeIDString(tileID) + " layer=" + getID());
+                    stagedBuilder->flush(context);
+                    auto drawables = stagedBuilder->clearDrawables();
+                    for (auto& drawable : drawables) {
+                        drawable->setTileID(tileID);
+                        drawable->setLayerTweaker(tw);
+                        drawable->setDrawPriority(static_cast<gfx::DrawPriority>(tileID.canonical.z));
                     }
-                }
-                return added;
-            };
+                    return drawables;
+                };
+                const auto ensureGroup = [&]() -> TileLayerGroup* {
+                    if (drapeGroup) return drapeGroup;
+                    auto newGroup = context.createTileLayerGroup(
+                        layerIndex, /*initialCapacity=*/5, getID() + "-raster-drape");
+                    if (!newGroup) return nullptr;
+                    newGroup->addLayerTweaker(tw);
+                    drapeTarget->addLayerGroup(newGroup, /*replace=*/false);
+                    drapeGroup = newGroup.get();
+                    return drapeGroup;
+                };
+                const auto groupUsesCurrentTexture = [&](const OverscaledTileID& tileID,
+                                                         const RasterBucket& bucket) -> bool {
+                    if (!drapeGroup || !bucket.texture2d) return false;
+                    bool found = false;
+                    bool allCurrent = true;
+                    visitLayerGroupDrawables(*drapeGroup, [&](gfx::Drawable& drawable) {
+                        if (!drawable.getTileID() || *drawable.getTileID() != tileID) return;
+                        found = true;
+                        allCurrent = allCurrent &&
+                                     raster_drape::textureIdentityMatches(
+                                         bucket.texture2d.get(), drawable.getTexture(idRasterImage0Texture).get()) &&
+                                     raster_drape::textureIdentityMatches(
+                                         bucket.texture2d.get(), drawable.getTexture(idRasterImage1Texture).get());
+                    });
+                    return found && allCurrent;
+                };
 
-            for (auto& [drapeID, drapeTarget, wasEmpty] : coverageNeeds) {
-                // Underlay: deepest ancestor-or-equal candidate —
-                // full-canvas coverage from ONE drawable, no
-                // partial-fill holes.
-                RasterBucket* underlayBucket = nullptr;
-                std::optional<OverscaledTileID> underlayID;
-                // .64: sharpening children — canvas z+1 tiles (≤4) from
-                // the reservoir draw OVER the underlay via painter
-                // order. Behind-camera canvases usually have their
-                // exact/child tiles in the cache (they rendered moments
-                // ago), so the .63 coarse-underlay-only fill smeared
-                // z8–z9 mush over regions whose native imagery was
-                // sitting right there (Robert's ".63 green" verdict).
-                std::vector<std::pair<OverscaledTileID, RasterBucket*>> childFills;
-                for (auto& [tid, candidateBucket] : candidates) {
-                    if (tid.wrap != drapeID.wrap) continue;
-                    if (!LayerTweaker::tilesOverlap(tid, drapeID)) continue;
-                    if (tid.canonical.z <= drapeID.canonical.z) {
-                        if (!underlayID || tid.canonical.z > underlayID->canonical.z) {
-                            underlayID = tid;
-                            underlayBucket = candidateBucket;
+                bool hasFloor = drapeGroup && klattraDrapeHasRasterFloor(*drapeGroup, drapeID);
+                bool hasCurrentFloor = false;
+                if (!hasFloor) ++probeFloorNeededNow;
+                if (selection.floor) {
+                    auto* floorBucket = bucketForID(*selection.floor);
+                    hasCurrentFloor = floorBucket && groupUsesCurrentTexture(*selection.floor, *floorBucket);
+                    if (!hasCurrentFloor && floorBucket) {
+                        auto stagedFloor = stageDrawables(*selection.floor, *floorBucket);
+                        if (!stagedFloor.empty() && ensureGroup()) {
+                            stats.drawablesRemoved += drapeGroup->removeDrawablesIf([&](gfx::Drawable& drawable) {
+                                const auto& tileID = drawable.getTileID();
+                                return tileID && raster_drape::tileCoversTarget(*tileID, drapeID);
+                            });
+                            for (auto& drawable : stagedFloor) {
+                                drapeGroup->addDrawable(renderPass, *selection.floor, std::move(drawable));
+                                ++stats.drawablesAdded;
+                                ++probeGapFilledNow;
+                                ++probeAdded;
+                            }
+                            activeTerrain->diagNoteRasterRouted(drapeID, selection.floor->canonical.z);
+                            ++probeFloorRoutedNow;
+                            const int dz = static_cast<int>(drapeID.canonical.z) -
+                                           static_cast<int>(selection.floor->canonical.z);
+                            drapeGapfillDzHist[static_cast<std::size_t>(std::clamp(dz + 1, 0, 5))]++;
+                            hasFloor = true;
+                            hasCurrentFloor = true;
                         }
-                    } else if (tid.canonical.z == drapeID.canonical.z + 1u) {
-                        childFills.emplace_back(tid, candidateBucket);
+                    } else if (hasCurrentFloor) {
+                        hasFloor = true;
                     }
                 }
-                // Without an underlay, a partial child set would leave
-                // unwritten canvas pixels (per-pixel background — the
-                // .57 lesson). All four children = logical coverage, but
-                // .70 still requires a floor on non-empty canvases because
-                // the physical device disproved that TileID-only proof.
-                const bool childrenCover = childFills.size() >= 4;
-                if (!underlayBucket) {
+                if (!hasFloor) {
                     ++probeFloorDryNow;
-                    if (wasEmpty && !childrenCover) {
-                        ++probeGapDryNow;
-                    }
-                    if (!wasEmpty || !childrenCover) {
-                        continue;
-                    }
-                }
-                // The underlay always emits when present — one drawable
-                // buys guaranteed coverage even if a child emit fails.
-                bool anyRouted = false;
-                if (underlayBucket && underlayID) {
-                    const bool floorRouted = emitGapDrawable(drapeID, drapeTarget, *underlayID, *underlayBucket);
-                    anyRouted |= floorRouted;
-                    if (floorRouted) {
-                        ++probeFloorRoutedNow;
-                    } else {
-                        ++probeFloorDryNow;
-                    }
-                }
-                // Existing non-empty groups already contain their sharper
-                // drawables. Empty groups retain the .64 child sharpening.
-                if (wasEmpty) {
-                    for (auto& [childID, childBucket] : childFills) {
-                        anyRouted |= emitGapDrawable(drapeID, drapeTarget, childID, *childBucket);
-                    }
-                }
-                if (wasEmpty && !anyRouted) {
                     ++probeGapDryNow;
+                    return;
+                }
+
+                std::vector<OverscaledTileID> existingDetailIDs;
+                if (drapeGroup) {
+                    visitLayerGroupDrawables(*drapeGroup, [&](gfx::Drawable& drawable) {
+                        const auto& tileID = drawable.getTileID();
+                        if (tileID && raster_drape::tileIsStrictChildOf(*tileID, drapeID)) {
+                            existingDetailIDs.push_back(*tileID);
+                    }
+                    });
+                }
+                const auto existingDetail = raster_drape::selectCohort(drapeID, existingDetailIDs);
+
+                if (!selection.hasCompleteChildren()) {
+                    // Keep a previously committed quartet. Only remove legacy
+                    // partial children; the full-canvas floor remains visible.
+                    if (!existingDetail.hasCompleteChildren() && drapeGroup) {
+                        stats.drawablesRemoved += drapeGroup->removeDrawablesIf([&](gfx::Drawable& drawable) {
+                            const auto& tileID = drawable.getTileID();
+                            return tileID && raster_drape::tileIsStrictChildOf(*tileID, drapeID);
+                        });
+                    }
+                    if (authoritativeTerrainRaster && hasCurrentFloor) {
+                        publicationReadyTargetIDs.push_back(drapeID);
+                    }
+                    return;
+                }
+
+                bool sameDetailCohort = existingDetail.hasCompleteChildren();
+                for (std::size_t i = 0; sameDetailCohort && i < selection.children.size(); ++i) {
+                    sameDetailCohort = existingDetail.children[i] == selection.children[i];
+                    if (sameDetailCohort) {
+                        auto* childBucket = bucketForID(*selection.children[i]);
+                        sameDetailCohort = childBucket &&
+                                           groupUsesCurrentTexture(*selection.children[i], *childBucket);
+                    }
+                }
+                if (sameDetailCohort) {
+                    if (authoritativeTerrainRaster && hasCurrentFloor) {
+                        publicationReadyTargetIDs.push_back(drapeID);
+                    }
+                    return;
+                }
+
+                std::array<std::vector<gfx::UniqueDrawable>, 4> stagedChildren;
+                bool allChildrenStaged = true;
+                for (std::size_t i = 0; i < selection.children.size(); ++i) {
+                    auto* childBucket = bucketForID(*selection.children[i]);
+                    if (!childBucket) {
+                        allChildrenStaged = false;
+                        break;
+                }
+                    stagedChildren[i] = stageDrawables(*selection.children[i], *childBucket);
+                    if (stagedChildren[i].empty()) {
+                        allChildrenStaged = false;
+                        break;
                 }
             }
+                if (!allChildrenStaged || !ensureGroup()) return;
+
+                stats.drawablesRemoved += drapeGroup->removeDrawablesIf([&](gfx::Drawable& drawable) {
+                    const auto& tileID = drawable.getTileID();
+                    return tileID && raster_drape::tileIsStrictChildOf(*tileID, drapeID);
+                });
+                for (std::size_t i = 0; i < stagedChildren.size(); ++i) {
+                    for (auto& drawable : stagedChildren[i]) {
+                        drapeGroup->addDrawable(renderPass, *selection.children[i], std::move(drawable));
+                        ++stats.drawablesAdded;
+                        ++probeGapFilledNow;
+                        ++probeAdded;
         }
+                    activeTerrain->diagNoteRasterRouted(drapeID, selection.children[i]->canonical.z);
+                }
+                drapeGapfillDzHist[0] += 4;
+                if (authoritativeTerrainRaster && hasCurrentFloor) {
+                    publicationReadyTargetIDs.push_back(drapeID);
+                }
+            });
+
+            if (authoritativeTerrainRaster) {
+                activeTerrain->noteDrapeSourceTargetReadiness(baseImpl->source, publicationReadyTargetIDs);
+            }
+
+            // CPU-only DIAG census of the surface actually stored by each
+            // target after the transaction. Per-target completeness cannot
+            // reveal a z/z+1 discontinuity between neighboring targets, which
+            // is the remaining giant diagonal plate seen on Android.
+            if (authoritativeTerrainRaster && RenderTerrain::stageDiagEnabled()) {
+                std::vector<std::pair<OverscaledTileID, uint8_t>> resolvedSurfaceZooms;
+                std::size_t unresolvedTargets = 0;
+                activeTerrain->visitDrapeTargets(
+                    [&](const OverscaledTileID& targetID, TerrainDrapeTargetPtr& target) {
+                        if (!target) return;
+                        const auto surfaceZoom = target->diagnosticRasterSurfaceZoomForTile(targetID, layerIndex);
+                        if (surfaceZoom) {
+                            resolvedSurfaceZooms.emplace_back(targetID, *surfaceZoom);
+                        } else {
+                            ++unresolvedTargets;
+                        }
+                    });
+
+                std::array<uint32_t, 26> surfaceZoomHistogram{};
+                for (const auto& [targetID, surfaceZoom] : resolvedSurfaceZooms) {
+                    (void)targetID;
+                    if (surfaceZoom < surfaceZoomHistogram.size()) surfaceZoomHistogram[surfaceZoom]++;
+                }
+
+                std::size_t neighborPairs = 0;
+                std::size_t mixedNeighborPairs = 0;
+                std::string mixedSample;
+                for (auto a = resolvedSurfaceZooms.begin(); a != resolvedSurfaceZooms.end(); ++a) {
+                    for (auto b = std::next(a); b != resolvedSurfaceZooms.end(); ++b) {
+                        const auto& aID = a->first;
+                        const auto& bID = b->first;
+                        if (aID.wrap != bID.wrap || aID.canonical.z != bID.canonical.z ||
+                            aID.overscaledZ != bID.overscaledZ) {
+                            continue;
+                        }
+                        const auto dx = aID.canonical.x > bID.canonical.x ? aID.canonical.x - bID.canonical.x
+                                                                          : bID.canonical.x - aID.canonical.x;
+                        const auto dy = aID.canonical.y > bID.canonical.y ? aID.canonical.y - bID.canonical.y
+                                                                          : bID.canonical.y - aID.canonical.y;
+                        if (dx + dy != 1u) continue;
+                        ++neighborPairs;
+                        if (a->second == b->second) continue;
+                        ++mixedNeighborPairs;
+                        if (mixedSample.empty()) {
+                            mixedSample = klattraDrapeIDString(aID) + "@z" + std::to_string(a->second) + "," +
+                                          klattraDrapeIDString(bID) + "@z" + std::to_string(b->second);
+                        }
+                    }
+                }
+
+                static std::chrono::steady_clock::time_point lastCohortEmit{};
+                const auto now = std::chrono::steady_clock::now();
+                if (now - lastCohortEmit >= std::chrono::seconds(1)) {
+                    lastCohortEmit = now;
+                    klattraGapfillEmit(
+                        "[KLATTRA RASTER_COHORT] layer=" + getID() +
+                        " targets=" + std::to_string(resolvedSurfaceZooms.size() + unresolvedTargets) +
+                        " resolved=" + std::to_string(resolvedSurfaceZooms.size()) +
+                        " unresolved=" + std::to_string(unresolvedTargets) +
+                        " surfaceZ=" + klattraRasterZoomHistogramString(surfaceZoomHistogram) +
+                        " neighborPairs=" + std::to_string(neighborPairs) +
+                        " mixedNeighbors=" + std::to_string(mixedNeighborPairs) +
+                        " sample=" + (mixedSample.empty() ? std::string("-") : mixedSample));
+                }
+            }
+
         drapeGapfillFilled += probeGapFilledNow;
         // 1 Hz device-visible gauge (STAGE family). filled is
         // cumulative; gaps/dry are this-update gauges — dry stays hot
@@ -970,16 +988,16 @@ void RenderRasterLayer::update(gfx::ShaderRegistry& shaders,
                     " filled=" + std::to_string(drapeGapfillFilled) + " dry=" + std::to_string(probeGapDryNow) +
                     " floorNeed=" + std::to_string(probeFloorNeededNow) + " floorRouted=" +
                     std::to_string(probeFloorRoutedNow) + " floorDry=" + std::to_string(probeFloorDryNow) +
-                    " dz=c1:" + std::to_string(drapeGapfillDzHist[0]) + ",eq:" + std::to_string(drapeGapfillDzHist[1]) +
-                    ",a1:" + std::to_string(drapeGapfillDzHist[2]) + ",a2:" + std::to_string(drapeGapfillDzHist[3]) +
-                    ",a3:" + std::to_string(drapeGapfillDzHist[4]) + ",a4p:" + std::to_string(drapeGapfillDzHist[5]));
+                        " dz=c1:" + std::to_string(drapeGapfillDzHist[0]) + ",eq:" +
+                        std::to_string(drapeGapfillDzHist[1]) + ",a1:" + std::to_string(drapeGapfillDzHist[2]) +
+                        ",a2:" + std::to_string(drapeGapfillDzHist[3]) + ",a3:" +
+                        std::to_string(drapeGapfillDzHist[4]) + ",a4p:" + std::to_string(drapeGapfillDzHist[5]));
             }
         }
     }
 
         // 1 Hz probe summary (stderr — the simulator swallows Log::Warning).
-        if (std::getenv("KLATTRA_TRACE_STDERR") != nullptr &&
-            (probeTiles || probeBlockTiles || probeAdded)) {
+        if (std::getenv("KLATTRA_TRACE_STDERR") != nullptr && (probeTiles || probeBlockTiles || probeAdded)) {
             static std::chrono::steady_clock::time_point lastProbe{};
             const auto now = std::chrono::steady_clock::now();
             if (now - lastProbe >= std::chrono::milliseconds(900)) {

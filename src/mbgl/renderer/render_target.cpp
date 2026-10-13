@@ -6,6 +6,7 @@
 #include <mbgl/renderer/layer_group.hpp>
 #include <mbgl/renderer/layer_tweaker.hpp>
 #include <mbgl/renderer/paint_parameters.hpp>
+#include <mbgl/renderer/raster_drape_cohort.hpp>
 #include <mbgl/renderer/render_tree.hpp>
 #include <mbgl/util/image.hpp>
 #include <mbgl/util/io.hpp>
@@ -49,8 +50,7 @@ bool klattraFlyDiagBudget() {
     static int64_t windowStart = 0;
     static uint32_t count = 0;
     const int64_t now =
-        std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now().time_since_epoch())
-            .count();
+        std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
     if (now != windowStart) {
         windowStart = now;
         count = 0;
@@ -67,8 +67,8 @@ void klattraFlyDiagEmit(const std::string& message) {
 }
 
 std::string klattraColorString(const Color& color) {
-    return std::to_string(color.r) + "," + std::to_string(color.g) + "," +
-           std::to_string(color.b) + "," + std::to_string(color.a);
+    return std::to_string(color.r) + "," + std::to_string(color.g) + "," + std::to_string(color.b) + "," +
+           std::to_string(color.a);
 }
 
 int klattraEnvInt(const char* name, const int fallback) {
@@ -151,18 +151,20 @@ bool klattraDumpTriggerActive(const char* path) {
         lastNsec = nsec;
         const int windowMs = std::max(1, klattraEnvInt("KLATTRA_DUMP_TRIGGER_WINDOW_MS", 2000));
         armedUntil = now + std::chrono::milliseconds(windowMs);
-        Log::Info(Event::Render,
-                  "[KLATTRA TARGET_PIXELS] arm-trigger file=" + std::string(path) +
-                      " window_ms=" + std::to_string(windowMs));
+        Log::Info(
+            Event::Render,
+            "[KLATTRA TARGET_PIXELS] arm-trigger file=" + std::string(path) + " window_ms=" + std::to_string(windowMs));
     }
 
     return now < armedUntil;
 }
 
 std::string klattraSafeFilename(std::string value) {
-    std::replace_if(value.begin(), value.end(), [](const char c) {
-        return !(std::isalnum(static_cast<unsigned char>(c)) || c == '-' || c == '_' || c == '.');
-    }, '_');
+    std::replace_if(
+        value.begin(),
+        value.end(),
+        [](const char c) { return !(std::isalnum(static_cast<unsigned char>(c)) || c == '-' || c == '_' || c == '.'); },
+        '_');
     return value;
 }
 
@@ -181,8 +183,7 @@ bool klattraTileCoversWholeTarget(const OverscaledTileID& cover, const Overscale
 }
 
 bool klattraTileIsStrictChildOf(const OverscaledTileID& child, const OverscaledTileID& parent) {
-    return child.wrap == parent.wrap &&
-           child.canonical.z > parent.canonical.z &&
+    return child.wrap == parent.wrap && child.canonical.z > parent.canonical.z &&
            child.canonical.isChildOf(parent.canonical);
 }
 
@@ -226,9 +227,8 @@ void klattraMaybeInspectTarget(gfx::OffscreenTexture& texture,
     const int delayMs = klattraEnvInt("KLATTRA_DUMP_RENDER_TARGET_DELAY_MS", 0);
     if (delayMs > 0) {
         static const auto start = std::chrono::steady_clock::now();
-        const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                   std::chrono::steady_clock::now() - start)
-                                   .count();
+        const auto elapsedMs =
+            std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
         if (elapsedMs < delayMs) {
             return;
         }
@@ -253,8 +253,7 @@ void klattraMaybeInspectTarget(gfx::OffscreenTexture& texture,
     } catch (const std::exception& e) {
         Log::Warning(Event::Render,
                      "[KLATTRA TARGET_PIXELS] read-failed target=" + debugName +
-                         " completed=" + std::to_string(completedRenderCount) +
-                         " error=" + e.what());
+                         " completed=" + std::to_string(completedRenderCount) + " error=" + e.what());
         return;
     }
 
@@ -301,39 +300,33 @@ void klattraMaybeInspectTarget(gfx::OffscreenTexture& texture,
         const std::string dir = klattraRenderTargetDumpDir();
         if (klattraEnsureDir(dir)) {
             std::ostringstream name;
-            name << dir << "/" << std::setw(4) << std::setfill('0') << sequence << "_"
-                 << klattraSafeFilename(debugName) << "_c" << completedRenderCount << ".png";
+            name << dir << "/" << std::setw(4) << std::setfill('0') << sequence << "_" << klattraSafeFilename(debugName)
+                 << "_c" << completedRenderCount << ".png";
             pngPath = name.str();
             try {
                 util::write_file(pngPath, encodePNG(image));
             } catch (const std::exception& e) {
                 Log::Warning(Event::Render,
-                             "[KLATTRA TARGET_PIXELS] dump-failed target=" + debugName +
-                                 " path=" + pngPath +
+                             "[KLATTRA TARGET_PIXELS] dump-failed target=" + debugName + " path=" + pngPath +
                                  " error=" + e.what());
                 pngPath.clear();
             }
         } else {
             Log::Warning(Event::Render,
-                         "[KLATTRA TARGET_PIXELS] mkdir-failed dir=" + dir +
-                             " errno=" + std::to_string(errno));
+                         "[KLATTRA TARGET_PIXELS] mkdir-failed dir=" + dir + " errno=" + std::to_string(errno));
         }
     }
 
     Log::Info(Event::Render,
-              "[KLATTRA TARGET_PIXELS] target=" + debugName +
-                  " completed=" + std::to_string(completedRenderCount) +
+              "[KLATTRA TARGET_PIXELS] target=" + debugName + " completed=" + std::to_string(completedRenderCount) +
                   " size=" + std::to_string(image.size.width) + "x" + std::to_string(image.size.height) +
                   " avg=" + std::to_string(sumR / std::max<uint64_t>(1, total)) + "," +
                       std::to_string(sumG / std::max<uint64_t>(1, total)) + "," +
                       std::to_string(sumB / std::max<uint64_t>(1, total)) + "," +
-                      std::to_string(sumA / std::max<uint64_t>(1, total)) +
-                  " alpha0_pct=" + klattraPercent(alphaZero, total) +
-                  " rgb_with_alpha0_pct=" + klattraPercent(rgbWithAlphaZero, total) +
-                  " bright_pct=" + klattraPercent(bright, total) +
-                  " dark_pct=" + klattraPercent(dark, total) +
-                  " greyish_pct=" + klattraPercent(greyish, total) +
-                  (pngPath.empty() ? "" : " png=" + pngPath));
+                  std::to_string(sumA / std::max<uint64_t>(1, total)) + " alpha0_pct=" +
+                  klattraPercent(alphaZero, total) + " rgb_with_alpha0_pct=" + klattraPercent(rgbWithAlphaZero, total) +
+                  " bright_pct=" + klattraPercent(bright, total) + " dark_pct=" + klattraPercent(dark, total) +
+                  " greyish_pct=" + klattraPercent(greyish, total) + (pngPath.empty() ? "" : " png=" + pngPath));
 }
 
 } // namespace
@@ -383,10 +376,8 @@ bool RenderTarget::addLayerGroup(LayerGroupBasePtr layerGroup, const bool replac
         result.first->second = std::move(layerGroup);
         if (klattraLogDrapeTrace() && !debugName.empty()) {
             Log::Info(Event::Render,
-                      "[KLATTRA DRAPE_TRACE] target-add-group target=" + debugName +
-                          " index=" + std::to_string(index) +
-                          " name=" + layerName +
-                          " drawables=" + std::to_string(drawableCount) +
+                      "[KLATTRA DRAPE_TRACE] target-add-group target=" + debugName + " index=" + std::to_string(index) +
+                          " name=" + layerName + " drawables=" + std::to_string(drawableCount) +
                           " replace=" + std::to_string(replace));
         }
         return true;
@@ -397,8 +388,7 @@ bool RenderTarget::addLayerGroup(LayerGroupBasePtr layerGroup, const bool replac
             if (klattraLogDrapeTrace() && !debugName.empty()) {
                 Log::Info(Event::Render,
                           "[KLATTRA DRAPE_TRACE] target-replace-group target=" + debugName +
-                              " index=" + std::to_string(index) +
-                              " name=" + layerName +
+                              " index=" + std::to_string(index) + " name=" + layerName +
                               " drawables=" + std::to_string(drawableCount));
             }
             return true;
@@ -418,8 +408,7 @@ bool RenderTarget::removeLayerGroup(const int32_t layerIndex) {
     }
 }
 
-std::size_t RenderTarget::removeLayerGroupsIf(
-    const std::function<bool(int32_t, const LayerGroupBase&)>& predicate) {
+std::size_t RenderTarget::removeLayerGroupsIf(const std::function<bool(int32_t, const LayerGroupBase&)>& predicate) {
     std::size_t removed = 0;
     for (auto it = layerGroupsByLayerIndex.begin(); it != layerGroupsByLayerIndex.end();) {
         const auto& group = it->second;
@@ -458,14 +447,108 @@ size_t RenderTarget::numContentLayerGroups() const noexcept {
     return count;
 }
 
+void RenderTarget::beginDrapeSurfaceFrame(const uint64_t generation, const OverscaledTileID& tileID) {
+    pendingDrapeGeneration = generation;
+    pendingDrapeTileID = tileID;
+    pendingDrapeSourceCoverage.clear();
+    pendingDrapeSourceAcknowledgements.clear();
+    requiresRasterDrape = false;
+    requiredRasterDrapeLayerIndex.reset();
+    requiredRasterDrapeSourceID.clear();
+}
+
+void RenderTarget::requireRasterDrapeContent(const int32_t layerIndex, const std::string& sourceID) noexcept {
+    requiresRasterDrape = true;
+    requiredRasterDrapeLayerIndex = layerIndex;
+    requiredRasterDrapeSourceID = sourceID;
+    if (!sourceID.empty()) pendingDrapeSourceCoverage.emplace(sourceID, false);
+}
+
+void RenderTarget::declareDrapeSourceRequirement(const uint64_t generation, const std::string& sourceKey) {
+    if (!generation || generation != pendingDrapeGeneration || sourceKey.empty()) return;
+    pendingDrapeSourceCoverage.emplace(sourceKey, false);
+}
+
+void RenderTarget::noteDrapeSourceCoverage(const uint64_t generation,
+                                           const std::string& sourceID,
+                                           const bool complete) {
+    if (!generation || generation != pendingDrapeGeneration || sourceID.empty()) return;
+    const auto it = pendingDrapeSourceCoverage.find(sourceID);
+    if (it != pendingDrapeSourceCoverage.end()) {
+        it->second = complete;
+        pendingDrapeSourceAcknowledgements.insert(sourceID);
+    }
+}
+
+namespace {
+bool drapeAttemptBlockedUntilExternalUpdate(const RenderTarget::DrapeRenderDiagnostic& diagnostic,
+                                            const uint64_t pendingGeneration) noexcept {
+    if (diagnostic.generation != pendingGeneration) {
+        return false;
+    }
+    switch (diagnostic.reason) {
+        case RenderTarget::DrapeRenderDiagnosticReason::NoAuthoritativeRequirement:
+        case RenderTarget::DrapeRenderDiagnosticReason::WriterUnacknowledged:
+        case RenderTarget::DrapeRenderDiagnosticReason::SourceIncomplete:
+        case RenderTarget::DrapeRenderDiagnosticReason::MissingRasterFloor:
+            return true;
+        case RenderTarget::DrapeRenderDiagnosticReason::NeverAttempted:
+        case RenderTarget::DrapeRenderDiagnosticReason::Unrenderable:
+        case RenderTarget::DrapeRenderDiagnosticReason::Published:
+            return false;
+    }
+    return false;
+}
+} // namespace
+
+bool RenderTarget::needsDrapeRenderAttempt(const uint64_t minimumCompletedRenders) const noexcept {
+    return raster_drape::unbakedTargetNeedsAutomaticFrame(
+        completedRenderCount,
+        minimumCompletedRenders,
+        pendingDrapeGeneration,
+        lastDrapeRenderDiagnostic.generation,
+        drapeAttemptBlockedUntilExternalUpdate(lastDrapeRenderDiagnostic, pendingDrapeGeneration));
+}
+
+bool RenderTarget::hasPendingDrapePublication() const noexcept {
+    if (firstDrapePublicationNeedsConsumerFrame) {
+        return true;
+    }
+
+    return raster_drape::publicationNeedsAutomaticFrameRetry(pendingDrapeGeneration,
+                                                             publishedDrapeGeneration,
+                                                             requiresRasterDrape,
+                                                             pendingDrapeSourceCoverage.size(),
+                                                             lastDrapeRenderDiagnostic.generation,
+                                                             drapeAttemptBlockedUntilExternalUpdate(
+                                                                 lastDrapeRenderDiagnostic, pendingDrapeGeneration));
+}
+
+bool RenderTarget::hasRasterFloorForTile(const OverscaledTileID& tileID,
+                                         const std::optional<int32_t> layerIndexFilter) const noexcept {
+    bool hasFloor = false;
+    for (const auto& [layerIndex, layerGroup] : layerGroupsByLayerIndex) {
+        if (hasFloor || (layerIndexFilter && layerIndex != *layerIndexFilter) ||
+            layerIndex == std::numeric_limits<int32_t>::max() || !layerGroup || layerGroup->empty() ||
+            layerGroup->getName().find("raster-drape") == std::string::npos) {
+            continue;
+        }
+        visitLayerGroupDrawables(*layerGroup, [&](gfx::Drawable& drawable) {
+            const auto& drawableTileID = drawable.getTileID();
+            if (drawableTileID && klattraTileCoversWholeTarget(*drawableTileID, tileID)) {
+                hasFloor = true;
+            }
+        });
+    }
+    return hasFloor;
+}
+
 bool RenderTarget::hasRasterDrawableCoveringTile(const OverscaledTileID& tileID) const noexcept {
     std::vector<OverscaledTileID> drawableTileIDs;
     uint8_t maxDrawableZoom = tileID.canonical.z;
 
     for (const auto& [layerIndex, layerGroup] : layerGroupsByLayerIndex) {
-        if (layerIndex == std::numeric_limits<int32_t>::max() ||
-            !layerGroup ||
-            layerGroup->empty() ||
+        if (layerIndex == std::numeric_limits<int32_t>::max() || !layerGroup || layerGroup->empty() ||
             layerGroup->getName().find("raster-drape") == std::string::npos) {
             continue;
         }
@@ -486,8 +569,7 @@ bool RenderTarget::hasRasterDrawableCoveringTile(const OverscaledTileID& tileID)
             }
         });
 
-        if (drawableTileIDs.size() == 1 &&
-            klattraTileCoversWholeTarget(drawableTileIDs.front(), tileID)) {
+        if (drawableTileIDs.size() == 1 && klattraTileCoversWholeTarget(drawableTileIDs.front(), tileID)) {
             return true;
         }
     }
@@ -501,6 +583,31 @@ bool RenderTarget::hasRasterDrawableCoveringTile(const OverscaledTileID& tileID)
     // child set does. Treat that as ready so terrain can replace the flat
     // main pass once the complete colour surface exists.
     return klattraRasterDrawablesCoverTile(tileID, drawableTileIDs, maxDrawableZoom);
+}
+
+std::optional<uint8_t> RenderTarget::diagnosticRasterSurfaceZoomForTile(
+    const OverscaledTileID& tileID,
+    const std::optional<int32_t> layerIndexFilter) const noexcept {
+    std::map<uint8_t, std::vector<OverscaledTileID>, std::greater<uint8_t>> drawableIDsByZoom;
+    for (const auto& [layerIndex, layerGroup] : layerGroupsByLayerIndex) {
+        if ((layerIndexFilter && layerIndex != *layerIndexFilter) ||
+            layerIndex == std::numeric_limits<int32_t>::max() || !layerGroup || layerGroup->empty() ||
+            layerGroup->getName().find("raster-drape") == std::string::npos) {
+            continue;
+        }
+        visitLayerGroupDrawables(*layerGroup, [&](gfx::Drawable& drawable) {
+            if (const auto& drawableTileID = drawable.getTileID()) {
+                drawableIDsByZoom[drawableTileID->canonical.z].push_back(*drawableTileID);
+            }
+        });
+    }
+
+    for (const auto& [zoom, drawableTileIDs] : drawableIDsByZoom) {
+        if (raster_drape::coversTargetAtAnyResolution(tileID, drawableTileIDs)) {
+            return zoom;
+        }
+    }
+    return std::nullopt;
 }
 
 static const LayerGroupBasePtr no_group;
@@ -519,8 +626,64 @@ void RenderTarget::render(RenderOrchestrator& orchestrator, const RenderTree& re
     // encoding a pass with no valid attachments aborts the app. Skip the
     // pass — the target stays not-ready, consumers keep using fallbacks,
     // and the allocation is retried on a later frame.
+    lastDrapeRenderDiagnostic = {};
+    lastDrapeRenderDiagnostic.generation = pendingDrapeGeneration;
+    lastDrapeRenderDiagnostic.declaredRequirements = pendingDrapeSourceCoverage.size();
+    lastDrapeRenderDiagnostic.acknowledgedRequirements = pendingDrapeSourceAcknowledgements.size();
+    for (const auto& [sourceID, complete] : pendingDrapeSourceCoverage) {
+        if (!complete) {
+            ++lastDrapeRenderDiagnostic.incompleteRequirements;
+            if (lastDrapeRenderDiagnostic.blockedSourceKey.empty()) {
+                lastDrapeRenderDiagnostic.blockedSourceKey = sourceID;
+            }
+        }
+    }
+
     if (!offscreenTexture || !offscreenTexture->isRenderable()) {
+        lastDrapeRenderDiagnostic.reason = DrapeRenderDiagnosticReason::Unrenderable;
         return;
+    }
+
+    // Terrain targets are mutable layer-group containers backed by a single
+    // texture object. Holding a binding therefore does not preserve pixels if
+    // this pass clears and rebakes that same texture with an incomplete source
+    // cohort. Publish only coherent generations; skipped passes deliberately
+    // leave the last presented texture untouched.
+    if (pendingDrapeGeneration) {
+        const bool hasAuthoritativeRequirement = raster_drape::hasAuthoritativePublicationRequirement(
+            requiresRasterDrape, pendingDrapeSourceCoverage.size());
+        bool coherent = hasAuthoritativeRequirement;
+        for (const auto& [sourceID, complete] : pendingDrapeSourceCoverage) {
+            (void)sourceID;
+            coherent = coherent && complete;
+        }
+        if (requiresRasterDrape) {
+            const auto sourceCoverage = pendingDrapeSourceCoverage.find(requiredRasterDrapeSourceID);
+            coherent = coherent && !requiredRasterDrapeSourceID.empty() && requiredRasterDrapeLayerIndex &&
+                       sourceCoverage != pendingDrapeSourceCoverage.end() && sourceCoverage->second &&
+                       pendingDrapeTileID && hasRasterFloorForTile(*pendingDrapeTileID, requiredRasterDrapeLayerIndex);
+        }
+        if (!coherent) {
+            if (!hasAuthoritativeRequirement) {
+                lastDrapeRenderDiagnostic.reason = DrapeRenderDiagnosticReason::NoAuthoritativeRequirement;
+            } else if (lastDrapeRenderDiagnostic.incompleteRequirements > 0) {
+                lastDrapeRenderDiagnostic.reason =
+                    lastDrapeRenderDiagnostic.acknowledgedRequirements < pendingDrapeSourceCoverage.size()
+                        ? DrapeRenderDiagnosticReason::WriterUnacknowledged
+                        : DrapeRenderDiagnosticReason::SourceIncomplete;
+            } else {
+                lastDrapeRenderDiagnostic.reason = DrapeRenderDiagnosticReason::MissingRasterFloor;
+            }
+            if (klattraLogDrapeTrace() && !debugName.empty()) {
+                Log::Info(Event::Render,
+                          "[KLATTRA DRAPE_TRACE] target-render-hold target=" + debugName +
+                              " pending=" + std::to_string(pendingDrapeGeneration) +
+                              " published=" + std::to_string(publishedDrapeGeneration) +
+                              " sources=" + std::to_string(pendingDrapeSourceCoverage.size()) +
+                              " raster=" + std::to_string(requiresRasterDrape));
+            }
+            return;
+        }
     }
 
     // KLATTRA diagnostics: label the colour attachment with the target's
@@ -550,10 +713,9 @@ void RenderTarget::render(RenderOrchestrator& orchestrator, const RenderTree& re
     if (klattraFlyDiag() && !debugName.empty() && completedRenderCount < 3 && klattraFlyDiagBudget()) {
         std::size_t diagDrawables = 0;
         visitLayerGroups([&](LayerGroupBase& layerGroup) { diagDrawables += layerGroup.getDrawableCount(); });
-        klattraFlyDiagEmit("[KLATTRA FLYDIAG] bake target=" + debugName +
-                           " completed=" + std::to_string(completedRenderCount) +
-                           " groups=" + std::to_string(numLayerGroups()) +
-                           " drawables=" + std::to_string(diagDrawables) +
+        klattraFlyDiagEmit(
+            "[KLATTRA FLYDIAG] bake target=" + debugName + " completed=" + std::to_string(completedRenderCount) +
+            " groups=" + std::to_string(numLayerGroups()) + " drawables=" + std::to_string(diagDrawables) +
                            " clear=" + klattraColorString(drapeClearColor));
     }
 
@@ -563,8 +725,7 @@ void RenderTarget::render(RenderOrchestrator& orchestrator, const RenderTree& re
         visitLayerGroups([&](LayerGroupBase& layerGroup) {
             drawableCount += layerGroup.getDrawableCount();
             Log::Info(Event::Render,
-                      "[KLATTRA DRAPE_TRACE] target-group target=" + debugName +
-                          " group=" + layerGroup.getName() +
+                      "[KLATTRA DRAPE_TRACE] target-group target=" + debugName + " group=" + layerGroup.getName() +
                           " index=" + std::to_string(layerGroup.getLayerIndex()) +
                           " enabled=" + std::to_string(layerGroup.getEnabled()) +
                           " drawables=" + std::to_string(layerGroup.getDrawableCount()));
@@ -573,17 +734,14 @@ void RenderTarget::render(RenderOrchestrator& orchestrator, const RenderTree& re
                   "[KLATTRA DRAPE_TRACE] target-render-begin target=" + debugName +
                       " ptr=" + std::to_string(reinterpret_cast<uintptr_t>(this)) +
                       " size=" + std::to_string(size.width) + "x" + std::to_string(size.height) +
-                      " groups=" + std::to_string(numLayerGroups()) +
-                      " drawables=" + std::to_string(drawableCount) +
+                      " groups=" + std::to_string(numLayerGroups()) + " drawables=" + std::to_string(drawableCount) +
                       " completedBefore=" + std::to_string(completedRenderCount) +
                       " clear=" + klattraColorString(drapeClearColor));
     }
 
-    parameters.renderPass = parameters.encoder->createRenderPass("render target",
-                                                                 {.renderable = *offscreenTexture,
-                                                                  .clearColor = drapeClearColor,
-                                                                  .clearDepth = 1.0f,
-                                                                  .clearStencil = {}});
+    parameters.renderPass = parameters.encoder->createRenderPass(
+        "render target",
+        {.renderable = *offscreenTexture, .clearColor = drapeClearColor, .clearDepth = 1.0f, .clearStencil = {}});
     context.bindGlobalUniformBuffers(*parameters.renderPass);
 
     const gfx::ScissorRect prevScissorRect = parameters.scissorRect;
@@ -624,7 +782,23 @@ void RenderTarget::render(RenderOrchestrator& orchestrator, const RenderTree& re
     context.unbindGlobalUniformBuffers(*parameters.renderPass);
     parameters.renderPass.reset();
     parameters.encoder->present(*offscreenTexture);
+    const bool firstDrapePublication = pendingDrapeGeneration > 0 && completedRenderCount == 0;
     completedRenderCount++;
+    lastDrapeRenderDiagnostic.reason = DrapeRenderDiagnosticReason::Published;
+    if (pendingDrapeGeneration) {
+        publishedDrapeGeneration = pendingDrapeGeneration;
+        publishedRequiresRasterDrape = requiresRasterDrape;
+        publishedHasRasterFloor = pendingDrapeTileID &&
+                                  hasRasterFloorForTile(*pendingDrapeTileID, requiredRasterDrapeLayerIndex);
+        if (firstDrapePublication) {
+            // The terrain update runs before this offscreen pass, so it could
+            // not create a consumer drawable for the first published texture
+            // yet. Request exactly one handoff frame; the next terrain update
+            // acknowledges it even when DEM data still needs an external tile
+            // update, avoiding another self-wake loop.
+            firstDrapePublicationNeedsConsumerFrame = true;
+        }
+    }
 
     if (!debugName.empty()) {
         klattraMaybeInspectTarget(*offscreenTexture, debugName, completedRenderCount);

@@ -7,6 +7,7 @@
 #include <mbgl/map/mode.hpp>
 #include <mbgl/shaders/segment.hpp>
 #include <mbgl/renderer/bucket.hpp>
+#include <mbgl/renderer/terrain_symbol_projection.hpp>
 #include <mbgl/renderer/paint_property_binder.hpp>
 #include <mbgl/renderer/layers/render_symbol_layer.hpp>
 #include <mbgl/style/layers/symbol_layer_properties.hpp>
@@ -18,6 +19,7 @@
 namespace mbgl {
 
 class CrossTileSymbolLayerIndex;
+class RenderTerrain;
 
 using SymbolIconBinders = PaintPropertyBinders<style::IconPaintProperties::DataDrivenProperties>;
 using SymbolTextBinders = PaintPropertyBinders<style::TextPaintProperties::DataDrivenProperties>;
@@ -25,6 +27,7 @@ using SymbolLayoutVertex =
     gfx::Vertex<TypeList<attributes::pos_offset, attributes::data<uint16_t, 4>, attributes::pixeloffset>>;
 using SymbolDynamicLayoutAttributes = TypeList<attributes::projected_pos>;
 using SymbolOpacityAttributes = TypeList<attributes::fade_opacity>;
+using SymbolTerrainAttributes = TypeList<attributes::terrain_elevation>;
 
 using CollisionBoxLayoutAttributes = TypeList<attributes::pos, attributes::anchor_pos, attributes::extrude>;
 using CollisionBoxDynamicAttributes = TypeList<attributes::placed, attributes::shift>;
@@ -232,6 +235,12 @@ public:
     void place(Placement&, const BucketPlacementData&, std::set<uint32_t>&) override;
     void updateVertices(
         const Placement&, bool updateOpacities, const TransformState&, const RenderTile&, std::set<uint32_t>&) override;
+    void updateTerrainVertices(const Placement&, const TransformState&, const RenderTile&, const RenderTerrain*);
+    bool terrainSymbols = false;
+    const RenderTerrain* terrainElevationOwner = nullptr;
+    uint64_t terrainElevationRevision = 0;
+    std::optional<UnwrappedTileID> terrainElevationTile;
+    std::optional<TerrainSymbolElevationSampler> terrainElevationSampler;
     bool hasTextData() const;
     bool hasIconData() const;
     bool hasSdfIconData() const;
@@ -322,6 +331,7 @@ public:
     using VertexBuffer = gfx::VertexBuffer<SymbolLayoutVertex>;
     using DynamicVertexVector = gfx::VertexVector<gfx::Vertex<SymbolDynamicLayoutAttributes>>;
     using DynamicVertexBuffer = gfx::VertexBuffer<gfx::Vertex<SymbolDynamicLayoutAttributes>>;
+    using TerrainVertexVector = gfx::VertexVector<gfx::Vertex<SymbolTerrainAttributes>>;
     using OpacityVertexVector = gfx::VertexVector<gfx::Vertex<SymbolOpacityAttributes>>;
     using OpacityVertexBuffer = gfx::VertexBuffer<gfx::Vertex<SymbolOpacityAttributes>>;
 
@@ -343,6 +353,9 @@ public:
                 sharedOpacityVertices->updateModified();
             }
         }
+
+        // Allocated only for Android OpenGL terrain; normal symbol ABI stays intact.
+        std::shared_ptr<TerrainVertexVector> sharedTerrainVertices;
 
         std::shared_ptr<VertexVector> sharedVertices = std::make_shared<VertexVector>();
         VertexVector& vertices() { return *sharedVertices; }

@@ -161,7 +161,10 @@ bool AndroidRendererFrontend::getTileCacheEnabled() const {
 }
 
 void AndroidRendererFrontend::reduceMemoryUse() {
-    mapRenderer.actor().invoke(&Renderer::reduceMemoryUse);
+    // Android reaches this entry point only from NativeMapView::onLowMemory.
+    // Forward the actual pressure signal so terrain/source budgets remain
+    // reduced after the cache purge, including across subsequent style swaps.
+    mapRenderer.actor().invoke(&Renderer::reduceMemoryUseForMemoryPressure);
 }
 
 std::vector<Feature> AndroidRendererFrontend::querySourceFeatures(const std::string& sourceID,

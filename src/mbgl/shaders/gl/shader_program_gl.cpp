@@ -99,7 +99,8 @@ ShaderProgramGL::ShaderProgramGL(ShaderProgramGL&& other)
     : ShaderProgramBase(std::forward<ShaderProgramBase&&>(other)),
       glProgram(std::move(other.glProgram)),
       vertexAttributes(std::move(other.vertexAttributes)),
-      samplerLocations(std::move(other.samplerLocations)) {}
+      samplerLocations(std::move(other.samplerLocations)),
+      terrainSymbolOcclusion(other.terrainSymbolOcclusion) {}
 
 std::optional<size_t> ShaderProgramGL::getSamplerLocation(const size_t id) const {
     return (id < samplerLocations.size()) ? samplerLocations[id] : std::nullopt;
@@ -177,7 +178,14 @@ std::shared_ptr<ShaderProgramGL> ShaderProgramGL::create(
             addAttr(attrs, attributesInfo[location].id, location, length, size, glType);
         }
 
-        return std::make_shared<ShaderProgramGL>(std::move(program), std::move(attrs), std::move(samplerLocations));
+        auto shader = std::make_shared<ShaderProgramGL>(std::move(program), std::move(attrs), std::move(samplerLocations));
+        for (const auto& blockInfo : uniformBlocksInfo) {
+            if (blockInfo.name == "SymbolTerrainOcclusionUBO") {
+                shader->terrainSymbolOcclusion = true;
+                break;
+            }
+        }
+        return shader;
     } catch (const std::exception& e) {
         context.getObserver().onShaderCompileFailed(
             programParameters.getProgramType(), gfx::Backend::Type::OpenGL, additionalDefines);
