@@ -63,6 +63,19 @@ bool klattraDrapeFullQuad() {
     return enabled;
 }
 
+// Metal needs per-drawable attribute storage here because a raster bucket can
+// outlive the uploaded shared buffer it originally referenced. OpenGL's raw
+// attribute path, however, does not preserve the interleaved raster layout and
+// silently draws no pixels into terrain drape targets. Keep the Metal safety
+// workaround while using the normal shared raster vertices on OpenGL.
+constexpr bool klattraDrapeUsesLocalVertexBuffers() {
+#if MLN_RENDER_BACKEND_OPENGL
+    return false;
+#else
+    return true;
+#endif
+}
+
 // .63: raster drape gap-fill. A drape canvas recreated by a ring resize
 // (~490 per flight) can only re-acquire raster content from tiles in the
 // CURRENT render set — behind the advancing camera the raster cover has
@@ -737,7 +750,7 @@ void RenderRasterLayer::update(gfx::ShaderRegistry& shaders,
                                         /*drawable=*/nullptr,
                                         bucket,
                                         /*freshIndexBuffer=*/true,
-                                        /*localVertexBuffers=*/true,
+                                        /*localVertexBuffers=*/klattraDrapeUsesLocalVertexBuffers(),
                                         /*fullTileQuad=*/klattraDrapeFullQuad());
                         drapeBuilder->flush(context);
 
@@ -852,7 +865,7 @@ void RenderRasterLayer::update(gfx::ShaderRegistry& shaders,
                                 /*drawable=*/nullptr,
                                 bucket,
                                 /*freshIndexBuffer=*/true,
-                                /*localVertexBuffers=*/true,
+                                /*localVertexBuffers=*/klattraDrapeUsesLocalVertexBuffers(),
                                 /*fullTileQuad=*/klattraDrapeFullQuad());
                 gapBuilder->flush(context);
                 bool added = false;

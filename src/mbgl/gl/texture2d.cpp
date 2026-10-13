@@ -54,6 +54,8 @@ size_t Texture2D::getPixelStride() const noexcept {
             return 2 * numChannels();
         case gfx::TextureChannelDataType::Float:
             return 4 * numChannels();
+        case gfx::TextureChannelDataType::UnsignedShort565:
+            return 2;
         default:
             return 0;
     }
@@ -180,13 +182,16 @@ void Texture2D::uploadSubRegion(const void* pixelData, const Size& size_, uint16
     context.activeTextureUnit = 0;
     context.texture[0] = getTextureID();
     context.pixelStoreUnpack = {1};
+    const auto uploadFormat = channelType == gfx::TextureChannelDataType::UnsignedShort565
+                                  ? GL_RGB
+                                  : Enum<gfx::TexturePixelType>::to(pixelFormat);
     MBGL_CHECK_ERROR(glTexSubImage2D(GL_TEXTURE_2D,
                                      0,
                                      xOffset,
                                      yOffset,
                                      size_.width,
                                      size_.height,
-                                     Enum<gfx::TexturePixelType>::to(pixelFormat),
+                                     uploadFormat,
                                      Enum<gfx::TextureChannelDataType>::to(channelType),
                                      pixelData));
 

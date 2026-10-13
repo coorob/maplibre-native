@@ -162,11 +162,11 @@ bool terrainReliefValidElevation(float elevation) {
     return elevation > -500.0 && elevation < 9000.0;
 }
 
-float terrainReliefSampleOrCenter(float sample, float center) {
-    if (!terrainReliefValidElevation(sample)) {
+float terrainReliefSampleOrCenter(float elevationSample, float center) {
+    if (!terrainReliefValidElevation(elevationSample)) {
         return center;
     }
-    return abs(sample - center) > 900.0 ? center : sample;
+    return abs(elevationSample - center) > 900.0 ? center : elevationSample;
 }
 
 float terrainReliefShade(sampler2D demTexture, vec2 mapUV, float metersPerTile) {

@@ -120,4 +120,11 @@ TEST(ResourcePool, TexturePool) {
     EXPECT_TRUE(context.empty(true));
 }
 
+TEST(ResourcePool, PackedRGB565StorageUsesTwoBytesPerPixel) {
+    const gl::Texture2DDesc packed{{1536, 1536},
+                                   gfx::TexturePixelType::RGBA,
+                                   gfx::TextureChannelDataType::UnsignedShort565};
+    EXPECT_EQ(packed.getStorageSize(), 1536u * 1536u * 2u);
+}
+
 #endif
