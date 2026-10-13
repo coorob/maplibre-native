@@ -298,6 +298,18 @@ void RenderColorReliefLayer::update(gfx::ShaderRegistry& shaders,
         }
         setRenderTileBucketID(tileID, bucket.getID());
 
+        // A tile every child covers gets an empty mask: HillshadeBucket::setMask then
+        // leaves one empty segment and no vertices, which means "draw nothing". The
+        // vertex check below took that for "no mask" and drew the full-tile quad, so a
+        // fully covered parent (cover-hold keeps them after a camera flight, and an idle
+        // map never ages them out) tinted its whole area again over its children: a
+        // darker, blurrier block ending at the parent's tile edge (Traska Android QA
+        // 2026-10-13, 6:33,22 over 7:66-67,44-45, seam at 11.25 E).
+        if (bucket.mask.empty()) {
+            removeTile(renderPass, tileID);
+            continue;
+        }
+
         // Set up tile drawable
         std::shared_ptr<ColorReliefVertexVector> vertices;
         std::shared_ptr<gfx::IndexVector<gfx::Triangles>> indices;
