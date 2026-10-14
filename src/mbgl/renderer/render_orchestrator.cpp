@@ -493,6 +493,7 @@ std::unique_ptr<RenderTree> RenderOrchestrator::createRenderTree(
         tileParameters.usedByTerrain = sourceIsTerrainDEM || sourceIsTerrainTopoVector;
         tileParameters.terrainCoverTileIDs =
             sourceIsTerrainTopoVector ? &renderTerrain->getSourceCoverTileIDs() : nullptr;
+        tileParameters.terrainActive = renderTerrain && renderTerrain->isEnabled();
         tileParameters.isUpdateSynchronous = sourceImpl->isUpdateSynchronous();
         source->update(sourceImpl, filteredLayersForSource, sourceNeedsRendering, sourceNeedsRelayout, tileParameters);
         filteredLayersForSource.clear();

@@ -79,6 +79,8 @@ public:
     // Bound the custom previous-cover continuity state to one current ideal
     // cohort. Ordinary holdForFade tiles remain outside this budget.
     bool boundCoverHoldToIdealCohort = false;
+    // Set by RenderOrchestrator while 3D terrain is enabled for the map.
+    bool terrainActive = false;
     gfx::DynamicTextureAtlasPtr dynamicTextureAtlas;
     bool isUpdateSynchronous = false;
 };
