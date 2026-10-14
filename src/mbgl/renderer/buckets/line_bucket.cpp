@@ -4,6 +4,7 @@
 #include <mbgl/util/math.hpp>
 #include <mbgl/util/constants.hpp>
 #include <mbgl/gfx/polyline_generator.hpp>
+#include <mbgl/renderer/terrain_line_lift.hpp>
 
 #include <cassert>
 #include <utility>
@@ -19,10 +20,16 @@ LineBucket::LineBucket(LineBucket::PossiblyEvaluatedLayoutProperties layout_,
     : layout(std::move(layout_)),
       zoom(zoom_),
       overscaling(overscaling_) {
+    bool lifted = false;
     for (const auto& pair : layerPaintProperties) {
         paintPropertyBinders.emplace(std::piecewise_construct,
                                      std::forward_as_tuple(pair.first),
                                      std::forward_as_tuple(getEvaluated<LineLayerProperties>(pair.second), zoom));
+        lifted = lifted || terrain_line_lift::isLiftedLayerID(pair.first);
+    }
+    if (lifted) {
+        const double canonicalZoom = std::floor(zoom) - std::log2(static_cast<double>(std::max(overscaling, 1u)));
+        terrainLiftDensifyStep = terrain_line_lift::densifyStep(canonicalZoom);
     }
 }
 
@@ -51,13 +58,19 @@ void LineBucket::addFeature(const GeometryTileFeature& feature,
     }
 }
 
-void LineBucket::addGeometry(const GeometryCoordinates& coordinates,
+void LineBucket::addGeometry(const GeometryCoordinates& sourceCoordinates,
                              const GeometryTileFeature& feature,
                              const CanonicalTileID& canonical) {
     // Ignore empty coordinates.
-    if (coordinates.empty()) {
+    if (sourceCoordinates.empty()) {
         return;
     }
+    // Lifted lines sample the terrain per vertex; without extra vertices a long
+    // straight segment would cut through ridges or float over valleys.
+    const GeometryCoordinates densified = terrainLiftDensifyStep > 0.0
+                                              ? terrain_line_lift::densify(sourceCoordinates, terrainLiftDensifyStep)
+                                              : GeometryCoordinates{};
+    const GeometryCoordinates& coordinates = terrainLiftDensifyStep > 0.0 ? densified : sourceCoordinates;
     gfx::PolylineGenerator<LineLayoutVertex, SegmentBase> generator(
         vertices,
         LineBucket::layoutVertex,

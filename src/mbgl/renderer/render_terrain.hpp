@@ -133,6 +133,19 @@ public:
     // Raw elevation of the actual bound DEM and mesh triangle under an
     // Android symbol anchor. Empty DEM planes return nullopt (render Z=0).
     std::optional<float> getRenderedElevationAtLatLng(const LatLng& latLng) const;
+    // Batched form for terrain-lifted lines: raw elevation of the rendered
+    // surface for each tile-local point (EXTENT units) of `tile`, with the
+    // candidate DEM bindings filtered once per call. Points on an empty-DEM
+    // plane get `emptyPlaneElevation` (the origin, i.e. render height zero).
+    // A mesh tile whose CPU DEM image is no longer cached falls back to the
+    // deepest cached DEM image at the point; NaN where nothing is known.
+    std::vector<float> sampleRenderedElevations(const UnwrappedTileID& tile,
+                                                const std::vector<Point<int16_t>>& points,
+                                                float emptyPlaneElevation) const;
+    // Identity of every elevation input sampleRenderedElevations would read
+    // for `tile`. Lets a lifted line skip re-sampling when the global
+    // elevation revision moved because of some other part of the cover.
+    uint64_t renderedElevationKey(const UnwrappedTileID& tile) const;
     // Changes when loaded image identities, coverage or in-place DEM borders
     // change. Symbol buckets can cache anchor samples without retaining DEMs.
     uint64_t getElevationRevision() const { return elevationRevision; }

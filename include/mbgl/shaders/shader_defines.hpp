@@ -534,6 +534,9 @@ enum {
     idLinePatternFromVertexAttribute,
     idLinePatternToVertexAttribute,
 
+    // Terrain-lifted lines: raw DEM metres per vertex (GL line/line SDF).
+    idLineTerrainElevationVertexAttribute,
+
     lineVertexAttributeCount
 };
 

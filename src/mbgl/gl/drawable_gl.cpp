@@ -1,5 +1,6 @@
 #include <mbgl/renderer/terrain_perf_diagnostic.hpp>
 #include <mbgl/gl/drawable_gl.hpp>
+#include <mbgl/gfx/line_drawable_data.hpp>
 #if defined(__ANDROID__)
 #include <mbgl/gfx/symbol_drawable_data.hpp>
 #endif
@@ -83,6 +84,11 @@ void DrawableGL::draw(PaintParameters& parameters) const {
     if (enableDepth) {
         auto depthMode = getIs3D() ? parameters.depthModeFor3D()
                                    : parameters.depthModeForSublayer(getSubLayerIndex(), getDepthType());
+        // Terrain-lifted lines test against the terrain but never write depth:
+        // overlapping strokes keep painter's order like the flat map.
+        if (getIs3D() && dynamic_cast<const gfx::LineDrawableData*>(getData().get())) {
+            depthMode.mask = gfx::DepthMaskType::ReadOnly;
+        }
 #if defined(__ANDROID__)
         if (terrainSymbol) {
             // A valid snapshot decides visibility once at the geographic

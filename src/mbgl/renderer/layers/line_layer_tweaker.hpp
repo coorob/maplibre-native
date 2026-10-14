@@ -40,6 +40,10 @@ public:
 
     void execute(LayerGroupBase&, const PaintParameters&) override;
 
+    // Serves a terrain-lifted line group (terrain_line_lift.hpp): its 3D
+    // drawables get a terrain-aligned matrix and the shader's lift flag.
+    void setTerrainLifted(bool value) { terrainLifted = value; }
+
 #if MLN_RENDER_BACKEND_METAL
     using LinePaintProperties = style::LinePaintProperties;
     using Unevaluated = LinePaintProperties::Unevaluated;
@@ -81,6 +85,8 @@ protected:
     // the drape target tile. The per-drawable matrix swaps from the camera's
     // getTileMatrix() to LayerTweaker::getDrapeMatrix(sourceID, drapeTargetID).
     std::optional<OverscaledTileID> drapeTargetID;
+
+    bool terrainLifted = false;
 
 #if MLN_RENDER_BACKEND_METAL || MLN_RENDER_BACKEND_WEBGPU
     shaders::LineExpressionMask expressionMask = shaders::LineExpressionMask::None;

@@ -18,6 +18,8 @@ struct ShaderSource<BuiltIn::LineShader, gfx::Backend::Type::OpenGL> {
 
 layout (location = 0) in vec2 a_pos_normal;
 layout (location = 1) in vec4 a_data;
+// Raw DEM metres at the centreline; only read for terrain-lifted drawables.
+layout (location = 2) in float a_terrain_elevation;
 
 layout (std140) uniform GlobalPaintParamsUBO {
     highp vec2 u_pattern_atlas_texsize;
@@ -41,7 +43,8 @@ layout (std140) uniform LineDrawableUBO {
     lowp float u_gapwidth_t;
     lowp float u_offset_t;
     lowp float u_width_t;
-    lowp float drawable_pad1;
+    // 1 when this drawable is drawn as 3D geometry on the terrain (lifted line).
+    highp float u_terrain_lift;
 };
 
 layout (std140) uniform LineEvaluatedPropsUBO {
@@ -57,6 +60,9 @@ layout (std140) uniform LineEvaluatedPropsUBO {
 };
 
 out vec2 v_normal;
+// Lifted lines clip to their own tile (see the fragment shader).
+out highp vec2 v_tile_pos;
+flat out highp float v_terrain_lift;
 out vec2 v_width2;
 // Unpadded outer/inner radii, in camera pixels.
 out highp vec2 v_drape_width;
@@ -64,25 +70,25 @@ out float v_gamma_scale;
 out highp float v_linesofar;
 
 #ifndef HAS_UNIFORM_u_color
-layout (location = 2) in highp vec4 a_color;
+layout (location = 3) in highp vec4 a_color;
 out highp vec4 color;
 #endif
 #ifndef HAS_UNIFORM_u_blur
-layout (location = 3) in lowp vec2 a_blur;
+layout (location = 4) in lowp vec2 a_blur;
 out lowp float blur;
 #endif
 #ifndef HAS_UNIFORM_u_opacity
-layout (location = 4) in lowp vec2 a_opacity;
+layout (location = 5) in lowp vec2 a_opacity;
 out lowp float opacity;
 #endif
 #ifndef HAS_UNIFORM_u_gapwidth
-layout (location = 5) in mediump vec2 a_gapwidth;
+layout (location = 6) in mediump vec2 a_gapwidth;
 #endif
 #ifndef HAS_UNIFORM_u_offset
-layout (location = 6) in lowp vec2 a_offset;
+layout (location = 7) in lowp vec2 a_offset;
 #endif
 #ifndef HAS_UNIFORM_u_width
-layout (location = 7) in mediump vec2 a_width;
+layout (location = 8) in mediump vec2 a_width;
 #endif
 
 void main() {
@@ -164,8 +170,22 @@ mediump float width = u_width;
     mediump float t = 1.0 - abs(u);
     mediump vec2 offset2 = offset * a_extrude * scale * normal.y * mat2(t, -u, u, t);
 
+    // Lifted lines: u_matrix maps raw DEM metres to the terrain mesh's render
+    // height (exaggeration, origin and a depth pull are folded in on the CPU).
+    bool lifted = u_terrain_lift > 0.5;
+    v_terrain_lift = u_terrain_lift;
+    v_tile_pos = pos + offset2 / u_ratio + dist / u_ratio;
+    float elevation = lifted ? a_terrain_elevation : 0.0;
     vec4 projected_extrude = u_matrix * vec4(dist / u_ratio, 0.0, 0.0);
-    gl_Position = u_matrix * vec4(pos + offset2 / u_ratio, 0.0, 1.0) + projected_extrude;
+    gl_Position = u_matrix * vec4(pos + offset2 / u_ratio, elevation, 1.0) + projected_extrude;
+    if (lifted) {
+        // Give the whole ribbon its centreline's depth. A flat ribbon on a side
+        // slope would otherwise sink half its width into the hill.
+        vec4 centre = u_matrix * vec4(pos, elevation, 1.0);
+        if (centre.w > 0.0) {
+            gl_Position.z = centre.z / centre.w * gl_Position.w;
+        }
+    }
 
     // calculate how much the perspective view squishes or stretches the extrude
     float extrude_length_without_perspective = length(dist);
@@ -191,6 +211,8 @@ in vec2 v_width2;
 in highp vec2 v_drape_width;
 in vec2 v_normal;
 in float v_gamma_scale;
+in highp vec2 v_tile_pos;
+flat in highp float v_terrain_lift;
 
 #ifndef HAS_UNIFORM_u_color
 in highp vec4 color;
@@ -230,6 +252,23 @@ lowp float blur = u_blur;
     #ifdef HAS_UNIFORM_u_opacity
 lowp float opacity = u_opacity;
 #endif
+
+    // Lifted lines cannot use the flat stencil clip: keep only this tile's own
+    // square (the tile buffer duplicates its neighbours) and skip the 4x4
+    // cells that a deeper rendered tile covers (u_terrain_lift = 1 + mask).
+    if (v_terrain_lift > 0.5) {
+        // A 2-unit overlap keeps a pixel on the seam from being dropped by both tiles.
+        if (any(lessThan(v_tile_pos, vec2(-2.0))) || any(greaterThan(v_tile_pos, vec2(8194.0)))) {
+            discard;
+        }
+        int coveredCells = int(v_terrain_lift + 0.5) - 1;
+        if (coveredCells != 0) {
+            ivec2 cell = clamp(ivec2(v_tile_pos / 2048.0), ivec2(0), ivec2(3));
+            if (((coveredCells >> (cell.y * 4 + cell.x)) & 1) != 0) {
+                discard;
+            }
+        }
+    }
 
     // Calculate the distance of the pixel from the line in pixels.
     float dist = length(v_normal) * v_width2.s;

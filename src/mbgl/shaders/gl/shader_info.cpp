@@ -345,6 +345,7 @@ const std::vector<UniformBlockInfo> LineShaderInfo::uniformBlocks = {
 const std::vector<AttributeInfo> LineShaderInfo::attributes = {
     AttributeInfo{"a_pos_normal", idLinePosNormalVertexAttribute},
     AttributeInfo{"a_data", idLineDataVertexAttribute},
+    AttributeInfo{"a_terrain_elevation", idLineTerrainElevationVertexAttribute},
     AttributeInfo{"a_color", idLineColorVertexAttribute},
     AttributeInfo{"a_blur", idLineBlurVertexAttribute},
     AttributeInfo{"a_opacity", idLineOpacityVertexAttribute},
@@ -435,6 +436,7 @@ const std::vector<UniformBlockInfo> LineSDFShaderInfo::uniformBlocks = {
 const std::vector<AttributeInfo> LineSDFShaderInfo::attributes = {
     AttributeInfo{"a_pos_normal", idLinePosNormalVertexAttribute},
     AttributeInfo{"a_data", idLineDataVertexAttribute},
+    AttributeInfo{"a_terrain_elevation", idLineTerrainElevationVertexAttribute},
     AttributeInfo{"a_color", idLineColorVertexAttribute},
     AttributeInfo{"a_blur", idLineBlurVertexAttribute},
     AttributeInfo{"a_opacity", idLineOpacityVertexAttribute},
