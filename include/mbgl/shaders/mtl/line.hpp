@@ -31,7 +31,7 @@ struct alignas(16) LineDrawableUBO {
     /* 80 */ float gapwidth_t;
     /* 84 */ float offset_t;
     /* 88 */ float width_t;
-    /* 92 */ float pad1;
+    /* 92 */ float pad1; // terrain lift: 0 flat, 1 + covered-cell mask lifted
     /* 96 */
 };
 static_assert(sizeof(LineDrawableUBO) == 6 * 16, "wrong size");
@@ -104,7 +104,7 @@ struct alignas(16) LineSDFDrawableUBO {
     /* 108 */ float offset_t;
     /* 112 */ float width_t;
     /* 116 */ float floorwidth_t;
-    /* 120 */ float pad1;
+    /* 120 */ float pad1; // terrain lift: 0 flat, 1 + covered-cell mask lifted
     /* 124 */ float pad2;
     /* 128 */
 };
@@ -178,7 +178,7 @@ struct ShaderSource<BuiltIn::LineShader, gfx::Backend::Type::Metal> {
     static constexpr auto vertexMainFunction = "vertexMain";
     static constexpr auto fragmentMainFunction = "fragmentMain";
 
-    static const std::array<AttributeInfo, 8> attributes;
+    static const std::array<AttributeInfo, 9> attributes;
     static constexpr std::array<AttributeInfo, 0> instanceAttributes{};
     static const std::array<TextureInfo, 0> textures;
 
@@ -207,6 +207,10 @@ struct VertexStage {
 #if !defined(HAS_UNIFORM_u_width)
     float2 width [[attribute(7)]];
 #endif
+#if defined(HAS_UNIFORM_u_terrain_lift)
+    // Raw DEM metres at the centreline (terrain-lifted variant only).
+    float terrain_elevation [[attribute(8)]];
+#endif
 };
 
 struct FragmentStage {
@@ -214,6 +218,10 @@ struct FragmentStage {
     float2 width2;
     float2 normal;
     half gamma_scale;
+#if defined(HAS_UNIFORM_u_terrain_lift)
+    float2 tile_pos;
+    float terrain_lift [[flat]];
+#endif
 
 #if !defined(HAS_UNIFORM_u_color)
     float4 color;
@@ -286,7 +294,24 @@ FragmentStage vertex vertexMain(thread const VertexStage vertx [[stage_in]],
     const float2 offset2 = offset * a_extrude * LINE_NORMAL_SCALE * v_normal.y * float2x2(t, -u, u, t);
 
     const float4 projected_extrude = drawable.matrix * float4(dist / drawable.ratio, 0.0, 0.0);
+#if defined(HAS_UNIFORM_u_terrain_lift)
+    // Lifted lines (terrain_line_lift.hpp): the matrix maps raw DEM metres to
+    // the terrain mesh's render height (exaggeration, origin and a depth pull
+    // are folded in on the CPU); pad1 is 1 + the covered-cell mask.
+    const bool lifted = drawable.pad1 > 0.5;
+    const float elevation = lifted ? vertx.terrain_elevation : 0.0;
+    float4 position = drawable.matrix * float4(pos + offset2 / drawable.ratio, elevation, 1.0) + projected_extrude;
+    if (lifted) {
+        // Give the whole ribbon its centreline's depth. A flat ribbon on a side
+        // slope would otherwise sink half its width into the hill.
+        const float4 centre = drawable.matrix * float4(pos, elevation, 1.0);
+        if (centre.w > 0.0) {
+            position.z = centre.z / centre.w * position.w;
+        }
+    }
+#else
     const float4 position = drawable.matrix * float4(pos + offset2 / drawable.ratio, 0.0, 1.0) + projected_extrude;
+#endif
 
     // calculate how much the perspective view squishes or stretches the extrude
     const float extrude_length_without_perspective = length(dist);
@@ -297,6 +322,10 @@ FragmentStage vertex vertexMain(thread const VertexStage vertx [[stage_in]],
         .width2      = float2(outset, inset),
         .normal      = v_normal,
         .gamma_scale = half(extrude_length_without_perspective / extrude_length_with_perspective),
+#if defined(HAS_UNIFORM_u_terrain_lift)
+        .tile_pos    = pos + offset2 / drawable.ratio + dist / drawable.ratio,
+        .terrain_lift = drawable.pad1,
+#endif
 
 #if !defined(HAS_UNIFORM_u_color)
         .color       = unpack_mix_color(vertx.color,   drawable.color_t),
@@ -316,6 +345,25 @@ half4 fragment fragmentMain(FragmentStage in [[stage_in]],
                             device const LineExpressionUBO& expr [[buffer(idLineExpressionUBO)]]) {
 #if defined(OVERDRAW_INSPECTOR)
     return half4(1.0);
+#endif
+
+#if defined(HAS_UNIFORM_u_terrain_lift)
+    // Lifted lines cannot use the flat stencil clip: keep only this tile's own
+    // square (the tile buffer duplicates its neighbours) and skip the 4x4
+    // cells that a deeper rendered tile covers (terrain_lift = 1 + mask).
+    if (in.terrain_lift > 0.5) {
+        // A 2-unit overlap keeps a pixel on the seam from being dropped by both tiles.
+        if (any(in.tile_pos < float2(-2.0)) || any(in.tile_pos > float2(8194.0))) {
+            discard_fragment();
+        }
+        const int coveredCells = int(in.terrain_lift + 0.5) - 1;
+        if (coveredCells != 0) {
+            const int2 cell = clamp(int2(in.tile_pos / 2048.0), int2(0), int2(3));
+            if (((coveredCells >> (cell.y * 4 + cell.x)) & 1) != 0) {
+                discard_fragment();
+            }
+        }
+    }
 #endif
 
 #if defined(HAS_UNIFORM_u_color)
@@ -762,7 +810,7 @@ struct ShaderSource<BuiltIn::LineSDFShader, gfx::Backend::Type::Metal> {
     static constexpr auto vertexMainFunction = "vertexMain";
     static constexpr auto fragmentMainFunction = "fragmentMain";
 
-    static const std::array<AttributeInfo, 9> attributes;
+    static const std::array<AttributeInfo, 10> attributes;
     static constexpr std::array<AttributeInfo, 0> instanceAttributes{};
     static const std::array<TextureInfo, 1> textures;
 
@@ -794,6 +842,10 @@ struct VertexStage {
 #if !defined(HAS_UNIFORM_u_floorwidth)
     float2 floorwidth [[attribute(8)]];
 #endif
+#if defined(HAS_UNIFORM_u_terrain_lift)
+    // Raw DEM metres at the centreline (terrain-lifted variant only).
+    float terrain_elevation [[attribute(9)]];
+#endif
 };
 
 struct FragmentStage {
@@ -803,6 +855,10 @@ struct FragmentStage {
     float2 tex_a;
     float2 tex_b;
     half gamma_scale;
+#if defined(HAS_UNIFORM_u_terrain_lift)
+    float2 tile_pos;
+    float terrain_lift [[flat]];
+#endif
 
 #if !defined(HAS_UNIFORM_u_color)
     float4 color;
@@ -887,7 +943,24 @@ FragmentStage vertex vertexMain(thread const VertexStage vertx [[stage_in]],
     const float2 offset2 = offset * a_extrude * LINE_NORMAL_SCALE * v_normal.y * float2x2(t, -u, u, t);
 
     const float4 projected_extrude = drawable.matrix * float4(dist / drawable.ratio, 0.0, 0.0);
+#if defined(HAS_UNIFORM_u_terrain_lift)
+    // Lifted lines (terrain_line_lift.hpp): the matrix maps raw DEM metres to
+    // the terrain mesh's render height (exaggeration, origin and a depth pull
+    // are folded in on the CPU); pad1 is 1 + the covered-cell mask.
+    const bool lifted = drawable.pad1 > 0.5;
+    const float elevation = lifted ? vertx.terrain_elevation : 0.0;
+    float4 position = drawable.matrix * float4(pos + offset2 / drawable.ratio, elevation, 1.0) + projected_extrude;
+    if (lifted) {
+        // Give the whole ribbon its centreline's depth. A flat ribbon on a side
+        // slope would otherwise sink half its width into the hill.
+        const float4 centre = drawable.matrix * float4(pos, elevation, 1.0);
+        if (centre.w > 0.0) {
+            position.z = centre.z / centre.w * position.w;
+        }
+    }
+#else
     const float4 position = drawable.matrix * float4(pos + offset2 / drawable.ratio, 0.0, 1.0) + projected_extrude;
+#endif
 
     // calculate how much the perspective view squishes or stretches the extrude
     const float extrude_length_without_perspective = length(dist);
@@ -898,6 +971,10 @@ FragmentStage vertex vertexMain(thread const VertexStage vertx [[stage_in]],
         .width2       = float2(outset, inset),
         .normal       = v_normal,
         .gamma_scale  = half(extrude_length_without_perspective / extrude_length_with_perspective),
+#if defined(HAS_UNIFORM_u_terrain_lift)
+        .tile_pos     = pos + offset2 / drawable.ratio + dist / drawable.ratio,
+        .terrain_lift = drawable.pad1,
+#endif
         .tex_a        = float2(linesofar * drawable.patternscale_a.x / floorwidth, v_normal.y * drawable.patternscale_a.y + drawable.tex_y_a),
         .tex_b        = float2(linesofar * drawable.patternscale_b.x / floorwidth, v_normal.y * drawable.patternscale_b.y + drawable.tex_y_b),
 
@@ -927,6 +1004,25 @@ half4 fragment fragmentMain(FragmentStage in [[stage_in]],
 
 #if defined(OVERDRAW_INSPECTOR)
     return half4(1.0);
+#endif
+
+#if defined(HAS_UNIFORM_u_terrain_lift)
+    // Lifted lines cannot use the flat stencil clip: keep only this tile's own
+    // square (the tile buffer duplicates its neighbours) and skip the 4x4
+    // cells that a deeper rendered tile covers (terrain_lift = 1 + mask).
+    if (in.terrain_lift > 0.5) {
+        // A 2-unit overlap keeps a pixel on the seam from being dropped by both tiles.
+        if (any(in.tile_pos < float2(-2.0)) || any(in.tile_pos > float2(8194.0))) {
+            discard_fragment();
+        }
+        const int coveredCells = int(in.terrain_lift + 0.5) - 1;
+        if (coveredCells != 0) {
+            const int2 cell = clamp(int2(in.tile_pos / 2048.0), int2(0), int2(3));
+            if (((coveredCells >> (cell.y * 4 + cell.x)) & 1) != 0) {
+                discard_fragment();
+            }
+        }
+    }
 #endif
 
     device const LineSDFTilePropsUBO& tileProps = tilePropsVector[uboIndex].lineSDFTilePropsUBO;

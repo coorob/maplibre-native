@@ -1,5 +1,7 @@
 #include <mbgl/renderer/layers/line_layer_tweaker.hpp>
 
+#include <algorithm>
+
 #include <mbgl/gfx/context.hpp>
 #include <mbgl/gfx/drawable.hpp>
 #include <mbgl/gfx/line_drawable_data.hpp>
@@ -8,6 +10,8 @@
 #include <mbgl/renderer/layer_group.hpp>
 #include <mbgl/renderer/paint_parameters.hpp>
 #include <mbgl/renderer/render_tile.hpp>
+#include <mbgl/renderer/render_terrain.hpp>
+#include <mbgl/renderer/terrain_line_lift.hpp>
 #include <mbgl/shaders/line_layer_ubo.hpp>
 #include <mbgl/shaders/shader_program_base.hpp>
 #include <mbgl/style/layers/line_layer_properties.hpp>
@@ -195,6 +199,60 @@ void LineLayerTweaker::execute(LayerGroupBase& layerGroup, const PaintParameters
     layerUniforms.set(idLineExpressionUBO, getExpressionBuffer());
 #endif // MLN_RENDER_BACKEND_METAL
 
+    // Terrain-lifted drawables carry raw DEM metres in z. Fold the terrain
+    // mesh's render-height transform into their matrix (same exaggeration and
+    // origin as the terrain tweaker), use the terrain's near-clipped projection
+    // so both share one depth comparison, and pull them a little toward the
+    // camera: a constant clip-space z offset c moves a point at view depth w
+    // by c * w / (2 * near), i.e. a fixed fraction of its distance. Metal
+    // uses the same GL-style projection and depth = z / w, so the same c.
+    std::optional<std::array<double, 3>> liftTransform; // {scale, offset, clip pull}
+    if (terrainLifted && parameters.activeTerrain) {
+        const auto& terrain = *parameters.activeTerrain;
+        const float exaggeration = terrain.getExaggeration();
+        const float fallbackOrigin = std::abs(parameters.state.getLatLng().latitude()) >= 60.0 ? 1000.0f : 0.0f;
+        const float origin = terrain.getElevationOriginMeters().value_or(fallbackOrigin);
+        static const bool absoluteHeights = std::getenv("KLATTRA_TERRAIN_ABSOLUTE_HEIGHTS") != nullptr;
+        const double nearZ = 0.1 * parameters.state.getCameraToCenterDistance();
+        liftTransform = std::array<double, 3>{
+            exaggeration,
+            (absoluteHeights ? 0.0 : -static_cast<double>(origin) * exaggeration) + terrain_line_lift::liftMeters(),
+            2.0 * nearZ * terrain_line_lift::depthPullFraction()};
+    }
+
+    // Lifted drawables cannot be stencil-clipped (the clip masks are flat).
+    // Each one clips to its own tile in the fragment shader; this records which
+    // 4x4 cells of a tile are covered by a deeper lifted tile drawn alongside
+    // it (a parent kept while its children load), so the parent skips them.
+    std::vector<OverscaledTileID> liftedTileIDs;
+    if (liftTransform) {
+        visitLayerGroupDrawables(layerGroup, [&](gfx::Drawable& drawable) {
+            if (drawable.getEnabled() && drawable.getIs3D() && drawable.getTileID()) {
+                liftedTileIDs.push_back(*drawable.getTileID());
+            }
+        });
+        std::sort(liftedTileIDs.begin(), liftedTileIDs.end());
+        liftedTileIDs.erase(std::unique(liftedTileIDs.begin(), liftedTileIDs.end()), liftedTileIDs.end());
+    }
+    const auto coveredCellMask = [&](const OverscaledTileID& tile) {
+        uint32_t mask = 0;
+        for (const auto& other : liftedTileIDs) {
+            const int dz = static_cast<int>(other.canonical.z) - static_cast<int>(tile.canonical.z);
+            if (dz <= 0 || dz > 2 || other.wrap != tile.wrap || !other.canonical.isChildOf(tile.canonical)) {
+                continue;
+            }
+            const uint32_t span = 1u << (2 - dz); // cells per side covered by the descendant
+            const uint32_t x0 = (other.canonical.x - (tile.canonical.x << dz)) * span;
+            const uint32_t y0 = (other.canonical.y - (tile.canonical.y << dz)) * span;
+            for (uint32_t y = y0; y < y0 + span && y < 4; ++y) {
+                for (uint32_t x = x0; x < x0 + span && x < 4; ++x) {
+                    mask |= 1u << (y * 4 + x);
+                }
+            }
+        }
+        return mask;
+    };
+
 #if MLN_UBO_CONSOLIDATION
     int i = 0;
     std::vector<LineDrawableUnionUBO> drawableUBOVector(layerGroup.getDrawableCount());
@@ -228,15 +286,25 @@ void LineLayerTweaker::execute(LayerGroupBase& layerGroup, const PaintParameters
         // instead of the camera. Line width / ratio still uses the camera
         // zoom — visually a touch off when source and drape zoom differ, but
         // mirrors what gl-js does for layer-relative line metrics.
-        const auto matrix = drapeTargetID
-                                ? getDrapeMatrix(*drawable.getTileID(), *drapeTargetID)
-                                : getTileMatrix(tileID,
-                                                parameters,
-                                                translation,
-                                                anchor,
-                                                nearClipped,
-                                                inViewportPixelUnits,
-                                                drawable);
+        const bool lifted = liftTransform && drawable.getIs3D();
+        const auto matrix = [&]() -> mat4 {
+            if (drapeTargetID) return getDrapeMatrix(*drawable.getTileID(), *drapeTargetID);
+            if (lifted) {
+                const auto& [zScale, zOffset, clipPull] = *liftTransform;
+                mat4 m;
+                parameters.state.matrixFor(m, tileID);
+                matrix::translate(m, m, 0.0, 0.0, zOffset);
+                matrix::scale(m, m, 1.0, 1.0, zScale);
+                matrix::multiply(m, parameters.transformParams.nearClippedProjMatrix, m);
+                m[14] -= clipPull; // column 3, row 2: clip-space z translation
+                return m;
+            }
+            return getTileMatrix(
+                tileID, parameters, translation, anchor, nearClipped, inViewportPixelUnits, drawable);
+        }();
+        // The line shaders read the Simple/SDF drawable UBO's pad1 as the lift
+        // word: 0 = flat/draped, 1 + covered-cell mask = lifted.
+        const float terrainLift = lifted ? 1.0f + static_cast<float>(coveredCellMask(*drawable.getTileID())) : 0.0f;
 
 #if !MLN_UBO_CONSOLIDATION
         auto& drawableUniforms = drawable.mutableUniformBuffers();
@@ -257,7 +325,7 @@ void LineLayerTweaker::execute(LayerGroupBase& layerGroup, const PaintParameters
                     .gapwidth_t = std::get<0>(binders->get<LineGapWidth>()->interpolationFactor(zoom)),
                     .offset_t = std::get<0>(binders->get<LineOffset>()->interpolationFactor(zoom)),
                     .width_t = std::get<0>(binders->get<LineWidth>()->interpolationFactor(zoom)),
-                    .pad1 = 0
+                    .pad1 = terrainLift
                 };
 
 #if !MLN_UBO_CONSOLIDATION
@@ -376,7 +444,7 @@ void LineLayerTweaker::execute(LayerGroupBase& layerGroup, const PaintParameters
                         .offset_t = std::get<0>(binders->get<LineOffset>()->interpolationFactor(zoom)),
                         .width_t = std::get<0>(binders->get<LineWidth>()->interpolationFactor(zoom)),
                         .floorwidth_t = std::get<0>(binders->get<LineFloorWidth>()->interpolationFactor(zoom)),
-                        .pad1 = 0,
+                        .pad1 = terrainLift,
                         .pad2 = 0
                     };
 

@@ -8,6 +8,8 @@
 #include <mbgl/style/layers/line_layer_properties.hpp>
 #include <mbgl/style/image_impl.hpp>
 
+#include <optional>
+
 namespace mbgl {
 
 class BucketParameters;
@@ -95,11 +97,26 @@ public:
 
     std::map<std::string, LineBinders> paintPropertyBinders;
 
+    // Terrain-lifted lines (terrain_line_lift.hpp): one raw DEM height per
+    // layout vertex, sampled from the rendered terrain surface. Shared by
+    // every lifted layer drawing this bucket and refreshed when the terrain's
+    // elevation revision changes.
+    using TerrainVertex = gfx::Vertex<TypeList<attributes::terrain_elevation>>;
+    using TerrainVertexVector = gfx::VertexVector<TerrainVertex>;
+    std::shared_ptr<TerrainVertexVector> sharedTerrainVertices;
+    const void* terrainElevationOwner = nullptr;
+    uint64_t terrainElevationRevision = 0;
+    uint64_t terrainElevationKey = 0;
+    std::optional<UnwrappedTileID> terrainElevationTile;
+
 private:
     void addGeometry(const GeometryCoordinates&, const GeometryTileFeature&, const CanonicalTileID&);
 
     const float zoom;
     const uint32_t overscaling;
+    // Non-zero when a lifted layer draws this bucket: geometry is split so a
+    // vertex lands in every terrain mesh cell.
+    double terrainLiftDensifyStep = 0.0;
 };
 
 } // namespace mbgl

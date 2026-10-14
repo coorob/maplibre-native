@@ -259,13 +259,24 @@ void TileLayerGroup::render(RenderOrchestrator&, PaintParameters& parameters) {
     gfx::StencilMode stencilMode3d;
 
     // If we're using stencil clipping, we need to handle 3D features separately
-    if (stencilTiles && !stencilTiles->empty()) {
+    const bool hasStencilTiles = stencilTiles && !stencilTiles->empty();
+    if (hasStencilTiles) {
         visitDrawables([&](const gfx::Drawable& drawable) {
             if (drawable.getEnabled() && drawable.getIs3D() && drawable.hasRenderPass(parameters.pass)) {
                 features3d = true;
                 if (drawable.getEnableStencil()) {
                     stencil3d = true;
                 }
+            }
+        });
+    } else {
+        // 3D drawables never set their own depth state (see Drawable::draw),
+        // so a group without stencil tiles must still give them one rather
+        // than inherit whatever the previous group left on the encoder.
+        // Terrain-lifted line groups are the case: depth-tested, no stencil.
+        visitDrawables([&](const gfx::Drawable& drawable) {
+            if (drawable.getEnabled() && drawable.getIs3D() && drawable.hasRenderPass(parameters.pass)) {
+                features3d = true;
             }
         });
     }
@@ -381,6 +392,22 @@ void TileLayerGroup::render(RenderOrchestrator&, PaintParameters& parameters) {
                 }
                 renderPass.setDepthStencilState(*state);
                 renderPass.setStencilReference(stencilMode.ref);
+            } else if (!hasStencilTiles) {
+                // No stencil tiles: depth only, honouring a read-only mask.
+                if (!drawable.getEnableDepth()) {
+                    renderPass.setDepthStencilState(getDepthStencilState(false, false));
+                } else if (drawable.getDepthType() == gfx::DepthMaskType::ReadOnly) {
+                    if (!stateDepthReadOnly) {
+                        stateDepthReadOnly = context.makeDepthStencilState(
+                            gfx::DepthMode{.func = gfx::DepthFunctionType::LessEqual,
+                                           .mask = gfx::DepthMaskType::ReadOnly},
+                            gfx::StencilMode::disabled(),
+                            renderable);
+                    }
+                    renderPass.setDepthStencilState(*stateDepthReadOnly);
+                } else {
+                    renderPass.setDepthStencilState(getDepthStencilState(true, false));
+                }
             } else {
                 const auto& state =
                     getDepthStencilState(drawable.getEnableDepth(), drawable.getEnableStencil());

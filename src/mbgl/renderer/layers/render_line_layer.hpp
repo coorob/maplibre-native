@@ -23,6 +23,7 @@ using UniformBufferPtr = std::shared_ptr<UniformBuffer>;
 
 class LineLayerTweaker;
 using LineLayerTweakerPtr = std::shared_ptr<LineLayerTweaker>;
+class TileLayerGroup;
 
 class RenderLineLayer final : public RenderLayer {
 public:
@@ -36,6 +37,12 @@ public:
                 const std::shared_ptr<UpdateParameters>&,
                 const RenderTree&,
                 UniqueChangeRequestVec&) override;
+
+    void markLayerRenderable(bool willRender, UniqueChangeRequestVec&) override;
+    void layerRemoved(UniqueChangeRequestVec&) override;
+    void layerIndexChanged(int32_t newLayerIndex, UniqueChangeRequestVec&) override;
+    std::size_t removeTile(RenderPass, const OverscaledTileID&) override;
+    std::size_t removeAllDrawables() override;
 
 private:
     void transition(const TransitionParameters&) override;
@@ -69,6 +76,13 @@ private:
     // Phase 2 drape routing: per-drape-target LineLayerTweakers, keyed by
     // the drape target's tile ID. Lazily populated when terrain is active.
     std::unordered_map<OverscaledTileID, LineLayerTweakerPtr> drapeLayerTweakers;
+
+    // Terrain-lifted lines (terrain_line_lift.hpp). Tiles under ready terrain
+    // draw as 3D geometry from their own group, which the renderer defers to
+    // the pass after the terrain mesh; such layers never route into drapes.
+    std::shared_ptr<TileLayerGroup> liftedLayerGroup;
+    LineLayerTweakerPtr liftedLayerTweaker;
+    const bool terrainLifted;
 };
 
 } // namespace mbgl

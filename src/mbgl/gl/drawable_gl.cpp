@@ -1,4 +1,5 @@
 #include <mbgl/gl/drawable_gl.hpp>
+#include <mbgl/gfx/line_drawable_data.hpp>
 #include <mbgl/gl/drawable_gl_impl.hpp>
 #include <mbgl/gl/texture2d.hpp>
 #include <mbgl/gl/upload_pass.hpp>
@@ -43,8 +44,14 @@ void DrawableGL::draw(PaintParameters& parameters) const {
     }
 
     if (enableDepth) {
-        context.setDepthMode(getIs3D() ? parameters.depthModeFor3D()
-                                       : parameters.depthModeForSublayer(getSubLayerIndex(), getDepthType()));
+        auto depthMode = getIs3D() ? parameters.depthModeFor3D()
+                                   : parameters.depthModeForSublayer(getSubLayerIndex(), getDepthType());
+        // Terrain-lifted lines test against the terrain but never write depth:
+        // overlapping strokes keep painter's order like the flat map.
+        if (getIs3D() && dynamic_cast<const gfx::LineDrawableData*>(getData().get())) {
+            depthMode.mask = gfx::DepthMaskType::ReadOnly;
+        }
+        context.setDepthMode(depthMode);
     } else {
         context.setDepthMode(gfx::DepthMode::disabled());
     }

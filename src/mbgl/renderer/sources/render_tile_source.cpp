@@ -207,7 +207,8 @@ void TileSourceRenderItem::updateDebugDrawables(DebugLayerGroupMap& debugLayerGr
              idLineOpacityVertexAttribute,
              idLineGapWidthVertexAttribute,
              idLineOffsetVertexAttribute,
-             idLineWidthVertexAttribute}};
+             idLineWidthVertexAttribute,
+             idLineTerrainElevationVertexAttribute}};
         return shaderGroup->getOrCreateShader(context, propertiesAsUniforms);
     };
 

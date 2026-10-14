@@ -845,7 +845,8 @@ gfx::ShaderPtr CustomDrawableLayerHost::Interface::lineShaderDefault() const {
                                                  idLineOpacityVertexAttribute,
                                                  idLineGapWidthVertexAttribute,
                                                  idLineOffsetVertexAttribute,
-                                                 idLineWidthVertexAttribute}};
+                                                 idLineWidthVertexAttribute,
+                                                 idLineTerrainElevationVertexAttribute}};
 
     return shaderGroup->getOrCreateShader(context, propertiesAsUniforms);
 }

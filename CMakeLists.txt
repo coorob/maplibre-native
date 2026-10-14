@@ -655,6 +655,8 @@ list(APPEND SRC_FILES
     ${PROJECT_SOURCE_DIR}/src/mbgl/renderer/tile_mask.hpp
     ${PROJECT_SOURCE_DIR}/src/mbgl/renderer/tile_parameters.hpp
     ${PROJECT_SOURCE_DIR}/src/mbgl/renderer/cover_hold_budget.hpp
+    ${PROJECT_SOURCE_DIR}/src/mbgl/renderer/terrain_line_lift.hpp
+    ${PROJECT_SOURCE_DIR}/src/mbgl/renderer/terrain_surface_sample.hpp
     ${PROJECT_SOURCE_DIR}/src/mbgl/renderer/tile_pyramid.cpp
     ${PROJECT_SOURCE_DIR}/src/mbgl/renderer/tile_pyramid.hpp
     ${PROJECT_SOURCE_DIR}/src/mbgl/renderer/tile_render_data.cpp

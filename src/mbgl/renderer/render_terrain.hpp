@@ -11,6 +11,7 @@
 #include <mbgl/renderer/render_terrain_drape_cache.hpp>
 #include <mbgl/renderer/layer_tweaker.hpp>
 #include <mbgl/util/geo.hpp>
+#include <mbgl/util/geometry.hpp>
 
 #include <chrono>
 #include <deque>
@@ -127,6 +128,23 @@ public:
      * tile containing the coordinate yet.
      */
     std::optional<float> getElevationAtLatLng(const LatLng& latLng) const;
+    // Raw elevation of the rendered terrain surface for each tile-local point
+    // (EXTENT units) of `tile`, for terrain-lifted lines: the bound DEM image
+    // of the covering mesh tile, sampled exactly like the terrain shader
+    // (terrain_surface_sample.hpp). Points on an empty-DEM plane get
+    // `emptyPlaneElevation` (the origin, i.e. render height zero). A mesh tile
+    // without a CPU DEM image falls back to the deepest cached DEM image at
+    // the point; NaN where nothing is known.
+    std::vector<float> sampleRenderedElevations(const UnwrappedTileID& tile,
+                                                const std::vector<Point<int16_t>>& points,
+                                                float emptyPlaneElevation) const;
+    // Identity of every elevation input sampleRenderedElevations would read
+    // for `tile`. Lets a lifted line skip re-sampling when the global
+    // elevation revision moved because of some other part of the cover.
+    // `emptyPlaneElevation` counts only where an empty-DEM plane is in reach.
+    uint64_t renderedElevationKey(const UnwrappedTileID& tile, float emptyPlaneElevation) const;
+    // Changes whenever a DEM binding or cached DEM image changes.
+    uint64_t getElevationRevision() const { return elevationRevision; }
 
     /**
      * @brief DEM elevation currently used as the terrain vertical origin.
@@ -208,6 +226,9 @@ public:
         bool drapeReady = false;
         bool usedEmptyDEM = false;
         bool usedDrapeFallback = false;
+        // CPU copy of the bound DEM (sourceID's image), kept with the binding
+        // so held bindings stay sampleable after the tile leaves the cover.
+        std::shared_ptr<const PremultipliedImage> demImage;
     };
 
     /**
@@ -388,6 +409,8 @@ private:
      * to prevent stitching artifacts between tiles.
      */
     void generateMesh(gfx::Context& context);
+    // Bumps elevationRevision when the bindings or cached DEM images changed.
+    void updateElevationRevision();
 
     /**
      * @brief Find the DEM source for the current terrain
@@ -437,6 +460,9 @@ private:
     // (getElevation) stay valid even if the source bucket gets torn down
     // mid-frame. Refreshed each update() to match the current cover set.
     std::unordered_map<OverscaledTileID, std::shared_ptr<const PremultipliedImage>> demImagesByTile;
+    // See getElevationRevision(); bumped when elevationFingerprint changes.
+    uint64_t elevationRevision = 0;
+    uint64_t elevationFingerprint = 0;
 
     // Smoothed-ish local terrain origin, sampled at the current map center
     // whenever a covering DEM tile is available. The shader subtracts this

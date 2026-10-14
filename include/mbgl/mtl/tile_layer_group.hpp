@@ -38,6 +38,9 @@ public:
 protected:
     std::optional<MTLDepthStencilStatePtr> stateNone;
     std::optional<MTLDepthStencilStatePtr> stateDepth;
+    // 3D drawables in a group without stencil tiles that only test depth
+    // (terrain-lifted lines).
+    std::optional<MTLDepthStencilStatePtr> stateDepthReadOnly;
     UniformBufferArray uniformBuffers;
 };
 

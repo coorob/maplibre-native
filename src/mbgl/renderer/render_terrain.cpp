@@ -12,6 +12,7 @@
 #include <mbgl/renderer/change_request.hpp>
 #include <mbgl/renderer/layer_group.hpp>
 #include <mbgl/renderer/layers/terrain_layer_tweaker.hpp>
+#include <mbgl/renderer/terrain_surface_sample.hpp>
 #include <mbgl/renderer/buckets/hillshade_bucket.hpp>
 #include <mbgl/map/transform_state.hpp>
 #include <mbgl/geometry/dem_data.hpp>
@@ -46,6 +47,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <initializer_list>
 #include <cstdio>
 #include <iterator>
 #include <limits>
@@ -1432,6 +1434,11 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
         }
 
         DEMBinding binding(resolvedTexture, resolvedSourceID.value_or(idealOS));
+        if (resolvedSourceID) {
+            if (auto image = demImagesByTile.find(*resolvedSourceID); image != demImagesByTile.end()) {
+                binding.demImage = image->second;
+            }
+        }
         if (binding.texture && resolvedSourceID && idealOS.canonical.z > resolvedSourceID->canonical.z) {
             auto [demTL, demScale] = klattraSubrectForChildInAncestor(idealOS, *resolvedSourceID);
             binding.demTL = demTL;
@@ -2132,6 +2139,7 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
     }
 
     currentBindings = std::move(nextBindings);
+    updateElevationRevision();
     if (klattraTraceStderr()) {
         klattraTrace("terrain update-end source=" + impl->sourceID +
                      " bindings=" + std::to_string(currentBindings.size()) +
@@ -2655,6 +2663,223 @@ std::optional<float> RenderTerrain::getElevationAtLatLng(const LatLng& latLng) c
     return elevation;
 }
 
+std::vector<float> RenderTerrain::sampleRenderedElevations(const UnwrappedTileID& tile,
+                                                          const std::vector<Point<int16_t>>& points,
+                                                          float emptyPlaneElevation) const {
+    std::vector<float> result(points.size(), std::numeric_limits<float>::quiet_NaN());
+    if (points.empty()) return result;
+
+    // Everything in unwrapped world units ([0,1) per world copy).
+    const double tileScale = std::exp2(static_cast<double>(tile.canonical.z));
+    const double tileX0 = (static_cast<double>(tile.canonical.x) + tile.wrap * tileScale) / tileScale;
+    const double tileY0 = static_cast<double>(tile.canonical.y) / tileScale;
+    const double tileSize = 1.0 / tileScale;
+    // Line geometry reaches into the tile buffer (beyond 0..EXTENT); sample
+    // those points from the neighbouring terrain tiles too.
+    const double margin = tileSize / 8.0;
+    const auto overlapsTile = [&](double x0, double y0, double size) {
+        return !(x0 >= tileX0 + tileSize + margin || x0 + size <= tileX0 - margin ||
+                 y0 >= tileY0 + tileSize + margin || y0 + size <= tileY0 - margin);
+    };
+
+    struct Candidate {
+        const DEMBinding* binding;
+        OverscaledTileID id;
+        double x0, y0, scale;
+    };
+    std::vector<Candidate> candidates;
+    for (const auto& [idealID, binding] : currentBindings) {
+        const double scale = std::exp2(static_cast<double>(idealID.canonical.z));
+        const double x0 = (static_cast<double>(idealID.canonical.x) + idealID.wrap * scale) / scale;
+        const double y0 = static_cast<double>(idealID.canonical.y) / scale;
+        if (overlapsTile(x0, y0, 1.0 / scale)) candidates.push_back({&binding, idealID, x0, y0, scale});
+    }
+    // The mesh tiles are disjoint; deepest first only settles shared edges.
+    std::sort(candidates.begin(), candidates.end(), [](const Candidate& a, const Candidate& b) {
+        return a.id.canonical.z != b.id.canonical.z ? a.id.canonical.z > b.id.canonical.z : a.id < b.id;
+    });
+
+    // Cached CPU DEM images, for points no mesh tile with an image covers.
+    struct CachedImage {
+        const PremultipliedImage* image;
+        uint8_t z;
+        double x0, y0, scale;
+    };
+    std::vector<CachedImage> cachedImages;
+    for (const auto& [cachedID, cachedImage] : demImagesByTile) {
+        if (!cachedImage || cachedImage->size.isEmpty()) continue;
+        const double scale = std::exp2(static_cast<double>(cachedID.canonical.z));
+        const double x0 = (static_cast<double>(cachedID.canonical.x) + cachedID.wrap * scale) / scale;
+        const double y0 = static_cast<double>(cachedID.canonical.y) / scale;
+        if (overlapsTile(x0, y0, 1.0 / scale)) {
+            cachedImages.push_back({cachedImage.get(), cachedID.canonical.z, x0, y0, scale});
+        }
+    }
+    std::sort(cachedImages.begin(), cachedImages.end(), [](const CachedImage& a, const CachedImage& b) {
+        return a.z > b.z;
+    });
+
+    constexpr double edgeRoundoff = 1e-9;
+    const auto inside = [](double u, double v) {
+        return u >= -edgeRoundoff && u <= 1.0 + edgeRoundoff && v >= -edgeRoundoff && v <= 1.0 + edgeRoundoff;
+    };
+    const auto cachedSample = [&](double worldX, double worldY) -> float {
+        for (const auto& c : cachedImages) {
+            const double u = (worldX - c.x0) * c.scale;
+            const double v = (worldY - c.y0) * c.scale;
+            if (!inside(u, v)) continue;
+            return terrain_surface::sampleDEM(*c.image,
+                                              static_cast<float>(std::clamp(u, 0.0, 1.0)),
+                                              static_cast<float>(std::clamp(v, 0.0, 1.0)));
+        }
+        return std::numeric_limits<float>::quiet_NaN();
+    };
+
+    std::optional<Point<int16_t>> lastPoint;
+    float lastValue = std::numeric_limits<float>::quiet_NaN();
+    for (std::size_t i = 0; i < points.size(); ++i) {
+        const auto& p = points[i];
+        if (lastPoint && *lastPoint == p) {
+            result[i] = lastValue;
+            continue;
+        }
+        const double worldX = tileX0 + p.x / static_cast<double>(util::EXTENT) * tileSize;
+        const double worldY = tileY0 + p.y / static_cast<double>(util::EXTENT) * tileSize;
+        float value = std::numeric_limits<float>::quiet_NaN();
+        for (const auto& c : candidates) {
+            const double u = (worldX - c.x0) * c.scale;
+            const double v = (worldY - c.y0) * c.scale;
+            if (!inside(u, v)) continue;
+            const auto& binding = *c.binding;
+            if (binding.usedEmptyDEM) {
+                value = emptyPlaneElevation; // the mesh draws this tile as the origin plane
+            } else if (binding.demImage) {
+                if (const auto sampled = terrain_surface::sample(*binding.demImage,
+                                                                 static_cast<float>(std::clamp(u, 0.0, 1.0)),
+                                                                 static_cast<float>(std::clamp(v, 0.0, 1.0)),
+                                                                 binding.demTL,
+                                                                 binding.demScale)) {
+                    value = *sampled;
+                }
+            }
+            break;
+        }
+        if (std::isnan(value)) {
+            value = cachedSample(worldX, worldY);
+        }
+        result[i] = value;
+        lastPoint = p;
+        lastValue = value;
+    }
+    return result;
+}
+
+uint64_t RenderTerrain::renderedElevationKey(const UnwrappedTileID& tile, float emptyPlaneElevation) const {
+    const double tileScale = std::exp2(static_cast<double>(tile.canonical.z));
+    const double tileX0 = (static_cast<double>(tile.canonical.x) + tile.wrap * tileScale) / tileScale;
+    const double tileY0 = static_cast<double>(tile.canonical.y) / tileScale;
+    const double tileSize = 1.0 / tileScale;
+    const double margin = tileSize / 8.0; // matches sampleRenderedElevations
+    const auto overlaps = [&](const OverscaledTileID& id) {
+        const double scale = std::exp2(static_cast<double>(id.canonical.z));
+        const double x0 = (static_cast<double>(id.canonical.x) + id.wrap * scale) / scale;
+        const double y0 = static_cast<double>(id.canonical.y) / scale;
+        const double size = 1.0 / scale;
+        return !(x0 >= tileX0 + tileSize + margin || x0 + size <= tileX0 - margin ||
+                 y0 >= tileY0 + tileSize + margin || y0 + size <= tileY0 - margin);
+    };
+    // FNV-1a over the inputs, sorted by tile id.
+    uint64_t hash = 1469598103934665603ull;
+    const auto mix = [&](uint64_t value) {
+        for (int i = 0; i < 8; ++i) {
+            hash ^= (value >> (i * 8)) & 0xffu;
+            hash *= 1099511628211ull;
+        }
+    };
+    const auto mixFloat = [&](float value) {
+        uint32_t bits = 0;
+        std::memcpy(&bits, &value, sizeof(bits));
+        mix(bits);
+    };
+    const auto mixID = [&](const OverscaledTileID& id) {
+        mix((static_cast<uint64_t>(id.overscaledZ) << 56) ^ (static_cast<uint64_t>(id.canonical.z) << 48) ^
+            (static_cast<uint64_t>(id.canonical.x) << 24) ^ static_cast<uint64_t>(id.canonical.y));
+        mix(static_cast<uint64_t>(static_cast<int64_t>(id.wrap)));
+    };
+    std::vector<std::pair<OverscaledTileID, const DEMBinding*>> bindings;
+    for (const auto& [idealID, binding] : currentBindings) {
+        if (overlaps(idealID)) bindings.emplace_back(idealID, &binding);
+    }
+    std::sort(bindings.begin(), bindings.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+    for (const auto& [idealID, binding] : bindings) {
+        mixID(idealID);
+        mixID(binding->sourceID);
+        mix(reinterpret_cast<uintptr_t>(binding->demImage.get()));
+        // Border backfill rewrites the CPU image in place and replaces the
+        // bucket's DEM texture, so the texture identity tracks those edits.
+        mix(reinterpret_cast<uintptr_t>(binding->texture.get()));
+        mixFloat(binding->demTL[0]);
+        mixFloat(binding->demTL[1]);
+        mixFloat(binding->demScale);
+        mix(binding->usedEmptyDEM ? 1u : 0u);
+        if (binding->usedEmptyDEM) {
+            // The origin follows the camera, and the plane renders at it.
+            mixFloat(emptyPlaneElevation);
+        }
+    }
+    std::vector<std::pair<OverscaledTileID, const PremultipliedImage*>> images;
+    for (const auto& [cachedID, cachedImage] : demImagesByTile) {
+        if (cachedImage && overlaps(cachedID)) images.emplace_back(cachedID, cachedImage.get());
+    }
+    std::sort(images.begin(), images.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+    for (const auto& [cachedID, image] : images) {
+        mixID(cachedID);
+        mix(reinterpret_cast<uintptr_t>(image));
+    }
+    return hash;
+}
+
+void RenderTerrain::updateElevationRevision() {
+    // Order-independent sum of per-entry FNV-1a hashes over everything
+    // sampleRenderedElevations can read.
+    const auto entryHash = [](std::initializer_list<uint64_t> values) {
+        uint64_t hash = 1469598103934665603ull;
+        for (const auto value : values) {
+            for (int i = 0; i < 8; ++i) {
+                hash ^= (value >> (i * 8)) & 0xffu;
+                hash *= 1099511628211ull;
+            }
+        }
+        return hash;
+    };
+    const auto idBits = [](const OverscaledTileID& id) {
+        return (static_cast<uint64_t>(id.overscaledZ) << 56) ^ (static_cast<uint64_t>(id.canonical.z) << 48) ^
+               (static_cast<uint64_t>(id.canonical.x) << 24) ^ static_cast<uint64_t>(id.canonical.y) ^
+               (static_cast<uint64_t>(static_cast<uint32_t>(id.wrap)) << 40);
+    };
+    const auto floatBits = [](float value) {
+        uint32_t bits = 0;
+        std::memcpy(&bits, &value, sizeof(bits));
+        return static_cast<uint64_t>(bits);
+    };
+    uint64_t fingerprint = 0;
+    for (const auto& [idealID, binding] : currentBindings) {
+        fingerprint += entryHash({idBits(idealID),
+                                  idBits(binding.sourceID),
+                                  reinterpret_cast<uintptr_t>(binding.demImage.get()),
+                                  reinterpret_cast<uintptr_t>(binding.texture.get()),
+                                  floatBits(binding.demTL[0]) | (floatBits(binding.demTL[1]) << 32),
+                                  floatBits(binding.demScale) | (binding.usedEmptyDEM ? 1ull << 32 : 0ull)});
+    }
+    for (const auto& [cachedID, cachedImage] : demImagesByTile) {
+        fingerprint += entryHash({idBits(cachedID), reinterpret_cast<uintptr_t>(cachedImage.get()), 0x1u});
+    }
+    if (fingerprint != elevationFingerprint) {
+        elevationFingerprint = fingerprint;
+        ++elevationRevision;
+    }
+}
+
 float RenderTerrain::getExaggeration() const {
     return impl->exaggeration;
 }
@@ -3006,6 +3231,7 @@ void RenderTerrain::clearRenderState(UniqueChangeRequestVec& changes) {
     currentBindings.clear();
     demImagesByTile.clear();
     demTexturesByTile.clear();
+    updateElevationRevision();
     previousIdealIDs.clear();
     stableDrapeCoverFrames = 0;
     retiredDrapeTargetsByTile.clear();

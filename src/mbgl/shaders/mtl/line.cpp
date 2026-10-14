@@ -9,7 +9,7 @@ namespace shaders {
 
 using LineShaderSource = ShaderSource<BuiltIn::LineShader, gfx::Backend::Type::Metal>;
 
-const std::array<AttributeInfo, 8> LineShaderSource::attributes = {
+const std::array<AttributeInfo, 9> LineShaderSource::attributes = {
     AttributeInfo{0, gfx::AttributeDataType::Short2, lineUBOCount + 0, idLinePosNormalVertexAttribute},
     AttributeInfo{1, gfx::AttributeDataType::UByte4, lineUBOCount + 0, idLineDataVertexAttribute},
 
@@ -20,6 +20,9 @@ const std::array<AttributeInfo, 8> LineShaderSource::attributes = {
     AttributeInfo{5, gfx::AttributeDataType::Float2, lineUBOCount + 1, idLineGapWidthVertexAttribute},
     AttributeInfo{6, gfx::AttributeDataType::Float2, lineUBOCount + 1, idLineOffsetVertexAttribute},
     AttributeInfo{7, gfx::AttributeDataType::Float2, lineUBOCount + 1, idLineWidthVertexAttribute},
+
+    // Terrain-lifted variant only (HAS_UNIFORM_u_terrain_lift)
+    AttributeInfo{8, gfx::AttributeDataType::Float, lineUBOCount + 2, idLineTerrainElevationVertexAttribute},
 };
 const std::array<TextureInfo, 0> LineShaderSource::textures = {};
 
@@ -70,7 +73,7 @@ const std::array<TextureInfo, 1> LinePatternShaderSource::textures = {
 
 using LineSDFShaderSource = ShaderSource<BuiltIn::LineSDFShader, gfx::Backend::Type::Metal>;
 
-const std::array<AttributeInfo, 9> LineSDFShaderSource::attributes = {
+const std::array<AttributeInfo, 10> LineSDFShaderSource::attributes = {
     AttributeInfo{0, gfx::AttributeDataType::Short2, lineUBOCount + 0, idLinePosNormalVertexAttribute},
     AttributeInfo{1, gfx::AttributeDataType::UByte4, lineUBOCount + 0, idLineDataVertexAttribute},
 
@@ -82,6 +85,9 @@ const std::array<AttributeInfo, 9> LineSDFShaderSource::attributes = {
     AttributeInfo{6, gfx::AttributeDataType::Float2, lineUBOCount + 1, idLineOffsetVertexAttribute},
     AttributeInfo{7, gfx::AttributeDataType::Float2, lineUBOCount + 1, idLineWidthVertexAttribute},
     AttributeInfo{8, gfx::AttributeDataType::Float2, lineUBOCount + 1, idLineFloorWidthVertexAttribute},
+
+    // Terrain-lifted variant only (HAS_UNIFORM_u_terrain_lift)
+    AttributeInfo{9, gfx::AttributeDataType::Float, lineUBOCount + 2, idLineTerrainElevationVertexAttribute},
 };
 const std::array<TextureInfo, 1> LineSDFShaderSource::textures = {
     TextureInfo{0, idLineImageTexture},

@@ -26,11 +26,17 @@
 #include <mbgl/renderer/layer_group.hpp>
 #include <mbgl/renderer/layers/line_layer_tweaker.hpp>
 #include <mbgl/renderer/render_terrain.hpp>
+#include <mbgl/renderer/terrain_line_lift.hpp>
 #include <mbgl/renderer/update_parameters.hpp>
 #include <mbgl/shaders/line_layer_ubo.hpp>
 #include <mbgl/shaders/shader_program_base.hpp>
 
+#include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <cstdio>
 #include <cstdlib>
+#include <limits>
 #include <unordered_set>
 
 namespace mbgl {
@@ -61,12 +67,139 @@ inline const LineLayer::Impl& impl_cast(const Immutable<style::Layer::Impl>& imp
 
 const auto posNormalAttribName = "a_pos_normal";
 
+// Marks the lifted line shader variant in the program cache key; matches no
+// vertex attribute, so it changes nothing else.
+constexpr std::size_t liftedVariantSentinelID = static_cast<std::size_t>(lineVertexAttributeCount) + 1;
+
+// KLATTRA_LIFTED_LINES_STATS=1: one Warning line per second with the cost of
+// re-sampling lifted line heights on the render thread.
+struct LiftedLineStats {
+    bool enabled = std::getenv("KLATTRA_LIFTED_LINES_STATS") != nullptr;
+    std::chrono::steady_clock::time_point windowStart = std::chrono::steady_clock::now();
+    uint64_t checks = 0, keyHits = 0, resamples = 0, vertices = 0, uploads = 0, unknown = 0;
+    // Per lifted layer and tile, while terrain is on: lifted under one
+    // coarser-or-equal terrain tile, lifted over finer terrain tiles only,
+    // drawn flat (no ready terrain there).
+    uint64_t liftedTiles = 0, partialTiles = 0, flatTiles = 0;
+    double sampleMs = 0.0;
+
+    void maybeEmit() {
+        const auto now = std::chrono::steady_clock::now();
+        if (now - windowStart < std::chrono::seconds(1)) return;
+        const std::string line = "[KLATTRA LIFTED] checks=" + std::to_string(checks) +
+                                 " keyHits=" + std::to_string(keyHits) + " resamples=" + std::to_string(resamples) +
+                                 " vertices=" + std::to_string(vertices) + " uploads=" + std::to_string(uploads) +
+                                 " unknown=" + std::to_string(unknown) + " sampleMs=" + std::to_string(sampleMs) +
+                                 " tiles=" + std::to_string(liftedTiles) + "/" + std::to_string(partialTiles) + "/" +
+                                 std::to_string(flatTiles);
+        Log::Warning(Event::Render, line);
+        // The simulator drops Log::Warning; KLATTRA_TRACE_STDERR mirrors it.
+        static const bool traceStderr = std::getenv("KLATTRA_TRACE_STDERR") != nullptr;
+        if (traceStderr) std::fprintf(stderr, "[KLATTRA_TRACE] %s\n", line.c_str());
+        windowStart = now;
+        checks = keyHits = resamples = vertices = uploads = unknown = 0;
+        liftedTiles = partialTiles = flatTiles = 0;
+        sampleMs = 0.0;
+    }
+};
+
+LiftedLineStats& liftedLineStats() {
+    static LiftedLineStats stats;
+    return stats;
+}
+
+// Refreshes the bucket's per-vertex raw DEM heights for a terrain-lifted
+// draw. Shared by every lifted layer drawing the bucket; re-samples only when
+// the elevation inputs under this tile change (the global revision is only a
+// fast path), and re-uploads only when a height actually moved.
+void refreshLiftedElevations(LineBucket& bucket,
+                             const RenderTile& tile,
+                             const RenderTerrain& terrain,
+                             float emptyPlaneElevation) {
+    auto& stats = liftedLineStats();
+    if (stats.enabled) {
+        ++stats.checks;
+        stats.maybeEmit();
+    }
+    const auto revision = terrain.getElevationRevision();
+    const auto vertexCount = bucket.vertices.elements();
+    const bool sameBinding = bucket.sharedTerrainVertices && bucket.terrainElevationOwner == &terrain &&
+                             bucket.terrainElevationTile == tile.id &&
+                             bucket.sharedTerrainVertices->elements() == vertexCount;
+    if (sameBinding && bucket.terrainElevationRevision == revision) {
+        return;
+    }
+    // The revision is global: most changes come from other parts of the cover.
+    const auto key = terrain.renderedElevationKey(tile.id, emptyPlaneElevation);
+    if (sameBinding && bucket.terrainElevationKey == key) {
+        bucket.terrainElevationRevision = revision;
+        if (stats.enabled) ++stats.keyHits;
+        return;
+    }
+    const auto started = std::chrono::steady_clock::now();
+    std::vector<Point<int16_t>> points;
+    points.reserve(vertexCount);
+    for (std::size_t i = 0; i < vertexCount; ++i) {
+        // a_pos_normal packs (pos * 2) | flag; an arithmetic shift recovers pos.
+        const auto& packed = std::as_const(bucket.vertices).at(i).a1;
+        points.emplace_back(static_cast<int16_t>(packed[0] >> 1), static_cast<int16_t>(packed[1] >> 1));
+    }
+    auto heights = terrain.sampleRenderedElevations(tile.id, points, emptyPlaneElevation);
+    // Points with no known surface (no DEM cached yet) take the nearest known
+    // height along the vertex stream instead of jumping to the origin, which
+    // can be kilometres off in the mountains.
+    if (stats.enabled) {
+        stats.unknown += static_cast<uint64_t>(std::count_if(heights.begin(), heights.end(), [](float h) {
+            return std::isnan(h);
+        }));
+    }
+    float carry = std::numeric_limits<float>::quiet_NaN();
+    for (auto& h : heights) {
+        if (std::isnan(h)) h = carry;
+        else carry = h;
+    }
+    carry = std::numeric_limits<float>::quiet_NaN();
+    for (auto it = heights.rbegin(); it != heights.rend(); ++it) {
+        if (std::isnan(*it)) *it = std::isnan(carry) ? emptyPlaneElevation : carry;
+        else carry = *it;
+    }
+
+    if (!bucket.sharedTerrainVertices) {
+        bucket.sharedTerrainVertices = std::make_shared<LineBucket::TerrainVertexVector>();
+    }
+    auto& vertices = *bucket.sharedTerrainVertices;
+    bool changed = vertices.elements() != heights.size();
+    for (std::size_t i = 0; !changed && i < heights.size(); ++i) {
+        changed = std::as_const(vertices).at(i).a1[0] != heights[i];
+    }
+    if (changed) {
+        vertices.clear();
+        vertices.reserve(heights.size());
+        for (const float height : heights) {
+            vertices.emplace_back(LineBucket::TerrainVertex{{{height}}});
+        }
+        vertices.updateModified();
+    }
+    bucket.terrainElevationOwner = &terrain;
+    bucket.terrainElevationRevision = revision;
+    bucket.terrainElevationKey = key;
+    bucket.terrainElevationTile = tile.id;
+    if (stats.enabled) {
+        ++stats.resamples;
+        stats.vertices += vertexCount;
+        stats.uploads += changed ? 1 : 0;
+        stats.sampleMs +=
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
+    }
+}
+
 } // namespace
 
 RenderLineLayer::RenderLineLayer(Immutable<style::LineLayer::Impl> _impl)
     : RenderLayer(makeMutable<LineLayerProperties>(std::move(_impl))),
       unevaluated(impl_cast(baseImpl).paint.untransitioned()),
-      colorRamp(std::make_shared<PremultipliedImage>(Size(256, 1))) {
+      colorRamp(std::make_shared<PremultipliedImage>(Size(256, 1))),
+      terrainLifted(terrain_line_lift::isLiftedLayerID(baseImpl->id)) {
     styleDependencies = unevaluated.getDependencies();
 }
 
@@ -80,6 +213,9 @@ void RenderLineLayer::transition(const TransitionParameters& parameters) {
 #if MLN_RENDER_BACKEND_METAL
     if (auto* tweaker = static_cast<LineLayerTweaker*>(layerTweaker.get())) {
         tweaker->updateGPUExpressions(unevaluated, parameters.now);
+    }
+    if (liftedLayerTweaker) {
+        liftedLayerTweaker->updateGPUExpressions(unevaluated, parameters.now);
     }
 #endif // MLN_RENDER_BACKEND_METAL
 }
@@ -116,6 +252,52 @@ void RenderLineLayer::evaluate(const PropertyEvaluationParameters& parameters) {
 #endif
         }
     }
+    if (liftedLayerTweaker) {
+        liftedLayerTweaker->updateProperties(evaluatedProperties);
+#if MLN_RENDER_BACKEND_METAL
+        liftedLayerTweaker->updateGPUExpressions(unevaluated, parameters.now);
+#endif
+    }
+}
+
+void RenderLineLayer::markLayerRenderable(bool willRender, UniqueChangeRequestVec& changes) {
+    RenderLayer::markLayerRenderable(willRender, changes);
+    if (liftedLayerGroup) {
+        activateLayerGroup(liftedLayerGroup, willRender, changes);
+    }
+}
+
+void RenderLineLayer::layerRemoved(UniqueChangeRequestVec& changes) {
+    RenderLayer::layerRemoved(changes);
+    if (liftedLayerGroup) {
+        activateLayerGroup(liftedLayerGroup, false, changes);
+    }
+}
+
+void RenderLineLayer::layerIndexChanged(int32_t newLayerIndex, UniqueChangeRequestVec& changes) {
+    RenderLayer::layerIndexChanged(newLayerIndex, changes);
+    changeLayerIndex(liftedLayerGroup, newLayerIndex, changes);
+}
+
+std::size_t RenderLineLayer::removeTile(RenderPass renderPass, const OverscaledTileID& tileID) {
+    auto removed = RenderLayer::removeTile(renderPass, tileID);
+    if (liftedLayerGroup) {
+        const auto n = liftedLayerGroup->removeDrawables(renderPass, tileID).size();
+        stats.drawablesRemoved += n;
+        removed += n;
+    }
+    return removed;
+}
+
+std::size_t RenderLineLayer::removeAllDrawables() {
+    auto removed = RenderLayer::removeAllDrawables();
+    if (liftedLayerGroup) {
+        const auto n = liftedLayerGroup->getDrawableCount();
+        stats.drawablesRemoved += n;
+        liftedLayerGroup->clearDrawables();
+        removed += n;
+    }
+    return removed;
 }
 
 bool RenderLineLayer::hasTransition() const {
@@ -253,7 +435,7 @@ inline void setSegments(std::unique_ptr<gfx::DrawableBuilder>& builder, const Li
 
 void RenderLineLayer::update(gfx::ShaderRegistry& shaders,
                              gfx::Context& context,
-                             const TransformState&,
+                             const TransformState& state,
                              [[maybe_unused]] const std::shared_ptr<UpdateParameters>& parameters,
                              const RenderTree&,
                              UniqueChangeRequestVec& changes) {
@@ -285,6 +467,58 @@ void RenderLineLayer::update(gfx::ShaderRegistry& shaders,
     const RenderPass renderPass = static_cast<RenderPass>(evaluatedProperties->renderPasses &
                                                           ~mbgl::underlying_type(RenderPass::Opaque));
 
+    // Terrain-lifted layers: 3D drawables live in their own group so only they
+    // are deferred past the terrain mesh; tiles without ready terrain stay in
+    // the flat main pass like every other layer.
+    TileLayerGroup* liftedGroup = nullptr;
+    if (terrainLifted && activeTerrain) {
+        if (!liftedLayerGroup) {
+            liftedLayerGroup = context.createTileLayerGroup(layerIndex, /*initialCapacity=*/64, getID() + "-lifted");
+            if (liftedLayerGroup) {
+                activateLayerGroup(liftedLayerGroup, true, changes);
+            }
+        }
+        if (liftedLayerGroup && !liftedLayerTweaker) {
+            liftedLayerTweaker = std::make_shared<LineLayerTweaker>(getID() + "-lifted", evaluatedProperties);
+            liftedLayerTweaker->setTerrainLifted(true);
+#if MLN_RENDER_BACKEND_METAL
+            liftedLayerTweaker->updateGPUExpressions(unevaluated, parameters->timePoint);
+#endif // MLN_RENDER_BACKEND_METAL
+            liftedLayerGroup->addLayerTweaker(liftedLayerTweaker);
+        }
+        liftedGroup = liftedLayerGroup.get();
+    } else if (liftedLayerGroup && liftedLayerGroup->getDrawableCount() > 0) {
+        // Terrain off: the flat main pass carries the layer again.
+        stats.drawablesRemoved += liftedLayerGroup->getDrawableCount();
+        liftedLayerGroup->clearDrawables();
+    }
+    // Raw height that renders at the terrain's zero plane, where empty-DEM
+    // tiles lie: the elevation origin, with the terrain tweaker's fallback.
+    float liftedEmptyPlaneElevation = 0.0f;
+    static const bool absoluteHeights = std::getenv("KLATTRA_TERRAIN_ABSOLUTE_HEIGHTS") != nullptr;
+    if (liftedGroup && !absoluteHeights) {
+        const float fallbackOrigin = std::abs(state.getLatLng().latitude()) >= 60.0 ? 1000.0f : 0.0f;
+        liftedEmptyPlaneElevation = activeTerrain->getElevationOriginMeters().value_or(fallbackOrigin);
+    }
+    // Only plain and dashed lines have the lifted shader path.
+    const bool liftableVariant = unevaluated.get<LinePattern>().isUndefined() &&
+                                 unevaluated.get<LineGradient>().getValue().isUndefined();
+    // Lift a tile wherever ready terrain overlaps it, not only where a single
+    // coarser-or-equal terrain tile covers it whole: the terrain cover keeps
+    // finer tiles further out than vector sources do, and a tile drawn flat
+    // there would lie under the mesh. Heights come per vertex from whichever
+    // terrain tile is under the point.
+    const auto liftableTile = [&](const OverscaledTileID& id) {
+        return liftedGroup && liftableVariant && activeTerrain->hasReadyTerrainCoverage(id);
+    };
+    if (liftedGroup) {
+        stats.drawablesRemoved += liftedGroup->removeDrawablesIf([&](gfx::Drawable& drawable) {
+            const auto& tileID = drawable.getTileID();
+            return drawable.getRenderPass() != passes || !tileID || !hasRenderTile(*tileID) ||
+                   !liftableTile(*tileID);
+        });
+    }
+
     stats.drawablesRemoved += tileLayerGroup->removeDrawablesIf([&](gfx::Drawable& drawable) {
         // If the render pass has changed or the tile has  dropped out of the cover set, remove it.
         const auto& tileID = drawable.getTileID();
@@ -305,7 +539,7 @@ void RenderLineLayer::update(gfx::ShaderRegistry& shaders,
     if (activeTerrain) {
         stats.drawablesRemoved += tileLayerGroup->removeDrawablesIf([&](gfx::Drawable& drawable) {
             const auto& tileID = drawable.getTileID();
-            return tileID && activeTerrain->hasElevationCoverage(*tileID);
+            return tileID && (activeTerrain->hasElevationCoverage(*tileID) || liftableTile(*tileID));
         });
     }
 
@@ -400,6 +634,17 @@ void RenderLineLayer::update(gfx::ShaderRegistry& shaders,
     StringIDSetsPair propertiesAsUniforms;
     for (const RenderTile& tile : *renderTiles) {
         const auto& tileID = tile.getOverscaledTileID();
+        if (liftedGroup && liftedLineStats().enabled) {
+            auto& liftStats = liftedLineStats();
+            if (!liftableTile(tileID)) {
+                ++liftStats.flatTiles;
+            } else if (activeTerrain->hasElevationCoverage(tileID)) {
+                ++liftStats.liftedTiles;
+            } else {
+                ++liftStats.partialTiles;
+            }
+            liftStats.maybeEmit();
+        }
 
         const LayerRenderData* renderData = getRenderDataForPass(tile, renderPass);
         if (!renderData) {
@@ -446,7 +691,37 @@ void RenderLineLayer::update(gfx::ShaderRegistry& shaders,
             continue;
         }
 
+        const bool liftTile = liftableTile(tileID);
+        if (liftTile) {
+            refreshLiftedElevations(bucket, tile, *activeTerrain, liftedEmptyPlaneElevation);
+            bool liftedExists = false;
+            liftedGroup->visitDrawables(renderPass, tileID, [&](gfx::Drawable& drawable) {
+                drawable.setRenderTile(renderTilesOwner, &tile);
+                drawable.setBinders(renderData->bucket, &paintPropertyBinders);
+                liftedExists = true;
+            });
+            if (liftedExists) {
+                continue;
+            }
+        }
+
         const auto addDrawable = [&](std::unique_ptr<gfx::Drawable>&& drawable, LineLayerTweaker::LineType type) {
+            if (liftTile) {
+                drawable->setTileID(tileID);
+                drawable->setType(mbgl::underlying_type(type));
+                drawable->setLayerTweaker(liftedLayerTweaker);
+                drawable->setRenderTile(renderTilesOwner, &tile);
+                drawable->setBinders(renderData->bucket, &paintPropertyBinders);
+                drawable->setIs3D(true);
+                drawable->setEnableStencil(false); // flat clip masks cannot clip raised geometry
+                drawable->setDepthType(gfx::DepthMaskType::ReadOnly);
+                const bool roundCap = bucket.layout.get<LineCap>() == LineCapType::Round;
+                drawable->setData(std::make_unique<gfx::LineDrawableData>(roundCap ? LinePatternCap::Round
+                                                                                   : LinePatternCap::Square));
+                liftedGroup->addDrawable(renderPass, tileID, std::move(drawable));
+                ++stats.drawablesAdded;
+                return;
+            }
             if (activeTerrain && activeTerrain->hasElevationCoverage(tileID)) {
                 // Skip main-pass — drape variant carries this layer onto
                 // the terrain mesh. See cleanup-on-terrain block above.
@@ -481,6 +756,28 @@ void RenderLineLayer::update(gfx::ShaderRegistry& shaders,
                                                    LineFloorWidth,
                                                    LinePattern>(
             paintPropertyBinders, evaluated, propertiesAsUniforms, idLineColorVertexAttribute);
+        if (liftTile && bucket.sharedTerrainVertices) {
+            if (const auto& attr = vertexAttrs->set(idLineTerrainElevationVertexAttribute)) {
+                attr->setSharedRawData(bucket.sharedTerrainVertices,
+                                       offsetof(LineBucket::TerrainVertex, a1),
+                                       /*vertexOffset=*/0,
+                                       sizeof(LineBucket::TerrainVertex),
+                                       gfx::AttributeDataType::Float);
+            }
+        }
+        // Only the lifted shader variant declares the terrain height attribute
+        // (HAS_UNIFORM_u_terrain_lift); every other line program leaves it out,
+        // because Metal binds no fallback buffer for a declared attribute that
+        // a drawable does not provide. Program caches key on the excluded
+        // attribute ids only, so the lifted variant adds a sentinel id too.
+        StringIDSetsPair liftedUniforms;
+        if (liftTile) {
+            liftedUniforms = propertiesAsUniforms;
+            liftedUniforms.first.insert(terrain_line_lift::shaderDefineName);
+            liftedUniforms.second.insert(liftedVariantSentinelID);
+        }
+        propertiesAsUniforms.second.insert(idLineTerrainElevationVertexAttribute);
+        const StringIDSetsPair& lineUniforms = liftTile ? liftedUniforms : propertiesAsUniforms;
 
         // Phase 2 drape routing helper, shared across line variants. Emits a
         // copy of this source-tile's line geometry into each overlapping DEM
@@ -493,7 +790,7 @@ void RenderLineLayer::update(gfx::ShaderRegistry& shaders,
                                                 const gfx::ShaderGroupPtr& shaderGroup,
                                                 const std::string& nameSuffix,
                                                 const std::function<void(gfx::DrawableBuilder&)>& configureExtras = {}) {
-            if (!activeTerrain || !shaderGroup || klattraDisableLineDrape()) return;
+            if (!activeTerrain || !shaderGroup || klattraDisableLineDrape() || terrainLifted) return;
             activeTerrain->visitDrapeTargets(
                 [&](const OverscaledTileID& drapeID, TerrainDrapeTargetPtr& drapeTarget) {
                     if (!drapeTarget || !LayerTweaker::tilesOverlap(tileID, drapeID)) return;
@@ -579,7 +876,7 @@ void RenderLineLayer::update(gfx::ShaderRegistry& shaders,
                 }
             }
 
-            auto shader = lineSDFShaderGroup->getOrCreateShader(context, propertiesAsUniforms, posNormalAttribName);
+            auto shader = lineSDFShaderGroup->getOrCreateShader(context, lineUniforms, posNormalAttribName);
             if (!shader) {
                 continue;
             }
@@ -705,7 +1002,7 @@ void RenderLineLayer::update(gfx::ShaderRegistry& shaders,
                 }
             }
 
-            auto shader = lineShaderGroup->getOrCreateShader(context, propertiesAsUniforms, posNormalAttribName);
+            auto shader = lineShaderGroup->getOrCreateShader(context, lineUniforms, posNormalAttribName);
             if (!shader) {
                 continue;
             }

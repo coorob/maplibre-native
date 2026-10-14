@@ -8,6 +8,8 @@
 
 layout (location = 0) in vec2 a_pos_normal;
 layout (location = 1) in vec4 a_data;
+// Raw DEM metres at the centreline; only read for terrain-lifted drawables.
+layout (location = 2) in float a_terrain_elevation;
 
 layout (std140) uniform GlobalPaintParamsUBO {
     highp vec2 u_pattern_atlas_texsize;
@@ -31,7 +33,8 @@ layout (std140) uniform LineDrawableUBO {
     lowp float u_gapwidth_t;
     lowp float u_offset_t;
     lowp float u_width_t;
-    lowp float drawable_pad1;
+    // 1 when this drawable is drawn as 3D geometry on the terrain (lifted line).
+    highp float u_terrain_lift;
 };
 
 layout (std140) uniform LineEvaluatedPropsUBO {
@@ -47,6 +50,9 @@ layout (std140) uniform LineEvaluatedPropsUBO {
 };
 
 out vec2 v_normal;
+// Lifted lines clip to their own tile (see the fragment shader).
+out highp vec2 v_tile_pos;
+flat out highp float v_terrain_lift;
 out vec2 v_width2;
 out float v_gamma_scale;
 out highp float v_linesofar;
@@ -105,8 +111,22 @@ void main() {
     mediump float t = 1.0 - abs(u);
     mediump vec2 offset2 = offset * a_extrude * scale * normal.y * mat2(t, -u, u, t);
 
+    // Lifted lines: u_matrix maps raw DEM metres to the terrain mesh's render
+    // height (exaggeration, origin and a depth pull are folded in on the CPU).
+    bool lifted = u_terrain_lift > 0.5;
+    v_terrain_lift = u_terrain_lift;
+    v_tile_pos = pos + offset2 / u_ratio + dist / u_ratio;
+    float elevation = lifted ? a_terrain_elevation : 0.0;
     vec4 projected_extrude = u_matrix * vec4(dist / u_ratio, 0.0, 0.0);
-    gl_Position = u_matrix * vec4(pos + offset2 / u_ratio, 0.0, 1.0) + projected_extrude;
+    gl_Position = u_matrix * vec4(pos + offset2 / u_ratio, elevation, 1.0) + projected_extrude;
+    if (lifted) {
+        // Give the whole ribbon its centreline's depth. A flat ribbon on a side
+        // slope would otherwise sink half its width into the hill.
+        vec4 centre = u_matrix * vec4(pos, elevation, 1.0);
+        if (centre.w > 0.0) {
+            gl_Position.z = centre.z / centre.w * gl_Position.w;
+        }
+    }
 
     // calculate how much the perspective view squishes or stretches the extrude
     float extrude_length_without_perspective = length(dist);
