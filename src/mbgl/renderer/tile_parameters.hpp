@@ -56,6 +56,8 @@ public:
     // layers (hillshade/color-relief); those layers must not inherit the
     // terrain mesh's elevation-expanded cover.
     bool usedByTerrain = false;
+    // Set by RenderOrchestrator while 3D terrain is enabled for the map.
+    bool terrainActive = false;
     gfx::DynamicTextureAtlasPtr dynamicTextureAtlas;
     bool isUpdateSynchronous = false;
 };
