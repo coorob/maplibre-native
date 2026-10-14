@@ -533,6 +533,26 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
             currentIdealTiles.insert(idealTile.toUnwrapped());
         }
     }
+    // KLATTRA_LOG_COVERHOLD_IDS=1: which tiles the cover hold keeps and why
+    // their ideal ancestor did not retire them (diagnostic, opt-in).
+    static const bool coverHoldIdsLog = [] {
+        const char* v = std::getenv("KLATTRA_LOG_COVERHOLD_IDS");
+        return v && *v && *v != '0';
+    }();
+    std::set<UnwrappedTileID> diagIdealTiles;
+    std::set<UnwrappedTileID> diagLastRendered;
+    std::vector<UnwrappedTileID> diagHeldIds;
+    if (coverHoldIdsLog) {
+        for (const auto& idealTile : idealTiles) {
+            diagIdealTiles.insert(idealTile.toUnwrapped());
+        }
+        for (const auto& rendered : previouslyRenderedTiles) {
+            diagLastRendered.insert(rendered.first);
+        }
+        for (const auto& rendered : renderedTiles) {
+            diagLastRendered.insert(rendered.first);
+        }
+    }
 
     ++coverHoldUpdateIndex;
     std::size_t recentIdealExpired = 0;
@@ -638,6 +658,7 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
         retainTileFn(tile, TileNecessity::Optional);
         addRenderTile(previousID, tile);
         ++coverHeld;
+        if (coverHoldIdsLog) diagHeldIds.push_back(previousID);
     }
 
     if (boundedCoverHold) {
@@ -651,10 +672,92 @@ void TilePyramid::update(const std::vector<Immutable<style::LayerProperties>>& l
             retainTileFn(tile, TileNecessity::Optional);
             addRenderTile(candidate.id, tile);
             ++coverHeld;
+            if (coverHoldIdsLog) diagHeldIds.push_back(candidate.id);
         }
         assert(coverHeld <= coverHoldBudget);
     }
     coverHoldAges = std::move(nextCoverHoldAges);
+
+    if (coverHoldIdsLog) {
+        // Flags for the nearest ancestor that is in the ideal cover:
+        // R = rendered this update, L = rendered last update (incl. holds).
+        std::string ids;
+        std::size_t listed = 0;
+        std::sort(diagHeldIds.begin(), diagHeldIds.end());
+        for (const auto& held : diagHeldIds) {
+            if (listed++ >= 48) {
+                ids += " ...";
+                break;
+            }
+            std::string anc = "a-";
+            for (uint8_t ancestorZ = held.canonical.z; ancestorZ > 0;) {
+                --ancestorZ;
+                const UnwrappedTileID ancestor{held.wrap, held.canonical.scaledTo(ancestorZ)};
+                if (diagIdealTiles.count(ancestor)) {
+                    anc = "a" + std::to_string(ancestorZ) + ":" +
+                          (renderedTiles.count(ancestor) ? "R" : "r") +
+                          (diagLastRendered.count(ancestor) ? "L" : "l");
+                    break;
+                }
+            }
+            bool childIdeal = false;
+            for (const auto& idealID : diagIdealTiles) {
+                if (idealID.canonical.z > held.canonical.z && idealID.isChildOf(held)) {
+                    childIdeal = true;
+                    break;
+                }
+            }
+            const auto ageIt = coverHoldAges.find(held);
+            ids += " " + std::to_string(held.canonical.z) + "/" + std::to_string(held.canonical.x) + "/" +
+                   std::to_string(held.canonical.y) + "(" + anc + (childIdeal ? ",c" : "") + ",age" +
+                   std::to_string(ageIt == coverHoldAges.end() ? 0 : ageIt->second) + ")";
+        }
+        static std::unordered_map<const void*, std::string> lastIds;
+        auto& last = lastIds[this];
+        std::string idealZs;
+        {
+            std::set<uint8_t> zs;
+            for (const auto& idealID : diagIdealTiles) zs.insert(idealID.canonical.z);
+            for (auto z : zs) idealZs += (idealZs.empty() ? "" : ",") + std::to_string(z);
+        }
+        // Full rendered set with i = ideal, h = held, f = updateRenderables
+        // fallback (a loaded parent/child standing in for an unloaded ideal).
+        std::string renderSet;
+        {
+            std::set<UnwrappedTileID> heldSet(diagHeldIds.begin(), diagHeldIds.end());
+            for (const auto& entry : renderedTiles) {
+                const auto& id = entry.first;
+                const char tag = diagIdealTiles.count(id) ? 'i' : (heldSet.count(id) ? 'h' : 'f');
+                renderSet += " " + std::to_string(id.canonical.z) + "/" + std::to_string(id.canonical.x) + "/" +
+                             std::to_string(id.canonical.y) + tag;
+            }
+        }
+        static std::unordered_map<const void*, std::string> lastRenderSets;
+        auto& lastRenderSet = lastRenderSets[this];
+        if (renderSet != lastRenderSet) {
+            lastRenderSet = renderSet;
+            const std::string line = "[KLATTRA RENDERSET] source=" + sourceImpl.id + " zoom=" +
+                                     std::to_string(parameters.transformState.getZoom()) + " n=" +
+                                     std::to_string(renderedTiles.size()) + ":" + renderSet;
+            Log::Warning(Event::Render, line);
+            static const bool traceStderrSet = std::getenv("KLATTRA_TRACE_STDERR") != nullptr;
+            if (traceStderrSet) {
+                fprintf(stderr, "[KLATTRA_TRACE] %s\n", line.c_str());
+            }
+        }
+        if (ids != last) {
+            last = ids;
+            const std::string line = "[KLATTRA HOLDIDS] source=" + sourceImpl.id + " zoom=" +
+                                     std::to_string(parameters.transformState.getZoom()) + " idealZ=" + idealZs +
+                                     " ideal=" + std::to_string(idealTiles.size()) +
+                                     " held=" + std::to_string(diagHeldIds.size()) + " ids:" + ids;
+            Log::Warning(Event::Render, line);
+            static const bool traceStderr = std::getenv("KLATTRA_TRACE_STDERR") != nullptr;
+            if (traceStderr) {
+                fprintf(stderr, "[KLATTRA_TRACE] %s\n", line.c_str());
+            }
+        }
+    }
 
     // KLATTRA diagnostics: cover-hold activity. Logs on change (including the
     // return to 0) plus a 1 Hz heartbeat while holds are active. RasterDEM is
