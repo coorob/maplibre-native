@@ -79,7 +79,7 @@ struct LiftedLineStats {
     uint64_t checks = 0, keyHits = 0, resamples = 0, vertices = 0, uploads = 0, unknown = 0;
     // Per lifted layer and tile, while terrain is on: lifted under one
     // coarser-or-equal terrain tile, lifted over finer terrain tiles only,
-    // drawn flat (no ready terrain there).
+    // drawn flat (ready terrain covers it partly or not at all).
     uint64_t liftedTiles = 0, partialTiles = 0, flatTiles = 0;
     double sampleMs = 0.0;
 
@@ -503,13 +503,13 @@ void RenderLineLayer::update(gfx::ShaderRegistry& shaders,
     // Only plain and dashed lines have the lifted shader path.
     const bool liftableVariant = unevaluated.get<LinePattern>().isUndefined() &&
                                  unevaluated.get<LineGradient>().getValue().isUndefined();
-    // Lift a tile wherever ready terrain overlaps it, not only where a single
-    // coarser-or-equal terrain tile covers it whole: the terrain cover keeps
+    // Lift a tile wherever ready terrain covers it, also when only several
+    // finer terrain tiles do (hasLiftedLineCoverage): the terrain cover keeps
     // finer tiles further out than vector sources do, and a tile drawn flat
     // there would lie under the mesh. Heights come per vertex from whichever
     // terrain tile is under the point.
     const auto liftableTile = [&](const OverscaledTileID& id) {
-        return liftedGroup && liftableVariant && activeTerrain->hasReadyTerrainCoverage(id);
+        return liftedGroup && liftableVariant && activeTerrain->hasLiftedLineCoverage(id);
     };
     if (liftedGroup) {
         stats.drawablesRemoved += liftedGroup->removeDrawablesIf([&](gfx::Drawable& drawable) {

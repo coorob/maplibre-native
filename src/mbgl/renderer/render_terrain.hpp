@@ -285,6 +285,13 @@ public:
         return target->hasContentLayerGroups();
     }
 
+    // Whether ready terrain tiles at any resolution together cover the whole
+    // source tile (as raster_drape::coversTargetAtAnyResolution on Android).
+    // Terrain-lifted lines draw on such tiles: the terrain cover keeps finer
+    // tiles further out than vector sources do, so a source tile is often
+    // covered only by several finer terrain tiles.
+    bool hasLiftedLineCoverage(const OverscaledTileID& sourceTileID) const;
+
     bool hasReadyTerrainCoverage(const OverscaledTileID& sourceTileID) const {
         if (currentBindings.empty()) return false;
         for (const auto& [idealID, binding] : currentBindings) {

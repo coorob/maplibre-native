@@ -52,6 +52,7 @@
 #include <iterator>
 #include <limits>
 #include <map>
+#include <set>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -2837,6 +2838,40 @@ uint64_t RenderTerrain::renderedElevationKey(const UnwrappedTileID& tile, float 
         mix(reinterpret_cast<uintptr_t>(image));
     }
     return hash;
+}
+
+bool RenderTerrain::hasLiftedLineCoverage(const OverscaledTileID& target) const {
+    std::set<CanonicalTileID> covered;
+    for (const auto& [idealID, binding] : currentBindings) {
+        if (!binding.drapeReady || !binding.drapeTexture || idealID.wrap != target.wrap) continue;
+        if (idealID.canonical.z <= target.canonical.z &&
+            (idealID.canonical == target.canonical || target.canonical.isChildOf(idealID.canonical))) {
+            return true;
+        }
+        if (idealID.canonical.isChildOf(target.canonical)) covered.insert(idealID.canonical);
+    }
+    // Collapse four covered siblings into their parent until the target is
+    // proven or no more progress is possible.
+    while (!covered.empty()) {
+        std::map<CanonicalTileID, uint8_t> childMasks;
+        for (const auto& id : covered) {
+            if (id.z <= target.canonical.z) continue;
+            const auto parent = id.scaledTo(id.z - 1u);
+            childMasks[parent] |= static_cast<uint8_t>(1u << ((id.x & 1u) | ((id.y & 1u) << 1u)));
+        }
+        bool collapsed = false;
+        for (const auto& [parent, mask] : childMasks) {
+            if (mask != 0x0fu) continue;
+            for (const auto& child : parent.children()) {
+                covered.erase(child);
+            }
+            covered.insert(parent);
+            collapsed = true;
+        }
+        if (covered.find(target.canonical) != covered.end()) return true;
+        if (!collapsed) return false;
+    }
+    return false;
 }
 
 void RenderTerrain::updateElevationRevision() {
