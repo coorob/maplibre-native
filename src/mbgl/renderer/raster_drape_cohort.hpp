@@ -11,6 +11,7 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace mbgl::raster_drape {
@@ -50,6 +51,24 @@ inline bool bucketHasTextureSource(const RasterBucket& bucket) noexcept {
 
 inline bool isAuthoritativeTerrainRaster(const std::string& layerID, const std::string& sourceID) noexcept {
     return layerID == "satellite-terrain-layer" && sourceID == "satellite-terrain-raster";
+}
+
+// Every raster layer that is a style's photographic basemap: the Esri terrain
+// raster, the Swedish and Finnish orthophoto preview/detail pairs, and the
+// native aerial blend's per-country overviews (layer ID == source ID). Only
+// the drape topology choice reads this. Publication authority stays with
+// isAuthoritativeTerrainRaster, because the aerial layers cannot prove a
+// drape canvas complete.
+inline bool isSatelliteBasemapRaster(const std::string_view layerID, const std::string_view sourceID) noexcept {
+    if (layerID == "satellite-terrain-layer") return sourceID == "satellite-terrain-raster";
+    if (layerID == "satellite-orto-layer") return sourceID == "satellite-orto-raster";
+    if (layerID == "satellite-orto-detail-layer") return sourceID == "satellite-orto-detail-raster";
+    if (layerID == "satellite-finland-orto-layer") return sourceID == "satellite-finland-orto-raster";
+    if (layerID == "satellite-finland-orto-detail-layer") return sourceID == "satellite-finland-orto-detail-raster";
+    constexpr std::string_view overviewPrefix = "imagery-";
+    constexpr std::string_view overviewSuffix = "-overview";
+    return layerID == sourceID && layerID.size() > overviewPrefix.size() + overviewSuffix.size() &&
+           layerID.starts_with(overviewPrefix) && layerID.ends_with(overviewSuffix);
 }
 
 inline bool hasAuthoritativePublicationRequirement(const bool requiresRaster,

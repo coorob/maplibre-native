@@ -2,12 +2,27 @@
 #include <mbgl/renderer/topo_drape_detail_policy.hpp>
 #include <mbgl/test/util.hpp>
 
+#include <initializer_list>
+#include <string_view>
+#include <utility>
+
 using namespace mbgl;
 
 namespace {
 
 OverscaledTileID tile(uint8_t z, uint32_t x, uint32_t y, int16_t wrap = 0) {
     return OverscaledTileID(z, wrap, CanonicalTileID(z, x, y));
+}
+
+// (layer ID, source ID) of every render item with a source, as RenderTerrain
+// scans them.
+topo_vector::DrapeBasemaps drapeBasemapsFor(
+    std::initializer_list<std::pair<std::string_view, std::string_view>> renderedLayers) {
+    topo_vector::DrapeBasemaps basemaps;
+    for (const auto& [layerID, sourceID] : renderedLayers) {
+        basemaps.addLayer(layerID, sourceID);
+    }
+    return basemaps;
 }
 
 } // namespace
@@ -212,6 +227,90 @@ TEST(TopoVectorCohort, SelectsOnlyOfficialTopoWithoutSatelliteHandoff) {
     EXPECT_TRUE(topo_vector::useSharedDrapeCohort(true, false));
     EXPECT_FALSE(topo_vector::useSharedDrapeCohort(true, true));
     EXPECT_FALSE(topo_vector::useSharedDrapeCohort(false, false));
+}
+
+TEST(TopoVectorCohort, AerialBlendFlightDrapesAsSatelliteDespiteItsTopoLabels) {
+    // buildBlendedImageryStyle({terrain3D: true}) in Sweden: the per-country
+    // overviews, the orthophoto preview, and the Topo style's labels it keeps
+    // above the photos. Before .104 the `topo` labels made this a Topo cohort.
+    const auto blend = drapeBasemapsFor({
+        {"imagery-sweden-overview", "imagery-sweden-overview"},
+        {"imagery-finland-overview", "imagery-finland-overview"},
+        {"satellite-orto-layer", "satellite-orto-raster"},
+        {"place-label-major", "topo"},
+        {"place-label-terrain", "topo"},
+        {"ofm-place-city", "openfreemap"},
+    });
+    EXPECT_TRUE(blend.officialTopo);
+    EXPECT_TRUE(blend.satelliteImagery);
+    EXPECT_FALSE(blend.useSharedCohort());
+
+    // Any one imagery layer in the render tree is enough, in either order.
+    for (const auto& [imageryLayer, imagerySource] : {
+             std::pair<std::string_view, std::string_view>{"imagery-sweden-overview", "imagery-sweden-overview"},
+             {"satellite-orto-layer", "satellite-orto-raster"},
+             {"satellite-orto-detail-layer", "satellite-orto-detail-raster"},
+         }) {
+        EXPECT_FALSE(
+            drapeBasemapsFor({{imageryLayer, imagerySource}, {"place-label-major", "topo"}}).useSharedCohort());
+        EXPECT_FALSE(
+            drapeBasemapsFor({{"place-label-major", "topo"}, {imageryLayer, imagerySource}}).useSharedCohort());
+    }
+
+    // The Finnish flight keeps the Topo sources' labels and Finland's base too.
+    EXPECT_FALSE(drapeBasemapsFor({
+                                      {"imagery-finland-overview", "imagery-finland-overview"},
+                                      {"satellite-orto-layer", "satellite-orto-raster"},
+                                      {"waterway-river", "finland-openmaptiles"},
+                                      {"place-label-major", "topo"},
+                                  })
+                     .useSharedCohort());
+}
+
+TEST(TopoVectorCohort, OfficialTopoKeepsItsSharedCohort) {
+    const auto sweden = drapeBasemapsFor({
+        {"ofm-water", "openfreemap"},
+        {"land-open", "topo"},
+        {"land-aker", "topo"},
+        {"strandlinje", "topo"},
+        {"hojdkurva-10m", "topo"},
+        {"place-label-major", "topo"},
+    });
+    EXPECT_TRUE(sweden.officialTopo);
+    EXPECT_FALSE(sweden.satelliteImagery);
+    EXPECT_TRUE(sweden.useSharedCohort());
+
+    EXPECT_TRUE(drapeBasemapsFor({{"hojdkurva", "norway-topo-vector"}}).useSharedCohort());
+    // Layer IDs alone do not make imagery: the source must match its layer.
+    EXPECT_TRUE(drapeBasemapsFor({{"land-open", "topo"}, {"satellite-orto-layer", "topo"}}).useSharedCohort());
+    EXPECT_TRUE(drapeBasemapsFor({{"land-open", "topo"}, {"imagery-sweden-overview", "topo"}}).useSharedCohort());
+}
+
+TEST(TopoVectorCohort, SatelliteStylesAndHandoffsKeepTheFineTopology) {
+    // Esri satellite has no Topo source at all.
+    const auto esri = drapeBasemapsFor({{"satellite-terrain-layer", "satellite-terrain-raster"}});
+    EXPECT_FALSE(esri.officialTopo);
+    EXPECT_TRUE(esri.satelliteImagery);
+    EXPECT_FALSE(esri.useSharedCohort());
+
+    // The private aerial experiment (buildAerialTerrainStyle) inserts the
+    // photos into the full Topo style, fills included.
+    EXPECT_FALSE(drapeBasemapsFor({
+                                      {"land-open", "topo"},
+                                      {"satellite-orto-layer", "satellite-orto-raster"},
+                                      {"satellite-finland-orto-layer", "satellite-finland-orto-raster"},
+                                      {"place-label-major", "topo"},
+                                  })
+                     .useSharedCohort());
+
+    // A Topo <-> satellite style handoff keeps the fine topology until the
+    // imagery has left the render tree.
+    EXPECT_FALSE(drapeBasemapsFor({{"land-open", "topo"}, {"satellite-terrain-layer", "satellite-terrain-raster"}})
+                     .useSharedCohort());
+
+    // Germany has no official Topo, with or without imagery.
+    EXPECT_FALSE(drapeBasemapsFor({{"landcover", "germany-basemap"}}).useSharedCohort());
+    EXPECT_FALSE(drapeBasemapsFor({}).useSharedCohort());
 }
 
 TEST(TopoVectorCohort, FillPublicationPreservesSwedishAndNorwegianSourcesOnEveryBackend) {

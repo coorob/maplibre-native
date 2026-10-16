@@ -1,6 +1,10 @@
 #include <mbgl/renderer/raster_drape_cohort.hpp>
 #include <mbgl/test/util.hpp>
 
+#include <string>
+#include <string_view>
+#include <utility>
+
 using namespace mbgl;
 
 namespace {
@@ -95,6 +99,52 @@ TEST(RasterDrapeCohort, OnlyTheCompleteSatelliteBaseControlsRasterReadiness) {
                                                           "satellite-finland-orto-raster"));
     EXPECT_FALSE(raster_drape::isAuthoritativeTerrainRaster("satellite-finland-orto-layer",
                                                           "satellite-terrain-raster"));
+}
+
+TEST(RasterDrapeCohort, EveryAerialImageryLayerIsASatelliteBasemapButOnlyEsriIsAuthoritative) {
+    const std::pair<std::string, std::string> imagery[] = {
+        {"satellite-terrain-layer", "satellite-terrain-raster"},
+        {"satellite-orto-layer", "satellite-orto-raster"},
+        {"satellite-orto-detail-layer", "satellite-orto-detail-raster"},
+        {"satellite-finland-orto-layer", "satellite-finland-orto-raster"},
+        {"satellite-finland-orto-detail-layer", "satellite-finland-orto-detail-raster"},
+        {"imagery-sweden-overview", "imagery-sweden-overview"},
+        {"imagery-finland-overview", "imagery-finland-overview"},
+        {"imagery-norway-overview", "imagery-norway-overview"},
+    };
+    for (const auto& [layerID, sourceID] : imagery) {
+        EXPECT_TRUE(raster_drape::isSatelliteBasemapRaster(layerID, sourceID)) << layerID;
+        // The publication hold keeps its single writer.
+        EXPECT_EQ(raster_drape::isAuthoritativeTerrainRaster(layerID, sourceID), layerID == "satellite-terrain-layer")
+            << layerID;
+    }
+}
+
+TEST(RasterDrapeCohort, SatelliteBasemapRejectsMismatchedPairsVectorSourcesAndNearMatches) {
+    const std::pair<std::string_view, std::string_view> notImagery[] = {
+        {"satellite-orto-layer", "satellite-finland-orto-raster"},
+        {"satellite-orto-layer", "satellite-orto-detail-raster"},
+        {"satellite-orto-detail-layer", "satellite-orto-raster"},
+        {"satellite-finland-orto-layer", "satellite-orto-raster"},
+        {"satellite-terrain-layer", "satellite-orto-raster"},
+        {"satellite-orto-layer", "topo"},
+        {"imagery-sweden-overview", "imagery-finland-overview"},
+        {"imagery-sweden-overview", "topo"},
+        {"imagery--overview", "imagery--overview"},
+        {"imagery-overview", "imagery-overview"},
+        {"imagery-sweden-overview ", "imagery-sweden-overview "},
+        {"Imagery-sweden-overview", "Imagery-sweden-overview"},
+        {"imagery-sweden", "imagery-sweden"},
+        {"satellite-background", ""},
+        {"place-label-major", "topo"},
+        {"land-open", "topo"},
+        {"hojdkurva", "norway-topo-vector"},
+        {"waterway-river", "finland-openmaptiles"},
+        {"", ""},
+    };
+    for (const auto& [layerID, sourceID] : notImagery) {
+        EXPECT_FALSE(raster_drape::isSatelliteBasemapRaster(layerID, sourceID)) << layerID << " / " << sourceID;
+    }
 }
 
 TEST(RasterDrapeCohort, RequiresAnAuthoritativeSourceBeforePublishing) {

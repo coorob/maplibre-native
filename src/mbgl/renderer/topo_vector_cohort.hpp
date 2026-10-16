@@ -1,5 +1,6 @@
 #pragma once
 
+#include <mbgl/renderer/raster_drape_cohort.hpp>
 #include <mbgl/tile/tile_id.hpp>
 
 #include <algorithm>
@@ -34,6 +35,23 @@ inline bool useSharedDrapeCohort(const bool hasOfficialTopo, const bool hasSatel
     // official vector basemap.
     return hasOfficialTopo && !hasSatelliteBasemap;
 }
+
+// The basemap families a render tree draws, accumulated from its (layer,
+// source) pairs. Satellite comes from the imagery layers themselves: the
+// native aerial blend keeps the Topo style's `topo` source for its labels, so
+// counting only the Esri raster draped every 1.0.12 satellite flight through
+// the shared z10/z9 Topo canvases on Android (Galaxy S8, 2026-10-16).
+struct DrapeBasemaps {
+    bool officialTopo = false;
+    bool satelliteImagery = false;
+
+    void addLayer(const std::string_view layerID, const std::string_view sourceID) noexcept {
+        officialTopo = officialTopo || isOfficialSourceID(sourceID);
+        satelliteImagery = satelliteImagery || raster_drape::isSatelliteBasemapRaster(layerID, sourceID);
+    }
+
+    bool useSharedCohort() const noexcept { return useSharedDrapeCohort(officialTopo, satelliteImagery); }
+};
 
 // Collapse the disjoint terrain-leaf cover toward the first detailed official
 // Topo zoom. maxParentGap can retain a finer target for close-view colour

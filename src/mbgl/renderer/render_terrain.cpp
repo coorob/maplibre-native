@@ -301,23 +301,15 @@ bool klattraIsAncestorOf(const OverscaledTileID& ancestor, const OverscaledTileI
     return ancestor.canonical.z < child.canonical.z && LayerTweaker::tilesOverlap(ancestor, child);
 }
 
-bool klattraUseSharedTopoDrapeCohort(const RenderTree& renderTree) {
 #if MLN_RENDER_BACKEND_OPENGL
-    bool hasOfficialTopo = false;
-    bool hasSatelliteBasemap = false;
+topo_vector::DrapeBasemaps klattraDrapeBasemaps(const RenderTree& renderTree) {
+    topo_vector::DrapeBasemaps basemaps;
     for (const auto& item : renderTree.getLayerRenderItemMap()) {
-        if (!item.source) continue;
-        const auto& sourceID = item.source->baseImpl->id;
-        hasOfficialTopo = hasOfficialTopo || topo_vector::isOfficialSourceID(sourceID);
-        hasSatelliteBasemap = hasSatelliteBasemap ||
-                              raster_drape::isAuthoritativeTerrainRaster(item.layer.get().getID(), sourceID);
+        if (item.source) basemaps.addLayer(item.layer.get().getID(), item.source->baseImpl->id);
     }
-    return topo_vector::useSharedDrapeCohort(hasOfficialTopo, hasSatelliteBasemap);
-#else
-    (void)renderTree;
-    return false;
-#endif
+    return basemaps;
 }
+#endif
 
 // The publication hold needs an authoritative writer that can prove a drape
 // canvas complete: an official or Finnish Topo fill layer, or the Esri
@@ -830,7 +822,8 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
     // Satellite and Metal retain the fine target topology.
     const auto topoDrapeZoomPolicy = topo_vector::drapeZoomPolicy();
 #if MLN_RENDER_BACKEND_OPENGL
-    const bool useSharedTopoDrapeCohort = klattraUseSharedTopoDrapeCohort(renderTree);
+    const auto drapeBasemaps = klattraDrapeBasemaps(renderTree);
+    const bool useSharedTopoDrapeCohort = drapeBasemaps.useSharedCohort();
 #else
     const bool useSharedTopoDrapeCohort = false;
 #endif
@@ -858,8 +851,13 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
         util::coveringZoomLevel(state.getZoom(), style::SourceType::Vector, util::tileSize_I), 0, 25));
     static const uint32_t closeNearTextureSize = static_cast<uint32_t>(
         klattraEnvTargetSize("KLATTRA_DRAPE_TARGET_SIZE_NEAR", klattraDefaultDrapeNearSize));
+    // The finer close-up colour grid is for a Finnish base that colours the
+    // surface. Under satellite imagery it only carries roads and labels, so
+    // imagery keeps the plain leaf topology that Metal draws. (The aerial
+    // blend never reached this path before .104: it counted as Topo.)
+    const bool finnishBaseColoursSurface = hasRenderedFinnishBase && !drapeBasemaps.satelliteImagery;
     if (topo_vector::useFinnishCloseSurface(true,
-                                          hasRenderedFinnishBase,
+                                          finnishBaseColoursSurface,
                                           hasRenderedOfficialTopo,
                                           useSharedTopoDrapeCohort,
                                           cameraDetailZoom,
@@ -2886,6 +2884,7 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
                 " finlandDetailMinZ=" + std::to_string(finlandSurfaceDetail.minimumLeafZoom) +
                 " finlandDetailMaxZ=" + std::to_string(finlandSurfaceDetail.maximumLeafZoom) +
                 " finlandDetailRemainingSplits=" + std::to_string(finlandSurfaceDetail.remainingSplits) +
+                " topoShared=" + std::to_string(useSharedTopoDrapeCohort) +
                 " finlandExactDrapes=" + std::to_string(exactDrapeIDs.size()) +
                 " finlandPlannedAncestors=" + std::to_string(finlandPlannedAncestorBindings) +
                 " finlandRetiredCleanup=" + std::to_string(finlandRetiredCleanupRequests) +
